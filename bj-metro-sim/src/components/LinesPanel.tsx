@@ -3,9 +3,9 @@ import { useSimStore } from '../store/useSimStore';
 import { computeStationTransfers } from '../data/transferUtils';
 
 export default function LinesPanel() {
-  const [collapsed, setCollapsed] = useState(false);
   const [expandedLines, setExpandedLines] = useState<Set<string>>(new Set());
   const metroLines = useSimStore((s) => s.metroLines);
+  const linesLoading = useSimStore((s) => s.linesLoading);
   const hiddenLines = useSimStore((s) => s.hiddenLines);
   const toggleLineVisibility = useSimStore((s) => s.toggleLineVisibility);
   const activeCount = metroLines.length - hiddenLines.size;
@@ -30,47 +30,18 @@ export default function LinesPanel() {
   };
 
   return (
-    <div className="relative h-full flex">
-      {/* 折叠按钮 */}
-      <button
-        onClick={() => setCollapsed(!collapsed)}
-        className="absolute -left-4 top-1/2 -translate-y-1/2 w-4 h-10 flex items-center justify-center z-10 hover:text-[#4a9eff] transition-colors"
-        style={{
-          background: '#0a0e16',
-          border: '1px solid rgba(74, 158, 255, 0.15)',
-          borderRight: 'none',
-          color: '#4a5568',
-        }}
-      >
-        <svg width="5" height="8" viewBox="0 0 5 8" fill="none">
-          {collapsed ? (
-            <path d="M1 1L4 4L1 7" stroke="currentColor" strokeWidth="1.2" />
-          ) : (
-            <path d="M4 1L1 4L4 7" stroke="currentColor" strokeWidth="1.2" />
-          )}
-        </svg>
-      </button>
+    <div
+      className="h-full flex flex-col select-none relative"
+      style={{ background: 'linear-gradient(180deg, #0a0e16 0%, #06090e 100%)' }}
+    >
+      {/* 顶边发光 */}
+      <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#4a9eff]/20 to-transparent" />
 
-      {/* 面板主体 */}
+      {/* 面板头部 */}
       <div
-        className="h-full overflow-hidden transition-all duration-200 relative"
-        style={{
-          width: collapsed ? '0px' : '100%',
-          border: collapsed ? 'none' : '1px solid rgba(74, 158, 255, 0.1)',
-          background: 'linear-gradient(180deg, #0a0e16 0%, #06090e 100%)',
-        }}
+        className="flex items-center justify-between px-3 py-2.5 shrink-0"
+        style={{ borderBottom: '1px solid rgba(74, 158, 255, 0.08)' }}
       >
-        {/* 顶边发光 */}
-        {!collapsed && (
-          <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#4a9eff]/20 to-transparent" />
-        )}
-
-        <div className="h-full flex flex-col select-none">
-          {/* 面板头部 */}
-          <div
-            className="flex items-center justify-between px-3 py-2.5 shrink-0"
-            style={{ borderBottom: '1px solid rgba(74, 158, 255, 0.08)' }}
-          >
             <span className="text-[10px] font-medium tracking-[0.1em] uppercase text-[#6a7a90]">
               Lines
             </span>
@@ -90,6 +61,17 @@ export default function LinesPanel() {
 
           {/* 线路列表 */}
           <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ scrollbarWidth: 'thin', scrollbarColor: '#1a2240 transparent' }}>
+            {linesLoading && (
+              <div className="flex items-center justify-center py-8 text-[#4a5568] text-[10px] animate-pulse">
+                加载线路数据...
+              </div>
+            )}
+            {!linesLoading && metroLines.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-8 text-[10px] text-[#3a4a60] gap-1">
+                <span>暂无数据</span>
+                <span className="text-[9px] opacity-60">正在从 OSM 获取</span>
+              </div>
+            )}
             {metroLines.map((line) => {
               const visible = !hiddenLines.has(line.id);
               const isExpanded = expandedLines.has(line.id);
@@ -256,8 +238,6 @@ export default function LinesPanel() {
               );
             })}
           </div>
-        </div>
-      </div>
     </div>
   );
 }
