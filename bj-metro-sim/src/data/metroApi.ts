@@ -17,7 +17,13 @@ const LINE_COLORS: Record<string, string> = {
   '15': '#753BBD',  // 15号线
   '16': '#6BA539',  // 16号线 - 翠绿色
   '17': '#00B2A9',  // 17号线
+  '18': '#D22668',  // 18号线
   '19': '#D3ABE7',  // 19号线 - 淡紫色
+  '22': '#D49C3D',  // 22号线（平谷线）
+  '23': '#009B77',  // 23号线
+  '24': '#DE82B2',  // 24号线(亦庄线)
+  '25': '#EF7E21',  // 25号线(房山线)
+  '27': '#FF5A93',  // 27号线(昌平线)
   'S1': '#A45A2A',  // S1线 - 棕色
   '昌平': '#DE82B2', // 昌平线 - 粉红色
   '亦庄': '#E5007F', // 亦庄线 - 玫红色
@@ -52,15 +58,25 @@ async function fetchStationNames(): Promise<{ name: string; lat: number; lng: nu
 );
 out;`;
 
+  console.log('[StationNames] 请求 OSM 命名站点...');
   const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
   const response = await fetch(url);
-  if (!response.ok) return [];
+  if (!response.ok) {
+    console.warn('[StationNames] API 请求失败:', response.status);
+    return [];
+  }
   const data = await response.json();
   const result: { name: string; lat: number; lng: number }[] = [];
   for (const el of data.elements) {
     if (el.type === 'node' && el.tags?.name && el.lat && el.lon) {
       result.push({ name: el.tags.name, lat: el.lat, lng: el.lon });
     }
+  }
+  console.log(`[StationNames] 返回 ${result.length} 个命名站点`);
+  if (result.length > 0) {
+    console.log(`[StationNames] 示例: ${result.slice(0, 3).map((s) => s.name).join(', ')}`);
+  } else {
+    console.warn('[StationNames] 未获取到命名站点! 检查 OSM API 是否可达');
   }
   return result;
 }
@@ -75,7 +91,7 @@ function matchStationName(
   targetLat: number, targetLng: number,
   namedStations: { name: string; lat: number; lng: number }[]
 ): string {
-  const THRESHOLD = 0.003; // ~300m
+  const THRESHOLD = 0.005; // ~500m, 容错上下行不同 stop_position 偏差
   let best = '';
   let bestDist = Infinity;
   for (const ns of namedStations) {
@@ -169,6 +185,10 @@ out geom;`;
   // 并行获取带站名的车站节点
   const namedStations = await fetchStationNames();
 
+  // 诊断计数器
+  let totalStopNodes = 0;
+  let totalResolvedNames = 0;
+
   // 按线路名称分组
   const lineMap = new Map<string, {
     name: string;
@@ -219,10 +239,17 @@ out geom;`;
           );
           line.coordinates.push(...coords);
         }
-        // 提取车站（每趟都收集，确保双向车站都收录）
-        if (member.type === 'node' && member.role === 'stop' && member.lat && member.lon) {
+        // 提取车站 — role 可能是 "stop" / "stop_position" / "platform" / 空
+        const isStopNode = member.type === 'node'
+          && (member.role === 'stop' || member.role === 'stop_position' || member.role === 'platform' || !member.role)
+          && member.lat && member.lon;
+        if (isStopNode) {
+          totalStopNodes++;
           // 优先用 member.tags?.name；若为空则从独立查询的命名车站中匹配
-          const stName = member.tags?.name || matchStationName(member.lat, member.lon, namedStations);
+          const tagsName = member.tags?.name || '';
+          const matchedName = tagsName || matchStationName(member.lat, member.lon, namedStations);
+          const stName = matchedName ? normalizeStationName(matchedName) : '';
+          if (matchedName) totalResolvedNames++;
           // 避免重复车站
           if (!line.stations.some((s) => s.name === stName && s.lat === member.lat)) {
             line.stations.push({
@@ -236,6 +263,9 @@ out geom;`;
     }
     coordsCollected.add(normalizedKey);
   }
+
+  console.log(`[MetroData] 找到 ${totalStopNodes} 个 stop 节点, ${totalResolvedNames} 个成功匹配站名`);
+  console.log(`[MetroData] 命名站点库: ${namedStations.length} 个`);
 
   // 转换为最终格式
   const result: MetroLineData[] = [];
@@ -413,14 +443,14 @@ function splitIntoRouteSegments(coords: [number, number][]): [number, number][][
   return segments;
 }
 
-// 从 key 生成稳定的随机颜色
+// 从 key 生成稳定的随机颜色（深色底图用高亮度）
 function getRandomColor(key: string): string {
   let hash = 0;
   for (let i = 0; i < key.length; i++) {
     hash = key.charCodeAt(i) + ((hash << 5) - hash);
   }
   const h = Math.abs(hash) % 360;
-  return `hsl(${h}, 65%, 45%)`;
+  return `hsl(${h}, 70%, 55%)`;
 }
 
 // 检查数据是否已缓存

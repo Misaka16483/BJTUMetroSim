@@ -1,31 +1,110 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import MetroMap from './components/MetroMap';
 import LinesPanel from './components/LinesPanel';
 import { useSimStore } from './store/useSimStore';
 import { fetchBeijingMetro, getCachedMetroData, cacheMetroData } from './data/metroApi';
+import { fetchAmapBeijingMetro, getCachedAmapData, cacheAmapData } from './data/amapMetroApi';
+
+type DataSource = 'osm' | 'amap';
+
+// 默认数据源（可从 localStorage 读取持久化偏好）
+function getDefaultSource(): DataSource {
+  try {
+    const saved = localStorage.getItem('bj_metro_datasource');
+    if (saved === 'osm' || saved === 'amap') return saved;
+  } catch {}
+  return 'osm';
+}
+
+// 模块级标记, 防止 StrictMode 重挂载触发双重请求
+let globalFetching = false;
 
 export default function App() {
   const setMetroLines = useSimStore((s) => s.setMetroLines);
   const setLinesLoading = useSimStore((s) => s.setLinesLoading);
   const setLinesError = useSimStore((s) => s.setLinesError);
 
-  useEffect(() => {
-    async function loadMetroData() {
-      const cached = getCachedMetroData();
-      if (cached && cached.length > 0) {
-        setMetroLines(cached);
+  const [collapsed, setCollapsed] = useState(false);
+  const [source, setSource] = useState<DataSource>(getDefaultSource);
+
+  const switchSource = (s: DataSource) => {
+    setSource(s);
+    localStorage.setItem('bj_metro_datasource', s);
+    // 触发重新加载
+    globalFetching = false;
+    loadFromSource(s);
+  };
+
+  function loadFromSource(s: DataSource) {
+    if (globalFetching) return;
+
+    if (s === 'amap') {
+      const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
+      const hasAmapKey = amapKey && amapKey !== 'your_amap_key_here';
+      if (!hasAmapKey) {
+        setLinesError('请先在 .env 中配置 VITE_AMAP_KEY');
         return;
       }
-      setLinesLoading(true);
-      try {
-        const lines = await fetchBeijingMetro();
-        cacheMetroData(lines);
-        setMetroLines(lines);
-      } catch (err) {
-        setLinesError(`线路数据加载失败: ${err instanceof Error ? err.message : '未知错误'}`);
+
+      // 优先缓存
+      const cached = getCachedAmapData();
+      if (cached && cached.length > 0) {
+        console.log(`[MetroData] 高德缓存命中: ${cached.length} 条线路`);
+        setMetroLines(cached);
+        setLinesError(null);
+        return;
       }
+
+      globalFetching = true;
+      setLinesLoading(true);
+      fetchAmapBeijingMetro(amapKey)
+        .then((lines) => {
+          console.log(`[MetroData] 高德返回: ${lines.length} 条线路`);
+          cacheAmapData(lines);
+          setMetroLines(lines);
+          setLinesError(null);
+        })
+        .catch((err) => {
+          console.error('[MetroData] 高德加载失败:', err);
+          const msg = err instanceof Error ? err.message : '未知错误';
+          setLinesError(`高德加载失败: ${msg}`);
+        })
+        .finally(() => {
+          setLinesLoading(false);
+          globalFetching = false;
+        });
+    } else {
+      // OSM
+      const cached = getCachedMetroData();
+      if (cached && cached.length > 0) {
+        console.log(`[MetroData] OSM 缓存命中: ${cached.length} 条线路`);
+        setMetroLines(cached);
+        setLinesError(null);
+        return;
+      }
+
+      globalFetching = true;
+      setLinesLoading(true);
+      fetchBeijingMetro()
+        .then((lines) => {
+          console.log(`[MetroData] OSM 返回: ${lines.length} 条线路`);
+          cacheMetroData(lines);
+          setMetroLines(lines);
+          setLinesError(null);
+        })
+        .catch((err) => {
+          console.error('[MetroData] OSM 加载失败:', err);
+          setLinesError(`加载失败: ${err instanceof Error ? err.message : '未知错误'}`);
+        })
+        .finally(() => {
+          setLinesLoading(false);
+          globalFetching = false;
+        });
     }
-    loadMetroData();
+  }
+
+  useEffect(() => {
+    loadFromSource(source);
   }, []);
 
   return (
@@ -51,15 +130,35 @@ export default function App() {
           </span>
         </div>
 
-        <div className="flex items-center gap-4 text-[10px] font-mono text-[#3a4a60]">
-          <span>SYS <span className="text-[#00ff88]">ONLINE</span></span>
-          <span className="text-[#1a2240]">|</span>
-          <span>UTC+8</span>
+        <div className="flex items-center gap-4">
+          {/* 数据源切换 */}
+          <div className="flex items-center gap-1.5 rounded-full px-2 py-0.5" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(74,158,255,0.15)' }}>
+            <button
+              onClick={() => switchSource('osm')}
+              style={{ transition: 'all 200ms' }}
+              className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${source === 'osm' ? 'bg-[#4a9eff]/20 text-[#4a9eff]' : 'text-[#3a4a60] hover:text-[#6a7a90]'}`}
+            >
+              OSM
+            </button>
+            <button
+              onClick={() => switchSource('amap')}
+              style={{ transition: 'all 200ms' }}
+              className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${source === 'amap' ? 'bg-[#4a9eff]/20 text-[#4a9eff]' : 'text-[#3a4a60] hover:text-[#6a7a90]'}`}
+            >
+              AMAP
+            </button>
+          </div>
+
+          <div className="flex items-center gap-4 text-[10px] font-mono text-[#3a4a60]">
+            <span>SYS <span className="text-[#00ff88]">ONLINE</span></span>
+            <span className="text-[#1a2240]">|</span>
+            <span>UTC+8</span>
+          </div>
         </div>
       </header>
 
       {/* ═══ 地图 + 面板 ═══ */}
-      <div className="flex-1 flex gap-2 min-h-0">
+      <div className="flex-1 flex min-h-0 relative">
         {/* 地图 — 发光边框 + 角标 */}
         <div className="flex-1 overflow-hidden relative min-w-0 map-frame">
           {/* 四角标记 */}
@@ -70,8 +169,43 @@ export default function App() {
           <MetroMap />
         </div>
 
-        <div className="w-[260px] shrink-0">
-          <LinesPanel />
+        {/* 折叠按钮 */}
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          className="absolute top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center z-20 cursor-pointer group rounded-l-full"
+          style={{
+            right: collapsed ? '0px' : '260px',
+            background: 'linear-gradient(180deg, #0e1526 0%, #090d14 100%)',
+            border: '1px solid rgba(74, 158, 255, 0.22)',
+            borderRight: 'none',
+            color: '#556278',
+            boxShadow: collapsed
+              ? 'inset 0 1px 0 rgba(255,255,255,0.04), -2px 0 6px rgba(0,0,0,0.5)'
+              : 'inset 0 1px 0 rgba(255,255,255,0.04)',
+            transition: 'right 300ms cubic-bezier(0.4,0,0.2,1), color 200ms, border-color 200ms, box-shadow 200ms',
+          }}
+          title={collapsed ? '展开面板' : '收起面板'}
+        >
+          <svg width="5" height="8" viewBox="0 0 5 8" fill="none"
+            className="transition-all duration-200 group-hover:text-[#4a9eff] group-hover:drop-shadow-[0_0_5px_rgba(74,158,255,0.7)]"
+          >
+            {collapsed ? (
+              <path d="M4.5 1L1 4L4.5 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+            ) : (
+              <path d="M0.5 1L4 4L0.5 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+            )}
+          </svg>
+        </button>
+
+        {/* 面板容器 */}
+        <div
+          className="shrink-0 overflow-hidden"
+          style={{ width: collapsed ? '0px' : '260px', transition: 'width 300ms ease' }}
+        >
+          <div style={{ width: '260px' }} className="h-full relative">
+            <div className="absolute top-0 left-0 bottom-0 w-px bg-gradient-to-b from-transparent via-[#4a9eff]/30 to-transparent" />
+            <LinesPanel />
+          </div>
         </div>
       </div>
 
@@ -80,7 +214,7 @@ export default function App() {
         <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#4a9eff]/15 to-transparent" />
         <div className="flex items-center gap-3 text-[9px] font-mono" style={{ color: '#2a3040' }}>
           <span className="text-[#00ff88]">■</span>
-          <span>RASTER / VECTOR · OSM</span>
+          <span>{source === 'amap' ? 'RASTER / VECTOR · AMAP' : 'RASTER / VECTOR · OSM'}</span>
         </div>
         <span className="text-[9px] font-mono" style={{ color: '#1a2240' }}>v0.1.0</span>
       </footer>

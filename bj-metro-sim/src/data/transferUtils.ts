@@ -15,78 +15,85 @@ export interface StationWithTransfers {
   transfers: string[]; // 可换乘的其他线路 ID
 }
 
+/** 站名归一化：去末尾"站"字、去首尾空白 */
+function normalizeName(name: string): string {
+  return name.replace(/站$/, '').trim();
+}
+
 /**
- * 按坐标距离匹配（300m 内视为同站），
- * 返回每个站点所属线路 + 可换乘的其他线路 ID 列表
+ * 按站名分组识别换乘站（基于网络拓扑数据, 非坐标距离）
+ *
+ * 逻辑：同一站名出现在 2 条及以上不同线路 → 该站是换乘站
+ * 这反映的是 OSM 路线关系中的真实网络结构：
+ *   "建国门" 是 route 1 (1号线) 的 stop 成员，
+ *   "建国门" 也是 route 2 (2号线) 的 stop 成员 → 换乘
  */
 export function computeStationTransfers(lines: MetroLineData[]): StationWithTransfers[] {
-  // 收集所有站点
-  interface RawStation { name: string; lat: number; lng: number; lineId: string }
-  const all: RawStation[] = [];
+  // 按归一化站名分组，收集每组的线路 ID
+  const nameGroups = new Map<string, { lineIds: Set<string>; stations: { lat: number; lng: number; lineId: string }[] }>();
+
   for (const line of lines) {
     for (const s of line.stations) {
-      all.push({ name: s.name, lat: s.lat, lng: s.lng, lineId: line.id });
-    }
-  }
-
-  const THRESHOLD = 0.003; // ~300m
-  const visited = new Set<number>();
-  const groups: { indices: number[] }[] = [];
-
-  for (let i = 0; i < all.length; i++) {
-    if (visited.has(i)) continue;
-    const indices = [i];
-    for (let j = i + 1; j < all.length; j++) {
-      if (visited.has(j)) continue;
-      const dlat = all[i].lat - all[j].lat;
-      const dlng = all[i].lng - all[j].lng;
-      if (Math.sqrt(dlat * dlat + dlng * dlng) < THRESHOLD) {
-        indices.push(j);
-        visited.add(j);
+      const norm = normalizeName(s.name);
+      if (!nameGroups.has(norm)) {
+        nameGroups.set(norm, { lineIds: new Set(), stations: [] });
       }
-    }
-    visited.add(i);
-    groups.push({ indices });
-  }
-
-  // 对每个组，收纳所有线路 ID
-  const byIndexLineIds = new Map<number, string[]>();
-  for (const g of groups) {
-    const lineIds = [...new Set(g.indices.map((k) => all[k].lineId))];
-    for (const k of g.indices) {
-      byIndexLineIds.set(k, lineIds);
+      const group = nameGroups.get(norm)!;
+      group.lineIds.add(line.id);
+      group.stations.push({ lat: s.lat, lng: s.lng, lineId: line.id });
     }
   }
 
   // 输出结果
-  return all.map((s, i) => {
-    const allLines = byIndexLineIds.get(i) ?? [s.lineId];
-    return {
-      name: s.name,
-      lat: s.lat,
-      lng: s.lng,
-      lineId: s.lineId,
-      transfers: allLines.filter((id) => id !== s.lineId),
-    };
-  });
+  const result: StationWithTransfers[] = [];
+  for (const line of lines) {
+    for (const s of line.stations) {
+      const norm = normalizeName(s.name);
+      const group = nameGroups.get(norm)!;
+      const allLines = [...group.lineIds];
+      result.push({
+        name: s.name,
+        lat: s.lat,
+        lng: s.lng,
+        lineId: line.id,
+        transfers: allLines.filter((id) => id !== line.id),
+      });
+    }
+  }
+
+  return result;
 }
 
 /**
  * 返回换乘站（2条及以上线路共享的站点），用于地图标记
+ * 
+ * 按归一化站名去重，每个换乘站只返回一次，
+ * 位置取同组中第一个站点的坐标
  */
 export function computeTransferGroups(lines: MetroLineData[]): TransferStation[] {
-  const stations = computeStationTransfers(lines);
-  const map = new Map<string, TransferStation>();
+  const nameGroups = new Map<string, { name: string; lineIds: Set<string>; lat: number; lng: number }>();
 
-  for (const s of stations) {
-    const allLines = [s.lineId, ...s.transfers].sort();
-    const key = `${s.lat.toFixed(4)},${s.lng.toFixed(3)}`;
-    if (allLines.length >= 2) {
-      if (!map.has(key)) {
-        map.set(key, { name: s.name, lat: s.lat, lng: s.lng, lineIds: allLines });
+  for (const line of lines) {
+    for (const s of line.stations) {
+      const norm = normalizeName(s.name);
+      if (!nameGroups.has(norm)) {
+        nameGroups.set(norm, { name: s.name, lineIds: new Set(), lat: s.lat, lng: s.lng });
       }
+      nameGroups.get(norm)!.lineIds.add(line.id);
     }
   }
 
-  return [...map.values()];
+  const result: TransferStation[] = [];
+  for (const [, group] of nameGroups) {
+    if (group.lineIds.size >= 2) {
+      result.push({
+        name: group.name,
+        lat: group.lat,
+        lng: group.lng,
+        lineIds: [...group.lineIds].sort(),
+      });
+    }
+  }
+
+  return result;
 }

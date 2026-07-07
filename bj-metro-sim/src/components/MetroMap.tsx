@@ -1,15 +1,18 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useMemo } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import darkStyle from '../data/darkStyle';
 import MAPTILER_KEY, { MAPTILER_STYLE } from '../data/maptilerKey';
 import { useSimStore } from '../store/useSimStore';
 import type { MetroLineData } from '../data/metroApi';
-import { computeTransferGroups } from '../data/transferUtils';
 
 // 判断是否有有效的 MapTiler Key
 const hasMapTilerKey = MAPTILER_KEY && MAPTILER_KEY !== 'YOUR_KEY_HERE';
 const styleConfig = hasMapTilerKey ? MAPTILER_STYLE : darkStyle;
+
+// ── 模块级：防重复注册 & 弹窗引用 ──
+const registeredClickLayers = new Set<string>();
+let popupRef: maplibregl.Popup | null = null;
 
 export default function MetroMap() {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -56,7 +59,7 @@ export default function MetroMap() {
       // 如果线路数据已经加载，立即绘制
       const state = useSimStore.getState();
       if (state.metroLines.length > 0) {
-        renderMetroLines(map, state.metroLines, state.hiddenLines);
+        renderMetroLines(map, state.metroLines, state.hiddenLines, transferCoordSet);
       }
     });
 
@@ -73,41 +76,160 @@ export default function MetroMap() {
     if (!map || metroLines.length === 0) return;
 
     if (styleLoaded.current) {
-      renderMetroLines(map, metroLines, hiddenLines);
+      renderMetroLines(map, metroLines, hiddenLines, transferCoordSet);
     } else {
       const handler = () => {
-        renderMetroLines(map, metroLines, hiddenLines);
+        renderMetroLines(map, metroLines, hiddenLines, transferCoordSet);
       };
       map.once('style.load', handler);
     }
   }, [metroLines, hiddenLines]);
 
-  // ── 换乘站呼吸闪烁动画 ──
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || metroLines.length === 0) return;
+  // ── 换乘站坐标集（用于站点点色标记 — 按站名匹配, 基于网络拓扑） ──
+  const transferCoordSet = useMemo(() => {
+    const set = new Set<string>();
+    if (metroLines.length === 0) return set;
+    const visibleLines = metroLines.filter((l) => !hiddenLines.has(l.id));
 
-    let rafId: number;
-    const start = performance.now();
-
-    const pulse = (now: number) => {
-      const t = (now - start) % 2400; // 2.4秒一个周期
-      const phase = t / 2400;
-      const wave = (Math.sin(phase * Math.PI * 2) + 1) / 2; // 0..1 正弦波
-
-      if (map.getLayer('metro-transfer-glow')) {
-        map.setPaintProperty('metro-transfer-glow', 'circle-opacity', 0.1 + 0.4 * wave);
+    // 按归一化站名分组 → 同组 2 线以上 = 换乘
+    const nameLines = new Map<string, Set<string>>();
+    for (const l of visibleLines) {
+      for (const s of l.stations) {
+        const norm = s.name.replace(/站$/, '').trim();
+        if (!nameLines.has(norm)) nameLines.set(norm, new Set());
+        nameLines.get(norm)!.add(l.name);
       }
-      if (map.getLayer('metro-transfer-core')) {
-        map.setPaintProperty('metro-transfer-core', 'circle-opacity', 0.65 + 0.35 * wave);
+    }
+    const transferNames = new Set<string>();
+    for (const [norm, lines] of nameLines) {
+      if (lines.size >= 2) transferNames.add(norm);
+    }
+
+    // 标记所有换乘站坐标
+    for (const l of visibleLines) {
+      for (const s of l.stations) {
+        const norm = s.name.replace(/站$/, '').trim();
+        if (transferNames.has(norm)) {
+          set.add(`${s.lat.toFixed(4)},${s.lng.toFixed(4)}`);
+        }
       }
+    }
 
-      rafId = requestAnimationFrame(pulse);
-    };
+    // ── 批量验证：全量对比白点/红点 ──
+    // 按 nameLines 的 key（归一化站名）字典序排列，逐一输出
+    const sortedNames = [...nameLines.keys()].sort((a, b) => a.localeCompare(b, 'zh'));
+    const redList: string[] = [];
+    const whiteList: string[] = [];
+    const detailRows: string[] = [];
 
-    rafId = requestAnimationFrame(pulse);
-    return () => cancelAnimationFrame(rafId);
-  }, [metroLines]);
+    sortedNames.forEach((norm) => {
+      const lineSet = nameLines.get(norm)!;
+      const linesStr = [...lineSet].join(',');
+      const isTransfer = transferNames.has(norm);
+      const mark = isTransfer ? 'RED' : 'WHITE';
+      detailRows.push(`  ${norm.padEnd(8)} | ${linesStr.padEnd(30)} | ${mark}`);
+      if (isTransfer) {
+        redList.push(`${norm}[${linesStr}]`);
+      } else {
+        whiteList.push(`${norm}[${linesStr}]`);
+      }
+    });
+
+    console.log(
+      `\n%c══════════════════════════════════════════════`,
+      'color:#4a9eff'
+    );
+    console.log(
+      `%c[Transfer] 全量站点对比 (共 ${sortedNames.length} 个不同站名)`,
+      'color:#ffcc00;font-weight:bold'
+    );
+    console.log(
+      `%c  RED   = 换乘站 (${redList.length} 个)\n  WHITE = 普通站 (${whiteList.length} 个)`,
+      'color:#aaa'
+    );
+    console.log(
+      `%c  ─────────────────────────────────────────`,
+      'color:#555'
+    );
+    console.log(
+      `%c  站名      | 所属线路                       | 颜色`,
+      'color:#888'
+    );
+    console.log(
+      `%c  ─────────────────────────────────────────`,
+      'color:#555'
+    );
+    // 分批输出避免控制台截断
+    const chunkSize = 80;
+    for (let i = 0; i < detailRows.length; i += chunkSize) {
+      console.log(detailRows.slice(i, i + chunkSize).join('\n'));
+    }
+    console.log(
+      `%c  ─────────────────────────────────────────`,
+      'color:#555'
+    );
+    console.log(
+      `%c  RED 换乘站汇总 (${redList.length}):`,
+      'color:#ff5533;font-weight:bold'
+    );
+    console.log(redList.join('\n'));
+    console.log(
+      `%c  WHITE 普通站汇总 (${whiteList.length}):`,
+      'color:#ffffff'
+    );
+    console.log(whiteList.join('\n'));
+    console.log(
+      `%c══════════════════════════════════════════════\n`,
+      'color:#4a9eff'
+    );
+
+    // ── 漏检测试 ──
+    const multiLine = [...nameLines.keys()].filter((n) => nameLines.get(n)!.size >= 2);
+    const missed = multiLine.filter((n) => !transferNames.has(n));
+    if (missed.length > 0) {
+      console.warn('[Transfer] ⚠ 漏检 (同名多线但标记为 WHITE):', missed.join(', '));
+    } else {
+      console.log('%c[Transfer] ✅ 验证通过 — 所有同名多线站点均标记为 RED', 'color:#4f8');
+    }
+
+    // ── 全量线路+站点清单 ──
+    console.log(
+      `\n%c══════════════════════════════════════════════`,
+      'color:#4a9eff'
+    );
+    console.log(
+      `%c[DataDump] 全量线路站点 (${visibleLines.length} 条线路)`,
+      'color:#ffcc00;font-weight:bold'
+    );
+    for (const l of visibleLines) {
+      const color = l.color || '#888';
+      console.groupCollapsed(
+        `%c● ${l.name} %c(${l.stations.length}站) %c${l.id} %ccolor=${l.color}`,
+        `color:${color};font-weight:bold`,
+        'color:#aaa',
+        'color:#555;font-size:10px',
+        'color:#888;font-size:9px'
+      );
+      l.stations.forEach((s, i) => {
+        const norm = s.name.replace(/站$/, '').trim();
+        const isT = transferNames.has(norm);
+        console.log(
+          `%c${String(i + 1).padStart(3, ' ')} %c${s.name.padEnd(8)} %c${isT ? 'RED' : 'WHITE'} %c${s.lat.toFixed(4)},${s.lng.toFixed(4)}`,
+          'color:#666',
+          isT ? 'color:#ff5533;font-weight:bold' : 'color:#ddd',
+          isT ? 'color:#ff5533' : 'color:#888',
+          'color:#444;font-size:10px'
+        );
+      });
+      console.groupEnd();
+    }
+    console.log(
+      `%c══════════════════════════════════════════════\n`,
+      'color:#4a9eff'
+    );
+
+    return set;
+  }, [metroLines, hiddenLines]);
 
   return (
     <div className="relative w-full h-full">
@@ -132,7 +254,8 @@ export default function MetroMap() {
 function renderMetroLines(
   map: maplibregl.Map,
   lines: MetroLineData[],
-  hiddenLines: Set<string>
+  hiddenLines: Set<string>,
+  transferCoordSet: Set<string>
 ) {
   for (const line of lines) {
     const sourceId = `metro-line-${line.id}`;
@@ -166,7 +289,11 @@ function renderMetroLines(
       type: 'FeatureCollection',
       features: line.stations.map((s) => ({
         type: 'Feature',
-        properties: { name: s.name, lineId: line.id },
+        properties: {
+          name: s.name,
+          lineId: line.id,
+          isTransfer: transferCoordSet.has(`${s.lat.toFixed(4)},${s.lng.toFixed(4)}`),
+        },
         geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
       })),
     };
@@ -236,17 +363,27 @@ function renderMetroLines(
       },
     });
 
-    // ── 站点层：实心白色圆点 ──
+    // ── 站点层：实心圆点（换乘站用暖色，普通站白色 + 线路色描边） ──
     addLayerIfNotExists(map, {
       id: `${stationSourceId}-dot`,
       type: 'circle',
       source: stationSourceId,
       minzoom: 10,
       paint: {
-        'circle-color': '#ffffff',
+        'circle-color': ['case',
+          ['get', 'isTransfer'], '#ff5533',
+          '#ffffff',
+        ],
         'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 13, 6, 16, 10],
-        'circle-stroke-color': line.color,
+        'circle-stroke-color': ['case',
+          ['get', 'isTransfer'], '#ffffff',
+          line.color,
+        ],
         'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 10, 1, 13, 2, 16, 3],
+        'circle-stroke-opacity': ['case',
+          ['get', 'isTransfer'], 0.9,
+          1,
+        ],
       },
     });
 
@@ -257,6 +394,51 @@ function renderMetroLines(
     map.on('mouseleave', `${stationSourceId}-dot`, () => {
       map.getCanvas().style.cursor = '';
     });
+
+    // ── 站点点击弹窗（每层只注册一次） ──
+    if (!registeredClickLayers.has(stationSourceId)) {
+      registeredClickLayers.add(stationSourceId);
+      console.log('[Popup] registering click on:', stationSourceId);
+      map.on('click', `${stationSourceId}-dot`, (e) => {
+        console.log('[Popup] click fired, layer:', stationSourceId, 'features:', e.features?.length);
+        if (!e.features || e.features.length === 0) {
+          console.log('[Popup] no features, skipping');
+          return;
+        }
+        const { name, lineId } = e.features[0].properties as { name: string; lineId: string };
+        console.log('[Popup] props:', { name, lineId });
+        if (!name) {
+          console.log('[Popup] no name, skipping');
+          return;
+        }
+
+        const coord = (e.features[0].geometry as GeoJSON.Point).coordinates;
+        // 按站名匹配所有可见线路中的同名站点（与换乘检测逻辑一致）
+        const clickedNorm = name.replace(/站$/, '').trim();
+        const stationEntries: { line: MetroLineData; index: number }[] = [];
+        for (const l of lines) {
+          if (hiddenLines.has(l.id)) continue;
+          const idx = l.stations.findIndex((s) => s.name.replace(/站$/, '').trim() === clickedNorm);
+          if (idx !== -1) stationEntries.push({ line: l, index: idx });
+        }
+        console.log('[Popup] stationEntries:', stationEntries.map((e) => `${e.line.name}#${e.index + 1}`), 'name:', clickedNorm);
+
+        if (popupRef) popupRef.remove();
+        const html = buildPopupHtml(name, stationEntries);
+        console.log('[Popup] HTML:', html.substring(0, 200));
+        popupRef = new maplibregl.Popup({
+          closeButton: true,
+          closeOnClick: true,
+          className: 'metro-station-popup',
+          maxWidth: '240px',
+          offset: [0, -8],
+        })
+          .setLngLat(e.lngLat)
+          .setHTML(html)
+          .addTo(map);
+        console.log('[Popup] added to map');
+      });
+    }
 
     // ── 站名标签（zoom >= 10 即可见，小字体） ──
     addLayerIfNotExists(map, {
@@ -281,9 +463,6 @@ function renderMetroLines(
       },
     });
   }
-
-  // ── 换乘站：红色圆环标记（跨线路去重） ──
-  renderTransferStations(map, lines, hiddenLines);
 }
 
 // ── 辅助：安全添加图层 ──
@@ -292,75 +471,30 @@ function addLayerIfNotExists(map: maplibregl.Map, layer: maplibregl.LayerSpecifi
   map.addLayer(layer);
 }
 
-// ── 换乘站检测与渲染 — 按坐标距离匹配（300m内视为同站） ──
-function renderTransferStations(
-  map: maplibregl.Map,
-  lines: MetroLineData[],
-  hiddenLines: Set<string>
-) {
-  const sourceId = 'metro-transfer-stations';
-  const visibleLines = lines.filter((l) => !hiddenLines.has(l.id));
-  const transferGroups = computeTransferGroups(visibleLines);
-
-  // 移除旧层
-  for (const id of ['metro-transfer-glow', 'metro-transfer-ring', 'metro-transfer-core']) {
-    if (map.getLayer(id)) map.removeLayer(id);
-  }
-  if (map.getSource(sourceId)) map.removeSource(sourceId);
-  if (transferGroups.length === 0) return;
-
-  const features: GeoJSON.Feature<GeoJSON.Point>[] = transferGroups.map((g) => ({
-    type: 'Feature',
-    properties: { lineCount: g.lineIds.length },
-    geometry: { type: 'Point', coordinates: [g.lng, g.lat] },
-  }));
-
-  map.addSource(sourceId, {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features },
-  });
-
-  // 换乘站标记：尺寸匹配普通站，通过缓慢闪烁区分
-  // 第1层：柔和红色光晕（略大于圆点，用于呼吸动画）
-  map.addLayer({
-    id: 'metro-transfer-glow',
-    type: 'circle',
-    source: sourceId,
-    minzoom: 10,
-    paint: {
-      'circle-color': '#ff4444',
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 13, 10, 16, 16],
-      'circle-opacity': 0.4,
-      'circle-blur': 2,
-    },
-  });
-
-  // 第2层：白色细环
-  map.addLayer({
-    id: 'metro-transfer-ring',
-    type: 'circle',
-    source: sourceId,
-    minzoom: 10,
-    paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 13, 6, 16, 10],
-      'circle-color': 'transparent',
-      'circle-stroke-color': '#ffffff',
-      'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 10, 0.6, 13, 1, 16, 1.5],
-      'circle-stroke-opacity': 0.6,
-    },
-  });
-
-  // 第3层：红色实心圆点（大小与普通站一致）
-  map.addLayer({
-    id: 'metro-transfer-core',
-    type: 'circle',
-    source: sourceId,
-    minzoom: 10,
-    paint: {
-      'circle-color': '#ff3333',
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 13, 6, 16, 10],
-    },
-  });
+function buildPopupHtml(
+  name: string,
+  entries: { line: MetroLineData; index: number }[]
+): string {
+  const isTransfer = entries.length > 1;
+  const rows = entries
+    .map(
+      (e) => `
+      <div class="popup-row">
+        <span class="popup-row-color" style="background:${e.line.color}"></span>
+        <span class="popup-row-label">${e.line.name}</span>
+        <span class="popup-row-num">#${e.index + 1}</span>
+      </div>`
+    )
+    .join('');
+  const transferBadge = isTransfer
+    ? '<span class="popup-transfer-badge">换乘站</span>'
+    : '';
+  return `
+    <div class="station-popup">
+      <div class="popup-name">${name}${transferBadge}</div>
+      <div class="popup-rows">${rows}</div>
+    </div>
+  `;
 }
 
 // ── 辅助：移除线路相关图层和 source ──
