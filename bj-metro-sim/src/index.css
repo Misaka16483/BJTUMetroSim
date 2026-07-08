@@ -1,0 +1,180 @@
+@import "tailwindcss";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  background: #020408;
+  color: #a0b8d0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── 暗色滚动条 ── */
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(74,158,255,0.08); }
+::-webkit-scrollbar-thumb:hover { background: rgba(74,158,255,0.15); }
+
+/* ═══════════════════════════════════════
+   地图发光边框
+   ═══════════════════════════════════════ */
+.map-frame {
+  border: 1px solid rgba(74, 158, 255, 0.08);
+  box-shadow:
+    inset 0 0 60px rgba(74, 158, 255, 0.03),
+    0 0 30px rgba(0, 0, 0, 0.5);
+}
+
+/* ═══════════════════════════════════════
+   脉冲 LED 动画
+   ═══════════════════════════════════════ */
+@keyframes ledPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animated-pulse {
+  animation: ledPulse 2s ease-in-out infinite;
+  border-radius: 1px;
+}
+
+@keyframes softPing {
+  0% { transform: scale(1); opacity: 0.4; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+.animate-ping {
+  animation: softPing 2s ease-out infinite;
+}
+
+/* ═══════════════════════════════════════
+   MapLibre 自定义光标
+   ═══════════════════════════════════════ */
+.maplibregl-map {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='1.5' fill='%234a9eff' opacity='0.9'/%3E%3Ccircle cx='10' cy='10' r='5' fill='none' stroke='%234a9eff' stroke-width='0.5' opacity='0.5'/%3E%3Cline x1='10' y1='0' x2='10' y2='5.5' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='10' y1='14.5' x2='10' y2='20' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='0' y1='10' x2='5.5' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='14.5' y1='10' x2='20' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3C/svg%3E") 10 10, crosshair !important;
+}
+.maplibregl-canvas-container {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='1.5' fill='%234a9eff' opacity='0.9'/%3E%3Ccircle cx='10' cy='10' r='5' fill='none' stroke='%234a9eff' stroke-width='0.5' opacity='0.5'/%3E%3Cline x1='10' y1='0' x2='10' y2='5.5' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='10' y1='14.5' x2='10' y2='20' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='0' y1='10' x2='5.5' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='14.5' y1='10' x2='20' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3C/svg%3E") 10 10, crosshair !important;
+}
+.maplibregl-canvas-container:active,
+.maplibregl-map.maplibregl-map--dragging {
+  cursor: grabbing !important;
+}
+
+/* ═══════════════════════════════════════
+   MapLibre 导航控件
+   ═══════════════════════════════════════ */
+.maplibregl-ctrl-group {
+  background: #0a0e16 !important;
+  border: 1px solid rgba(74,158,255,0.1) !important;
+  overflow: hidden;
+}
+.maplibregl-ctrl-group button {
+  background: #0a0e16 !important;
+  border-color: rgba(74,158,255,0.06) !important;
+  width: 22px !important;
+  height: 22px !important;
+}
+.maplibregl-ctrl-group button:hover {
+  background: rgba(74,158,255,0.06) !important;
+}
+.maplibregl-ctrl-group button span {
+  filter: invert(0.5);
+}
+.maplibregl-ctrl-attrib {
+  background: rgba(2,4,8,0.9) !important;
+  color: #1a2240 !important;
+  font-size: 7px !important;
+  font-family: monospace !important;
+  padding: 2px 4px !important;
+}
+
+/* ═══════════════════════════════════════
+   站点点击弹窗
+   ═══════════════════════════════════════ */
+.metro-station-popup .maplibregl-popup-content {
+  background: #0d1424;
+  border: 1px solid rgba(74, 158, 255, 0.15);
+  border-radius: 4px;
+  color: #d0d8e8;
+  padding: 12px 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+}
+.metro-station-popup .maplibregl-popup-close-button {
+  color: #6a7a9a;
+  font-size: 14px;
+  padding: 0 4px;
+}
+.metro-station-popup .maplibregl-popup-close-button:hover {
+  color: #d0d8e8;
+}
+.metro-station-popup .maplibregl-popup-tip {
+  border-top-color: #0d1424;
+}
+.popup-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e8edf5;
+  margin-bottom: 8px;
+}
+.popup-transfer-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  background: rgba(255, 85, 51, 0.18);
+  color: #ff7755;
+  padding: 1px 6px;
+  border-radius: 2px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.popup-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.popup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.popup-row-color {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.popup-row-label {
+  flex: 1;
+  color: #b0c0d8;
+}
+.popup-row-num {
+  color: #5a6a80;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 11px;
+}
+.popup-meta {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(74,158,255,0.12);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px 10px;
+  font-size: 11px;
+}
+.popup-meta span {
+  display: block;
+  color: #5a6a80;
+  margin-bottom: 1px;
+}
+.popup-meta b {
+  color: #c7d5e8;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-weight: 500;
+}
