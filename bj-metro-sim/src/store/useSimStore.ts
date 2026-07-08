@@ -166,6 +166,8 @@ export const useSimStore = create<SimState>((set, get) => ({
   backendStatus: 'idle',
   hiddenLines: new Set<string>(),
   line9Stations: [],
+  viewMode: 'macro' as ViewMode,
+  trackMap: null as TrackMapData | null,
   punctuality: 98.5,
   avgWaitTime: 145,
   avgLoadRate: 68,

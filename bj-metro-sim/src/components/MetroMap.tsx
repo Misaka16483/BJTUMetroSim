@@ -330,15 +330,19 @@ function renderMetroLines(
       continue;
     }
 
-    // 构建 MultiLineString GeoJSON
+    // 构建 LineString GeoJSON（拼接所有坐标段为连续线）
+    const allCoords: [number, number][] = [];
+    for (const seg of line.coordinates) {
+      for (const [lat, lng] of seg) {
+        allCoords.push([lng, lat]);
+      }
+    }
     const geojson = {
       type: 'Feature',
       properties: { id: line.id, name: line.name, color: line.color },
       geometry: {
-        type: 'MultiLineString',
-        coordinates: line.coordinates.map((seg) =>
-          seg.map(([lat, lng]) => [lng, lat])
-        ),
+        type: 'LineString',
+        coordinates: allCoords,
       },
     } as maplibregl.GeoJSONSourceSpecification['data'];
 
@@ -495,7 +499,7 @@ function renderMetroLines(
         }
 
         if (popupRef) popupRef.remove();
-        const html = buildPopupHtml(name, stationEntries);
+        const html = buildPopupHtml(name, stationEntries, {});
         popupRef = new maplibregl.Popup({
           closeButton: false,
           closeOnClick: true,

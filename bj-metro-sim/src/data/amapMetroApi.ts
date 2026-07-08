@@ -135,7 +135,7 @@ function splitIntoRouteSegments(coords: [number, number][]): [number, number][][
       ((curr[0] - prev[0]) * 111000) ** 2 +
       ((curr[1] - prev[1]) * 111000 * Math.cos(prev[0] * PI / 180)) ** 2
     );
-    if (dist > 3000) {
+    if (dist > 50000) {
       if (cur.length >= 2) segments.push(cur);
       cur = [curr];
     } else {
