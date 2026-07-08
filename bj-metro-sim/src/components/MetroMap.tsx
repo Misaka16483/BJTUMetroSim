@@ -455,43 +455,32 @@ function renderMetroLines(
     // ── 站点点击弹窗（每层只注册一次） ──
     if (!registeredClickLayers.has(stationSourceId)) {
       registeredClickLayers.add(stationSourceId);
-      console.log('[Popup] registering click on:', stationSourceId);
       map.on('click', `${stationSourceId}-dot`, (e) => {
-        console.log('[Popup] click fired, layer:', stationSourceId, 'features:', e.features?.length);
-        if (!e.features || e.features.length === 0) {
-          console.log('[Popup] no features, skipping');
-          return;
-        }
+        // 从 store 实时获取最新数据，避免 stale closure
+        const { metroLines: latestLines } = useSimStore.getState();
+        if (!e.features || e.features.length === 0) return;
         const { name, lineId } = e.features[0].properties as { name: string; lineId: string };
-        console.log('[Popup] props:', { name, lineId });
-        if (!name) {
-          console.log('[Popup] no name, skipping');
-          return;
-        }
+        if (!name) return;
 
-        const coord = (e.features[0].geometry as GeoJSON.Point).coordinates;
-        // 使用 computeStationTransfers 统一换乘检测逻辑
-        const allTransfers = computeStationTransfers(lines);
+        const allTransfers = computeStationTransfers(latestLines);
         const clickedNorm = name.replace(/站$/, '').trim();
         const stationEntries: { line: MetroLineData; index: number }[] = [];
 
-        // 找出该站点在哪些线路出现（显示所有换乘线路, 不受可见性影响）
         for (const st of allTransfers) {
           const stNorm = st.name.replace(/站$/, '').trim();
           if (stNorm !== clickedNorm) continue;
-          const l = lines.find((ln) => ln.id === st.lineId);
+          const l = latestLines.find((ln) => ln.id === st.lineId);
           if (!l) continue;
           const idx = l.stations.findIndex(
             (s) => s.name.replace(/站$/, '').trim() === clickedNorm
           );
-          if (idx !== -1 && !stationEntries.some((e) => e.line.id === l.id)) {
+          if (idx !== -1 && !stationEntries.some((en) => en.line.id === l.id)) {
             stationEntries.push({ line: l, index: idx });
           }
         }
 
-        // 兜底：至少包含当前线路
         if (stationEntries.length === 0) {
-          const curLine = lines.find((l) => l.id === lineId);
+          const curLine = latestLines.find((l) => l.id === lineId);
           if (curLine) {
             const idx = curLine.stations.findIndex(
               (s) => s.name.replace(/站$/, '').trim() === clickedNorm
@@ -499,11 +488,9 @@ function renderMetroLines(
             if (idx !== -1) stationEntries.push({ line: curLine, index: idx });
           }
         }
-        console.log('[Popup] stationEntries:', stationEntries.map((e) => `${e.line.name}#${e.index + 1}`), 'name:', clickedNorm);
 
         if (popupRef) popupRef.remove();
         const html = buildPopupHtml(name, stationEntries);
-        console.log('[Popup] HTML:', html.substring(0, 200));
         popupRef = new maplibregl.Popup({
           closeButton: false,
           closeOnClick: true,
@@ -514,7 +501,6 @@ function renderMetroLines(
           .setLngLat(e.lngLat)
           .setHTML(html)
           .addTo(map);
-        console.log('[Popup] added to map');
       });
     }
 
