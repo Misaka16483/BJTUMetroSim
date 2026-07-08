@@ -1,164 +1,218 @@
 @import "tailwindcss";
 @import "maplibre-gl/dist/maplibre-gl.css";
 
-*, *::before, *::after {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* ── iOS 暗色调 ── */
+:root {
+  --bg: #000000;
+  --glass: rgba(28, 28, 30, 0.72);
+  --glass-solid: #1c1c1e;
+  --elevated: rgba(44, 44, 46, 0.76);
+  --elevated-solid: #2c2c2e;
+  --text: #f5f5f7;
+  --text-dim: #98989d;
+  --text-muted: #636366;
+  --rule: rgba(84, 84, 88, 0.48);
+  --cyan: #64d2ff;
+  --green: #30d158;
+  --amber: #ff9f0a;
+  --red: #ff453a;
+  --l9: #a8d64a;
+  --radius: 14px;
+  --radius-sm: 10px;
+  --radius-xs: 8px;
+  --shadow-xs: 0 1px 2px rgba(0,0,0,0.6);
+  --shadow-sm: 0 2px 8px rgba(0,0,0,0.5);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.55);
 }
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body, #root {
   height: 100%;
-  background: #020408;
-  color: #a0b8d0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: -apple-system, 'Inter', 'SF Pro Display', 'SF Pro Text', BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
 }
 
-/* ── 暗色滚动条 ── */
-::-webkit-scrollbar { width: 3px; height: 3px; }
+/* ── scrollbar ── */
+::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(74,158,255,0.08); }
-::-webkit-scrollbar-thumb:hover { background: rgba(74,158,255,0.15); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
 
-/* ═══════════════════════════════════════
-   地图发光边框
-   ═══════════════════════════════════════ */
+/* ── map frame ── */
 .map-frame {
-  border: 1px solid rgba(74, 158, 255, 0.08);
-  box-shadow:
-    inset 0 0 60px rgba(74, 158, 255, 0.03),
-    0 0 30px rgba(0, 0, 0, 0.5);
-}
-
-/* ═══════════════════════════════════════
-   脉冲 LED 动画
-   ═══════════════════════════════════════ */
-@keyframes ledPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-.animated-pulse {
-  animation: ledPulse 2s ease-in-out infinite;
-  border-radius: 1px;
-}
-
-@keyframes softPing {
-  0% { transform: scale(1); opacity: 0.4; }
-  100% { transform: scale(2.5); opacity: 0; }
-}
-.animate-ping {
-  animation: softPing 2s ease-out infinite;
-}
-
-/* ═══════════════════════════════════════
-   MapLibre 自定义光标
-   ═══════════════════════════════════════ */
-.maplibregl-map {
-  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='1.5' fill='%234a9eff' opacity='0.9'/%3E%3Ccircle cx='10' cy='10' r='5' fill='none' stroke='%234a9eff' stroke-width='0.5' opacity='0.5'/%3E%3Cline x1='10' y1='0' x2='10' y2='5.5' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='10' y1='14.5' x2='10' y2='20' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='0' y1='10' x2='5.5' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='14.5' y1='10' x2='20' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3C/svg%3E") 10 10, crosshair !important;
-}
-.maplibregl-canvas-container {
-  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='1.5' fill='%234a9eff' opacity='0.9'/%3E%3Ccircle cx='10' cy='10' r='5' fill='none' stroke='%234a9eff' stroke-width='0.5' opacity='0.5'/%3E%3Cline x1='10' y1='0' x2='10' y2='5.5' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='10' y1='14.5' x2='10' y2='20' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='0' y1='10' x2='5.5' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3Cline x1='14.5' y1='10' x2='20' y2='10' stroke='%234a9eff' stroke-width='0.6' opacity='0.6'/%3E%3C/svg%3E") 10 10, crosshair !important;
-}
-.maplibregl-canvas-container:active,
-.maplibregl-map.maplibregl-map--dragging {
-  cursor: grabbing !important;
-}
-
-/* ═══════════════════════════════════════
-   MapLibre 导航控件
-   ═══════════════════════════════════════ */
-.maplibregl-ctrl-group {
-  background: #0a0e16 !important;
-  border: 1px solid rgba(74,158,255,0.1) !important;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius);
   overflow: hidden;
+  background: var(--bg);
+}
+
+/* ── glass panel ── */
+.glass {
+  background: var(--glass);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius);
+}
+.glass-elevated {
+  background: var(--elevated);
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: var(--radius);
+}
+
+/* ── LED status dot ── */
+.led { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.led-online { background: var(--green); box-shadow: 0 0 8px rgba(48,209,88,0.4); }
+.led-active { background: var(--cyan); box-shadow: 0 0 8px rgba(100,210,255,0.4); }
+
+/* ── board numbers (LED monospace) ── */
+.board-num {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+  font-feature-settings: "tnum";
+  letter-spacing: 0.02em;
+}
+.board-xl {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+  font-feature-settings: "tnum";
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* ── label: SF-style ── */
+.label {
+  font-size: 10px;
+  font-weight: 590;
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+}
+
+/* ── smooth transitions ── */
+* {
+  transition-duration: 240ms;
+  transition-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+button, .btn, [role="button"], .clickable {
+  transition: all 180ms cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+/* ── iOS press: subtle scale ── */
+@supports (transform: scale(0.97)) {
+  button:active, .pressed:active {
+    transform: scale(0.97);
+    transition: transform 100ms cubic-bezier(0.25, 0.1, 0.25, 1);
+  }
+}
+
+/* ── glass divider ── */
+.glass-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent 5%, rgba(255,255,255,0.06) 20%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.06) 80%, transparent 95%);
+}
+
+/* ── card (inside glass) ── */
+.card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: var(--radius-xs);
+}
+
+/* ── tag / chip ── */
+.chip {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+
+/* ── MapLibre overrides ── */
+.maplibregl-map { cursor: crosshair !important; border-radius: var(--radius); }
+.maplibregl-ctrl-group {
+  background: var(--glass) !important;
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid rgba(255,255,255,0.06) !important;
+  border-radius: var(--radius-sm) !important;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
 }
 .maplibregl-ctrl-group button {
-  background: #0a0e16 !important;
-  border-color: rgba(74,158,255,0.06) !important;
-  width: 22px !important;
-  height: 22px !important;
+  background: transparent !important;
+  border-color: rgba(255,255,255,0.04) !important;
+  width: 24px !important; height: 24px !important;
 }
-.maplibregl-ctrl-group button:hover {
-  background: rgba(74,158,255,0.06) !important;
-}
-.maplibregl-ctrl-group button span {
-  filter: invert(0.5);
-}
+.maplibregl-ctrl-group button:hover { background: rgba(255,255,255,0.06) !important; }
+.maplibregl-ctrl-group button span { filter: invert(0.55); }
 .maplibregl-ctrl-attrib {
-  background: rgba(2,4,8,0.9) !important;
-  color: #1a2240 !important;
+  background: var(--glass) !important;
+  color: var(--text-muted) !important;
   font-size: 7px !important;
   font-family: monospace !important;
-  padding: 2px 4px !important;
+  padding: 3px 6px !important;
+  border-radius: 5px !important;
+  backdrop-filter: blur(20px);
 }
 
-/* ═══════════════════════════════════════
-   站点点击弹窗
-   ═══════════════════════════════════════ */
+/* ── popup ── */
+.metro-station-popup { transition: none !important; }
+@keyframes popup-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.95); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
 .metro-station-popup .maplibregl-popup-content {
-  background: #0d1424;
-  border: 1px solid rgba(74, 158, 255, 0.15);
-  border-radius: 4px;
-  color: #d0d8e8;
-  padding: 12px 16px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+  animation: popup-in 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  background: var(--glass);
+  backdrop-filter: blur(32px);
+  -webkit-backdrop-filter: blur(32px);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius) var(--radius) var(--radius) 4px;
+  color: var(--text);
+  padding: 14px 18px;
+  box-shadow: var(--shadow-md);
+  position: relative;
+  overflow: visible;
 }
-.metro-station-popup .maplibregl-popup-close-button {
-  color: #6a7a9a;
-  font-size: 14px;
-  padding: 0 4px;
-}
-.metro-station-popup .maplibregl-popup-close-button:hover {
-  color: #d0d8e8;
-}
+/* hide default tip, use custom one */
 .metro-station-popup .maplibregl-popup-tip {
-  border-top-color: #0d1424;
+  display: none !important;
 }
-.popup-name {
-  font-size: 15px;
-  font-weight: 600;
-  color: #e8edf5;
-  margin-bottom: 8px;
+/* custom droplet tip */
+.metro-station-popup .maplibregl-popup-content::after {
+  content: '';
+  position: absolute;
+  bottom: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 16px;
+  height: 10px;
+  background: var(--glass);
+  backdrop-filter: blur(32px);
+  -webkit-backdrop-filter: blur(32px);
+  border-left: 1px solid rgba(255,255,255,0.08);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  border-right: 1px solid transparent;
+  border-top: 1px solid transparent;
+  border-radius: 0 0 4px 4px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  box-shadow: 2px 2px 6px rgba(0,0,0,0.15);
 }
+.popup-name { font-size: 15px; font-weight: 590; color: var(--text); margin-bottom: 6px; }
 .popup-transfer-badge {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 500;
-  background: rgba(255, 85, 51, 0.18);
-  color: #ff7755;
-  padding: 1px 6px;
-  border-radius: 2px;
-  margin-left: 6px;
-  vertical-align: middle;
+  display: inline-block; font-size: 9px; font-weight: 500;
+  background: rgba(255,69,58,0.1); color: var(--red); padding: 2px 6px; border-radius: 4px; margin-left: 5px;
 }
-.popup-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.popup-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-.popup-row-color {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.popup-row-label {
-  flex: 1;
-  color: #b0c0d8;
-}
-.popup-row-num {
-  color: #5a6a80;
-  font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 11px;
-}
+.popup-rows { display: flex; flex-direction: column; gap: 3px; }
+.popup-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.popup-row-color { width: 8px; height: 8px; border-radius: 3px; flex-shrink: 0; }
+.popup-row-label { flex: 1; color: var(--text-dim); }
+.popup-row-num { color: var(--text-muted); font-family: monospace; font-size: 11px; }
 .popup-meta {
   margin-top: 10px;
   padding-top: 8px;

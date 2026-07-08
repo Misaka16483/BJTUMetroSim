@@ -1,16 +1,10 @@
-import { Button, Slider, Select, Tag } from 'antd';
-import {
-  PlayCircleOutlined,
-  PauseCircleOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons';
-import { useSimStore } from '../store/useSimStore';
 import { useEffect } from 'react';
+import { useSimStore } from '../store/useSimStore';
 
 export default function ControlPanel() {
   const {
     isRunning, toggleRunning, speed, setSpeed,
-    simTime, dayType, setDayType, tick,
+    simTime, showOnlyLines, showAllLines, tick,
   } = useSimStore();
 
   useEffect(() => {
@@ -19,95 +13,85 @@ export default function ControlPanel() {
     return () => clearInterval(interval);
   }, [isRunning, tick]);
 
-  const dayOptions = [
-    { value: 'weekday', label: '周一至周四' },
-    { value: 'friday', label: '周五' },
-    { value: 'saturday', label: '周六' },
-    { value: 'sunday', label: '周日' },
-  ];
-
-  const dayColors: Record<string, string> = {
-    weekday: '#58a6ff',
-    friday: '#f0883e',
-    saturday: '#3fb950',
-    sunday: '#a371f7',
-  };
-
-  const dayLabel = dayOptions.find((d) => d.value === dayType)?.label || '';
-
   return (
-    <div className="p-4 rounded-lg border border-[#21262d] bg-[#161b22]">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-[#c9d1d9] uppercase tracking-wider">
-          仿真控制
-        </h3>
-        <Tag color={dayColors[dayType]} className="border-0 text-xs">
-          {dayLabel}
-        </Tag>
-      </div>
+    <div className="glass shrink-0 flex items-center gap-4 px-5" style={{ height: 50 }}>
+      <button
+        onClick={toggleRunning}
+        className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
+        style={{
+          padding: '6px 14px',
+          background: isRunning ? 'rgba(255,69,58,0.08)' : 'rgba(48,209,88,0.06)',
+          border: isRunning ? '1px solid rgba(255,69,58,0.2)' : '1px solid rgba(48,209,88,0.2)',
+          color: isRunning ? 'var(--red)' : 'var(--green)',
+        }}
+      >
+        {isRunning ? (
+          <svg width="8" height="8" viewBox="0 0 8 8">
+            <rect x="1" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+            <rect x="4.5" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+          </svg>
+        ) : (
+          <svg width="8" height="8" viewBox="0 0 8 8">
+            <polygon points="2,1 7,4 2,7" fill="currentColor" />
+          </svg>
+        )}
+        {isRunning ? 'STOP' : 'START'}
+      </button>
 
-      {/* 仿真时间 */}
-      <div className="mb-5 text-center">
-        <div className="text-4xl font-mono font-bold text-[#58a6ff] tracking-wider">
+      <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.06)' }} />
+
+      <div className="flex items-baseline gap-2">
+        <span
+          className="board-xl text-[26px] leading-none tabular-nums"
+          style={{ color: 'var(--text)' }}
+        >
           {simTime}
-        </div>
-        <div className="text-xs text-[#484f58] mt-1 uppercase tracking-widest">
-          Simulation Clock
-        </div>
+        </span>
+        <span className="label" style={{ color: 'var(--text-muted)' }}>SIM TIME</span>
       </div>
 
-      {/* 控制按钮 */}
-      <div className="flex gap-2 justify-center mb-5">
-        <Button
-          type={isRunning ? 'default' : 'primary'}
-          icon={isRunning ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-          onClick={toggleRunning}
-          size="large"
-          className={isRunning ? '!bg-[#2d1515] !border-[#ff4444]/40 !text-[#ff6b6b] hover:!bg-[#3d1a1a]' : '!bg-[#1a3a5c] !border-[#58a6ff]/40 !text-[#58a6ff] hover:!bg-[#1e3e6e]'}
-        >
-          {isRunning ? '暂停' : '开始仿真'}
-        </Button>
-        <Button
-          icon={<ReloadOutlined />}
-          onClick={() => useSimStore.getState().showAllLines()}
-          size="large"
-          className="!bg-[#21262d] !border-[#30363d] !text-[#8b949e] hover:!text-[#c9d1d9]"
-        >
-          重置
-        </Button>
+      <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.06)' }} />
+
+      <div className="flex items-center gap-1">
+        <span className="label" style={{ color: 'var(--text-muted)' }}>SPD</span>
+        {[1, 2, 5, 10].map((x) => (
+          <button
+            key={x}
+            onClick={() => setSpeed(x)}
+            className="w-8 h-7 flex items-center justify-center cursor-pointer board-num text-[10px] rounded-md"
+            style={{
+              background: speed === x ? 'rgba(100,210,255,0.08)' : 'transparent',
+              border: speed === x ? '1px solid rgba(100,210,255,0.18)' : '1px solid transparent',
+              color: speed === x ? 'var(--cyan)' : 'var(--text-muted)',
+            }}
+          >
+            {x}x
+          </button>
+        ))}
       </div>
 
-      {/* 速度 */}
-      <div className="mb-4">
-        <div className="text-xs text-[#8b949e] mb-1 uppercase tracking-wider">
-          Simulation Speed
-        </div>
-        <Slider
-          min={1}
-          max={10}
-          value={speed}
-          onChange={setSpeed}
-          marks={{
-            1: <span className="text-[#484f58] text-xs">1x</span>,
-            5: <span className="text-[#484f58] text-xs">5x</span>,
-            10: <span className="text-[#484f58] text-xs">10x</span>,
+      <div className="flex-1" />
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={showAllLines}
+          className="label rounded-md cursor-pointer"
+          style={{ padding: '5px 10px', color: 'var(--text-muted)', border: '1px solid rgba(255,255,255,0.06)' }}
+        >
+          全览
+        </button>
+        <button
+          onClick={() => showOnlyLines(['9'])}
+          className="label rounded-md cursor-pointer"
+          style={{
+            color: 'var(--l9)',
+            border: '1px solid rgba(168,214,74,0.18)',
+            background: 'rgba(168,214,74,0.06)',
+            padding: '5px 10px',
           }}
-          className="mb-0"
-        />
-      </div>
-
-      {/* 日型 */}
-      <div>
-        <div className="text-xs text-[#8b949e] mb-1 uppercase tracking-wider">
-          Day Type
-        </div>
-        <Select
-          value={dayType}
-          onChange={setDayType}
-          options={dayOptions}
-          className="w-full"
-          size="small"
-        />
+        >
+          9号线
+        </button>
       </div>
     </div>
   );
