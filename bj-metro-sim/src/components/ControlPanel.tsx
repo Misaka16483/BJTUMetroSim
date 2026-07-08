@@ -5,38 +5,133 @@ export default function ControlPanel() {
   const {
     isRunning, toggleRunning, speed, setSpeed,
     simTime, showOnlyLines, showAllLines, tick,
+    backendStatus, engineClockState,
+    startBackendSim, pauseBackendSim, resumeBackendSim, stopBackendSim,
   } = useSimStore();
 
   useEffect(() => {
+    // 后端模式下不跑本地 tick（由 App 层轮询后端）
+    if (backendStatus === 'connected') return;
     if (!isRunning) return;
     const interval = setInterval(tick, 100);
     return () => clearInterval(interval);
-  }, [isRunning, tick]);
+  }, [isRunning, tick, backendStatus]);
+
+  const isBackend = backendStatus === 'connected';
+  const backendState = engineClockState;
+  const stateColor = backendState === 'RUNNING' ? 'var(--green)'
+    : backendState === 'PAUSED' ? 'var(--amber)'
+    : 'var(--text-muted)';
 
   return (
     <div className="glass shrink-0 flex items-center gap-4 px-5" style={{ height: 50 }}>
-      <button
-        onClick={toggleRunning}
-        className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
-        style={{
-          padding: '6px 14px',
-          background: isRunning ? 'rgba(255,69,58,0.08)' : 'rgba(48,209,88,0.06)',
-          border: isRunning ? '1px solid rgba(255,69,58,0.2)' : '1px solid rgba(48,209,88,0.2)',
-          color: isRunning ? 'var(--red)' : 'var(--green)',
-        }}
-      >
-        {isRunning ? (
-          <svg width="8" height="8" viewBox="0 0 8 8">
-            <rect x="1" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
-            <rect x="4.5" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
-          </svg>
-        ) : (
-          <svg width="8" height="8" viewBox="0 0 8 8">
-            <polygon points="2,1 7,4 2,7" fill="currentColor" />
-          </svg>
-        )}
-        {isRunning ? 'STOP' : 'START'}
-      </button>
+      {/* ─── 控制按钮 ─── */}
+      {isBackend ? (
+        <div className="flex items-center gap-1.5">
+          {backendState !== 'RUNNING' && backendState !== 'PAUSED' ? (
+            <button
+              onClick={() => { startBackendSim(); }}
+              className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
+              style={{
+                padding: '6px 14px',
+                background: 'rgba(48,209,88,0.06)',
+                border: '1px solid rgba(48,209,88,0.2)',
+                color: 'var(--green)',
+              }}
+            >
+              <svg width="8" height="8" viewBox="0 0 8 8">
+                <polygon points="2,1 7,4 2,7" fill="currentColor" />
+              </svg>
+              START
+            </button>
+          ) : (
+            <>
+              {backendState === 'RUNNING' ? (
+                <button
+                  onClick={() => { pauseBackendSim(); }}
+                  className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
+                  style={{
+                    padding: '6px 12px',
+                    background: 'rgba(255,204,0,0.06)',
+                    border: '1px solid rgba(255,204,0,0.2)',
+                    color: 'var(--amber)',
+                  }}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8">
+                    <rect x="1" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+                    <rect x="4.5" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+                  </svg>
+                  PAUSE
+                </button>
+              ) : (
+                <button
+                  onClick={() => { resumeBackendSim(); }}
+                  className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
+                  style={{
+                    padding: '6px 12px',
+                    background: 'rgba(48,209,88,0.06)',
+                    border: '1px solid rgba(48,209,88,0.2)',
+                    color: 'var(--green)',
+                  }}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8">
+                    <polygon points="2,1 7,4 2,7" fill="currentColor" />
+                  </svg>
+                  RESUME
+                </button>
+              )}
+              <button
+                onClick={() => { stopBackendSim(); }}
+                className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
+                style={{
+                  padding: '6px 14px',
+                  background: 'rgba(255,69,58,0.06)',
+                  border: '1px solid rgba(255,69,58,0.2)',
+                  color: 'var(--red)',
+                }}
+              >
+                <svg width="8" height="8" viewBox="0 0 8 8">
+                  <rect x="1" y="1" width="6" height="6" rx="0.5" fill="currentColor" />
+                </svg>
+                STOP
+              </button>
+            </>
+          )}
+          {/* 后端状态指示 */}
+          <span
+            className="chip text-[9px]"
+            style={{
+              color: stateColor,
+              border: '1px solid rgba(255,255,255,0.06)',
+            }}
+          >
+            {backendState}
+          </span>
+        </div>
+      ) : (
+        <button
+          onClick={toggleRunning}
+          className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
+          style={{
+            padding: '6px 14px',
+            background: isRunning ? 'rgba(255,69,58,0.08)' : 'rgba(48,209,88,0.06)',
+            border: isRunning ? '1px solid rgba(255,69,58,0.2)' : '1px solid rgba(48,209,88,0.2)',
+            color: isRunning ? 'var(--red)' : 'var(--green)',
+          }}
+        >
+          {isRunning ? (
+            <svg width="8" height="8" viewBox="0 0 8 8">
+              <rect x="1" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+              <rect x="4.5" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+            </svg>
+          ) : (
+            <svg width="8" height="8" viewBox="0 0 8 8">
+              <polygon points="2,1 7,4 2,7" fill="currentColor" />
+            </svg>
+          )}
+          {isRunning ? 'STOP' : 'START'}
+        </button>
+      )}
 
       <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.06)' }} />
 

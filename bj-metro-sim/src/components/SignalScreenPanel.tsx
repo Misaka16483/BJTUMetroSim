@@ -74,6 +74,7 @@ function SpeedGauge({ speedKmh, limitKmh, targetKmh }: { speedKmh: number; limit
         {/* 刻度 */}
         {[...Array(19)].map((_, i) => {
           const val = i * 5;
+          if (val === 80) return null;
           const isMajor = val % 10 === 0;
           const a = START_ANGLE + (val / MAX) * SWEEP;
           const inner = arcPoint(a, isMajor ? R - 16 : R - 10);

@@ -7,7 +7,7 @@ import SignalScreenPanel from './components/SignalScreenPanel';
 import MicroTrackView from './components/MicroTrackView';
 import { useSimStore } from './store/useSimStore';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
-import { fetchBackendBundle } from './data/backendApi';
+import { fetchBackendBundle, fetchSimState } from './data/backendApi';
 
 let globalFetching = false;
 const PANEL_W = 320;
@@ -25,6 +25,9 @@ export default function App() {
   const showOnlyLines = useSimStore((s) => s.showOnlyLines);
   const metroLines = useSimStore((s) => s.metroLines);
   const linesLoading = useSimStore((s) => s.linesLoading);
+  const updateFromBackend = useSimStore((s) => s.updateFromBackend);
+  const engineClockState = useSimStore((s) => s.engineClockState);
+  const isRunning = useSimStore((s) => s.isRunning);
   const [collapsed, setCollapsed] = useState(false);
 
   function loadAmapData(reason: string) {
@@ -86,17 +89,16 @@ export default function App() {
         setTrackMap(nextTrackMap);
         setLinesError(null);
         setBackendStatus('connected');
+        setLinesLoading(false);
+        globalFetching = false;
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn('[App] 后端不可用, AMAP 兜底:', msg);
-        globalFetching = false;
         setBackendStatus('fallback');
-        loadAmapData(`后端不可用: ${msg}`);
-      })
-      .finally(() => {
         setLinesLoading(false);
         globalFetching = false;
+        loadAmapData(`后端不可用: ${msg}`);
       });
   }, []);
 
@@ -105,6 +107,22 @@ export default function App() {
     if (metroLines.length === 0) return;
     requestAnimationFrame(() => showOnlyLines(['9']));
   }, [metroLines.length]);
+
+  // 后端仿真引擎轮询 (200ms — 比后端 tick 快，确保控制响应及时、列车位移平滑)
+  useEffect(() => {
+    if (backendStatus !== 'connected') return;
+    let active = true;
+    const POLL_MS = 200;
+    const poll = () => {
+      if (!active) return;
+      fetchSimState()
+        .then((data) => { if (active) updateFromBackend(data); })
+        .catch(() => { /* 静默忽略轮询错误 */ })
+        .finally(() => { if (active) setTimeout(poll, POLL_MS); });
+    };
+    poll();
+    return () => { active = false; };
+  }, [backendStatus, updateFromBackend]);
 
   return (
     <div
@@ -193,6 +211,14 @@ export default function App() {
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
           <span>UTC+8</span>
           {linesLoading && <span style={{ color: 'var(--amber)' }}>LOADING</span>}
+          {backendStatus === 'connected' && (
+            <>
+              <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
+              <span style={{ color: engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)' }}>
+                {engineClockState}
+              </span>
+            </>
+          )}
         </div>
       </header>
 
@@ -266,6 +292,14 @@ export default function App() {
             : backendStatus === 'fallback'
               ? 'MAP: AMAP'
               : 'API OFFLINE'}
+          {backendStatus === 'connected' && (
+            <>
+              <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
+              <span style={{ color: engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)' }}>
+                SIM: {engineClockState}
+              </span>
+            </>
+          )}
         </div>
         <span style={{ color: 'rgba(255,255,255,0.04)' }}>v0.2.0</span>
       </footer>

@@ -79,6 +79,14 @@ async function getJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function postJson(url: string): Promise<unknown> {
+  const response = await fetch(url, { method: 'POST' });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export function fetchBackendLine9(): Promise<MetroLineData> {
   return getJson<MetroLineData>('/api/lines/9/macro');
 }
@@ -96,5 +104,75 @@ export async function fetchBackendBundle(): Promise<{
     fetchBackendTrackMap(),
   ]);
   return { line, trackMap };
+}
+
+// ═══════════════════════════════════════════════════════════
+//  仿真引擎 API
+// ═══════════════════════════════════════════════════════════
+
+export interface SimTrainState {
+  trainId: string;
+  lineId: string;
+  stationIndex: number;
+  direction: 'UP' | 'DOWN';
+  phase: string;
+  speedMps: number;
+  permittedSpeedMps: number;
+  distanceToNextM: number;
+  targetDistanceM: number;
+  dwellRemainingSec: number;
+  onboardPax: number;
+  capacityPax: number;
+  loadFactor: number;
+  currentStation: string;
+  nextStation: string;
+  segmentProgress: number;
+}
+
+export interface SimStationInfo {
+  name: string;
+  code: string;
+}
+
+export interface SimKpi {
+  activeTrains: number;
+  totalTrains: number;
+  avgSpeed: number;
+  totalOnboardPax: number;
+}
+
+export interface SimClock {
+  state: string;
+  simTime: string;
+  tick: number;
+  simTimeMs: number;
+}
+
+export interface SimStateResponse {
+  clock: SimClock;
+  trains: SimTrainState[];
+  stations: SimStationInfo[];
+  kpi: SimKpi;
+  source: string;
+}
+
+export function fetchSimState(): Promise<SimStateResponse> {
+  return getJson<SimStateResponse>('/api/sim/state');
+}
+
+export function simStart(): Promise<unknown> {
+  return postJson('/api/sim/start');
+}
+
+export function simPause(): Promise<unknown> {
+  return postJson('/api/sim/pause');
+}
+
+export function simResume(): Promise<unknown> {
+  return postJson('/api/sim/resume');
+}
+
+export function simStop(): Promise<unknown> {
+  return postJson('/api/sim/stop');
 }
 

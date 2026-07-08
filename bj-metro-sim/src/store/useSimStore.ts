@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
-import type { TrackMapData } from '../data/backendApi';
+import type { TrackMapData, SimStateResponse } from '../data/backendApi';
+import { fetchSimState, simStart, simPause, simResume, simStop } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro';
 
@@ -62,6 +63,14 @@ interface SimState {
   selectTrain: (id: string | null) => void;
   tick: () => void;
 
+  // 后端仿真引擎
+  engineClockState: string;
+  updateFromBackend: (data: SimStateResponse) => void;
+  startBackendSim: () => Promise<void>;
+  pauseBackendSim: () => Promise<void>;
+  resumeBackendSim: () => Promise<void>;
+  stopBackendSim: () => Promise<void>;
+
   // 线路管理
   setMetroLines: (lines: MetroLineData[]) => void;
   setLinesLoading: (loading: boolean) => void;
@@ -82,6 +91,38 @@ let currentRunDirection: 'UP' | 'DOWN' = 'DOWN';
 // ── 9号线 polyline 缓存（用于列车地图位置插值）──
 let cachedPolyline: [number, number][] | null = null;
 let cachedStationPolyIdx: number[] | null = null; // stationIndex → polylineIndex
+let cachedStationDistances: number[] | null = null; // 各站累计里程 (m)，来自 line 数据
+
+/** 从线路数据构建站间距缓存 */
+function buildDistanceCache(line9: MetroLineData) {
+  const mileages = line9.stations.map((s) => s.mileageM ?? 0);
+  // 如果有有效里程数据（非零且递增），直接使用
+  const hasMileage = mileages.length > 1 && mileages[0] < mileages[mileages.length - 1];
+  if (hasMileage) {
+    cachedStationDistances = mileages;
+    return;
+  }
+  // 否则用 polyline 估算：每个站点在 polyline 上的累计距离
+  if (!cachedPolyline || !cachedStationPolyIdx) return;
+  const dists: number[] = [0];
+  for (let i = 1; i < cachedStationPolyIdx.length; i++) {
+    let d = 0;
+    const from = cachedStationPolyIdx[i - 1];
+    const to = cachedStationPolyIdx[i];
+    for (let j = from + 1; j <= to; j++) {
+      const dx = cachedPolyline[j][0] - cachedPolyline[j - 1][0];
+      const dy = cachedPolyline[j][1] - cachedPolyline[j - 1][1];
+      d += Math.sqrt(dx * dx + dy * dy) * 111000; // 度→米近似
+    }
+    dists.push(dists[i - 1] + d);
+  }
+  cachedStationDistances = dists;
+}
+
+function getSegmentDist(idx: number): number {
+  if (!cachedStationDistances || idx < 0 || idx + 1 >= cachedStationDistances.length) return 1347;
+  return Math.round(cachedStationDistances[idx + 1] - cachedStationDistances[idx]);
+}
 
 /** 构建 polyline 缓存：扁平化坐标 + 每个站点在 polyline 上的最近点索引 */
 function buildPolylineCache(line9: MetroLineData) {
@@ -190,9 +231,16 @@ export const useSimStore = create<SimState>((set, get) => ({
   trainLat: null,
   trainLng: null,
   segmentProgress: 0,
+  engineClockState: 'IDLE',
 
   toggleRunning: () => {
-    const next = !get().isRunning;
+    const state = get();
+    if (state.backendStatus === 'connected') {
+      // 后端模式: 不直接切换, 由 App 层的 useEffect 处理
+      return;
+    }
+    // 前端独立模式
+    const next = !state.isRunning;
     if (!next) { tickCount = 0; simSecAccum = 7 * 3600; currentRunDirection = 'DOWN'; }
     set({ isRunning: next, trainLat: null, trainLng: null });
   },
@@ -202,7 +250,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   setMetroLines: (lines) => {
     const line9 = lines.find((l) => l.id === '9');
-    if (line9) buildPolylineCache(line9);
+    if (line9) { buildPolylineCache(line9); buildDistanceCache(line9); }
     set({ metroLines: lines, linesLoading: false, line9Stations: deriveStations9(line9) });
   },
   setLinesLoading: (loading) => set({ linesLoading: loading }),
@@ -235,6 +283,9 @@ export const useSimStore = create<SimState>((set, get) => ({
     const state = get();
     if (!state.isRunning) return;
 
+    // 后端模式下不跑本地 tick
+    if (state.backendStatus === 'connected') return;
+
     const stations = state.line9Stations;
     if (stations.length === 0) return;
 
@@ -250,23 +301,38 @@ export const useSimStore = create<SimState>((set, get) => ({
     const s = Math.floor(totalSec % 60);
     const newTime = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 
-    // 真实 9号线: 每站约 2min (120s), 站距 ~1300m, 最高 80km/h
-    // 速度曲线: 加速(~30s)→巡航(~60s)→制动(~30s)
-    const segDist = 1347; // 郭公庄→丰台科技园 ~1347m
-    const stationTime = 120; // 每站 120 秒 仿真时间
+    // 根据真实站间距计算（优先级：mileageM > polyline 估算 > 默认 1347）
+    const segDists: number[] = [];
     const totalSegments = stations.length - 1;
-    const routeTime = stationTime * totalSegments; // 单程总时间
+    let totalDist = 0;
+    for (let i = 0; i < totalSegments; i++) {
+      const d = getSegmentDist(i);
+      segDists.push(d);
+      totalDist += d;
+    }
+    // 平均速度 ~40km/h = 11.1 m/s（含停站），单程时间与总距离成正比
+    const avgSpeedMps = 11.1;
+    const routeTime = Math.round(totalDist / avgSpeedMps);
 
     // ═══ 上下行方向自动循环 ═══
-    // 根据累计仿真时间判断当前属于哪个半程
     const elapsedInCycle = simSecAccum % (routeTime * 2);
     currentRunDirection = elapsedInCycle < routeTime ? 'DOWN' : 'UP';
 
-    // 当前半程内的位置
+    // 当前半程内的位置：按距离累积找到当前区段
     const phaseTime = elapsedInCycle % routeTime;
-    const simTravelDist = phaseTime * (segDist / stationTime);
-    const curSegment = Math.floor(simTravelDist / segDist);
-    const offsetInSegment = simTravelDist % segDist;
+    const simTravelDist = phaseTime * avgSpeedMps; // 当前已行驶距离
+    let curSegment = 0;
+    let accumDist = 0;
+    for (let i = 0; i < totalSegments; i++) {
+      if (accumDist + segDists[i] > simTravelDist) {
+        curSegment = i;
+        break;
+      }
+      accumDist += segDists[i];
+      curSegment = i;
+    }
+    const segDist = segDists[Math.min(curSegment, totalSegments - 1)] || 1347;
+    const offsetInSegment = Math.max(0, simTravelDist - accumDist);
 
     // 根据方向映射站点索引
     let curStationIdx: number;
@@ -346,5 +412,81 @@ export const useSimStore = create<SimState>((set, get) => ({
       totalPassengers: state.totalPassengers + Math.floor(Math.random() * 100),
       totalBoarded: state.totalBoarded + Math.floor(Math.random() * 60),
     });
+  },
+
+  // ═══════════════════════════════════════════════════
+  //  后端仿真引擎
+  // ═══════════════════════════════════════════════════
+
+  updateFromBackend: (data: SimStateResponse) => {
+    const { clock, trains, kpi } = data;
+    const t0 = trains[0];
+    if (!t0) return;
+
+    const state = get();
+    const isEngineRunning = clock.state === 'RUNNING';
+    set({ engineClockState: clock.state, isRunning: isEngineRunning });
+
+    if (!isEngineRunning && clock.state !== 'PAUSED') return;
+
+    // 仿真时间
+    set({ simTime: clock.simTime });
+
+    // 信号屏字段
+    set({
+      currentStation: t0.currentStation,
+      nextStation: t0.nextStation,
+      currentSpeedMps: t0.speedMps,
+      permittedSpeedMps: t0.permittedSpeedMps,
+      distanceToNextStationM: Math.round(t0.distanceToNextM),
+      targetDistanceM: Math.round(t0.targetDistanceM),
+      runDirection: t0.direction,
+      stationIndex: t0.stationIndex,
+      segmentProgress: t0.segmentProgress,
+      driveMode: t0.phase === 'DWELLING' ? 'CM' : 'AM',
+    });
+
+    // 列车地图位置 — polyline 插值
+    const line9 = state.metroLines.find((l) => l.id === '9');
+    if (line9 && cachedPolyline) {
+      if (!cachedStationPolyIdx || cachedStationPolyIdx.length !== line9.stations.length) {
+        buildPolylineCache(line9);
+      }
+      const nextIdx = t0.direction === 'UP'
+        ? Math.min(t0.stationIndex + 1, state.line9Stations.length - 1)
+        : Math.max(t0.stationIndex - 1, 0);
+      const pos = interpolateOnPolyline(t0.stationIndex, nextIdx, t0.segmentProgress);
+      if (pos) {
+        set({ trainLat: pos[0], trainLng: pos[1] });
+      }
+    }
+
+    // KPI
+    set({
+      avgLoadRate: Math.round(t0.loadFactor * 100),
+      totalPassengers: t0.onboardPax,
+      totalBoarded: kpi.totalOnboardPax,
+      avgWaitTime: kpi.activeTrains > 0 ? 100 + Math.floor(Math.random() * 80) : 0,
+    });
+  },
+
+  startBackendSim: async () => {
+    await simStart();
+    set({ isRunning: true, engineClockState: 'RUNNING' });
+  },
+
+  pauseBackendSim: async () => {
+    await simPause();
+    set({ engineClockState: 'PAUSED' });
+  },
+
+  resumeBackendSim: async () => {
+    await simResume();
+    set({ isRunning: true, engineClockState: 'RUNNING' });
+  },
+
+  stopBackendSim: async () => {
+    await simStop();
+    set({ isRunning: false, engineClockState: 'STOPPED', trainLat: null, trainLng: null });
   },
 }));
