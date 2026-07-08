@@ -53,7 +53,7 @@ export default function KPIPanel() {
               styles={{ content: { color: waitColor, fontSize: 26 } }}
               prefix={<ClockCircleOutlined style={{ color: waitColor }} />}
             />
-            <div className="text-[10px] text-[#484f58] mt-1">高峰目标 &lt;180s</div>
+            <div className="text-[12px] text-[#484f58] mt-1">高峰目标 &lt;180s</div>
           </Card>
         </Col>
 
@@ -84,13 +84,13 @@ export default function KPIPanel() {
               styles={{ content: { color: '#8b949e', fontSize: 24 } }}
               prefix={<UserOutlined style={{ color: '#8b949e' }} />}
             />
-            <div className="text-[10px] text-[#484f58] mt-1">仿真实时累计</div>
+            <div className="text-[12px] text-[#484f58] mt-1">仿真实时累计</div>
           </Card>
         </Col>
       </Row>
 
       <div className="mt-4 pt-3 border-t border-[#21262d]">
-        <div className="flex justify-between text-[11px] text-[#484f58]">
+        <div className="flex justify-between text-[13px] text-[#484f58]">
           <span>已加载线路 <span className="text-[#58a6ff] font-bold">{metroLines.length}</span> 条</span>
           <span>仿真时钟 <span className="text-[#58a6ff] font-bold">{simTime}</span></span>
         </div>

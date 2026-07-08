@@ -12,9 +12,11 @@
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
     "antd": "^6.5.0",
+    "konva": "^10.3.0",
     "maplibre-gl": "^5.24.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "react-konva": "^19.2.5",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

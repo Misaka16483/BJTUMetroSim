@@ -11,6 +11,8 @@ function fmt(value: number, digits = 1) {
 
 export default function MicroTrackView() {
   const trackMap = useSimStore((s) => s.trackMap);
+  const setViewMode = useSimStore((s) => s.setViewMode);
+  const setSelectedStationCode = useSimStore((s) => s.setSelectedStationCode);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   const selectedStation = useMemo(() => {
@@ -57,6 +59,10 @@ export default function MicroTrackView() {
               leftPercent={8 + ((station.mileageM - firstMileage) / span) * 84}
               active={selectedStation?.stationCode === station.stationCode}
               onClick={() => setSelectedCode(station.stationCode)}
+              onDoubleClick={() => {
+                setSelectedStationCode(station.stationCode);
+                setViewMode('interlocking');
+              }}
             />
           ))}
           <div className="absolute left-8 right-8 bottom-5 flex justify-between text-[10px] text-[#52647b] font-mono">
@@ -95,16 +101,19 @@ function StationMarker({
   leftPercent,
   active,
   onClick,
+  onDoubleClick,
 }: {
   station: Line9Station;
   leftPercent: number;
   active: boolean;
   onClick: () => void;
+  onDoubleClick: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
       className="absolute top-[152px] -translate-x-1/2 text-left cursor-pointer"
       style={{ left: `${leftPercent}%` }}
       title={`${station.stationName} ${station.stationCode}`}

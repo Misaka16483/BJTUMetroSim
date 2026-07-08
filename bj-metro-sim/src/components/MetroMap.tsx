@@ -235,7 +235,7 @@ export default function MetroMap() {
   return (
     <div className="relative w-full h-full">
       {linesLoading && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 bg-[#1a1a2e] border border-[#333] text-[#8ab4f8] px-6 py-3 rounded-lg shadow-2xl text-sm font-medium animate-pulse">
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 bg-[#1a1a2e] border border-[#333] text-[#8ab4f8] px-6 py-3 rounded-lg shadow-2xl text-base font-medium animate-pulse">
           <span className="inline-block w-4 h-4 border-2 border-[#8ab4f8] border-t-transparent rounded-full animate-spin mr-2 align-middle" />
           正在加载北京地铁线路数据...
         </div>
@@ -461,7 +461,7 @@ function renderMetroLines(
       layout: {
         'text-field': ['get', 'name'],
         'text-font': ['Noto Sans Regular'],
-        'text-size': ['interpolate', ['linear'], ['zoom'], 10, 8, 13, 10, 16, 13],
+        'text-size': ['interpolate', ['linear'], ['zoom'], 10, 10, 13, 12, 16, 15],
         'text-offset': [0, 1.5],
         'text-anchor': 'top',
         'text-allow-overlap': false,

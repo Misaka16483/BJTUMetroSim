@@ -88,7 +88,7 @@ html, body, #root {
 .maplibregl-ctrl-attrib {
   background: rgba(2,4,8,0.9) !important;
   color: #1a2240 !important;
-  font-size: 7px !important;
+  font-size: 10px !important;
   font-family: monospace !important;
   padding: 2px 4px !important;
 }
@@ -117,20 +117,20 @@ html, body, #root {
   border-top-color: #0d1424;
 }
 .popup-name {
-  font-size: 15px;
+  font-size: 18px;
   font-weight: 600;
   color: #e8edf5;
   margin-bottom: 8px;
 }
 .popup-transfer-badge {
   display: inline-block;
-  font-size: 10px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 600;
   background: rgba(255, 85, 51, 0.18);
   color: #ff7755;
-  padding: 1px 6px;
-  border-radius: 2px;
-  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  margin-left: 8px;
   vertical-align: middle;
 }
 .popup-rows {
@@ -141,8 +141,9 @@ html, body, #root {
 .popup-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 8px;
+  font-size: 14px;
+  padding: 2px 0;
 }
 .popup-row-color {
   width: 8px;
@@ -157,16 +158,16 @@ html, body, #root {
 .popup-row-num {
   color: #5a6a80;
   font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 11px;
+  font-size: 13px;
 }
 .popup-meta {
-  margin-top: 10px;
-  padding-top: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
   border-top: 1px solid rgba(74,158,255,0.12);
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 5px 10px;
-  font-size: 11px;
+  gap: 6px 12px;
+  font-size: 13px;
 }
 .popup-meta span {
   display: block;

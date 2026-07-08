@@ -42,18 +42,18 @@ export default function LinesPanel() {
         className="flex items-center justify-between px-3 py-2.5 shrink-0"
         style={{ borderBottom: '1px solid rgba(74, 158, 255, 0.08)' }}
       >
-            <span className="text-[10px] font-medium tracking-[0.1em] uppercase text-[#6a7a90]">
+            <span className="text-[12px] font-medium tracking-[0.1em] uppercase text-[#6a7a90]">
               Lines
             </span>
             <div className="flex items-center gap-1.5">
               <span
-                className="font-mono text-[12px] text-[#4a9eff] tabular-nums"
+                className="font-mono text-[14px] text-[#4a9eff] tabular-nums"
                 style={{ textShadow: '0 0 8px rgba(74, 158, 255, 0.3)' }}
               >
                 {activeCount}
               </span>
-              <span className="text-[9px] text-[#2a3040]">/</span>
-              <span className="font-mono text-[11px] text-[#3a4a60] tabular-nums">
+              <span className="text-[11px] text-[#2a3040]">/</span>
+              <span className="font-mono text-[13px] text-[#3a4a60] tabular-nums">
                 {metroLines.length}
               </span>
             </div>
@@ -62,14 +62,14 @@ export default function LinesPanel() {
           {/* 线路列表 */}
           <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ scrollbarWidth: 'thin', scrollbarColor: '#1a2240 transparent' }}>
             {linesLoading && (
-              <div className="flex items-center justify-center py-8 text-[#4a5568] text-[10px] animate-pulse">
+              <div className="flex items-center justify-center py-8 text-[#4a5568] text-[12px] animate-pulse">
                 加载线路数据...
               </div>
             )}
             {!linesLoading && metroLines.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-8 text-[10px] text-[#3a4a60] gap-1">
+              <div className="flex flex-col items-center justify-center py-8 text-[12px] text-[#3a4a60] gap-1">
                 <span>暂无数据</span>
-                <span className="text-[9px] opacity-60">正在从 OSM 获取</span>
+                <span className="text-[11px] opacity-60">正在从 OSM 获取</span>
               </div>
             )}
             {metroLines.map((line) => {
@@ -130,7 +130,7 @@ export default function LinesPanel() {
 
                     {/* 线路名 */}
                     <span
-                      className="flex-1 text-[11px] truncate"
+                      className="flex-1 text-[13px] truncate"
                       style={{
                         color: visible ? '#a0b8d0' : '#2a3040',
                         fontWeight: 400,
@@ -141,7 +141,7 @@ export default function LinesPanel() {
 
                     {/* 站点数 */}
                     <span
-                      className="font-mono text-[10px] tabular-nums shrink-0"
+                      className="font-mono text-[11px] tabular-nums shrink-0"
                       style={{ color: visible ? '#4a5568' : '#1a2240' }}
                     >
                       {line.stations.length}
@@ -185,10 +185,10 @@ export default function LinesPanel() {
                         >
                           {/* 站点序号圆点 */}
                           <span
-                            className="shrink-0 font-mono text-[8px] flex items-center justify-center"
+                            className="shrink-0 font-mono text-[10px] flex items-center justify-center"
                             style={{
-                              width: '12px',
-                              height: '12px',
+                              width: '14px',
+                              height: '14px',
                               color: visible ? '#4a5568' : '#1a2240',
                             }}
                           >
@@ -197,7 +197,7 @@ export default function LinesPanel() {
 
                           {/* 站点名 */}
                           <span
-                            className="text-[10px] truncate"
+                            className="text-[12px] truncate"
                             style={{ color: visible ? '#8090a8' : '#1a2240' }}
                           >
                             {st.name}
@@ -211,7 +211,7 @@ export default function LinesPanel() {
                                 return (
                                   <span
                                     key={transferLineId}
-                                    className="text-[7px] px-1 py-px font-medium whitespace-nowrap"
+                                    className="text-[9px] px-1.5 py-0.5 font-medium whitespace-nowrap"
                                     style={{
                                       backgroundColor: transferLine
                                         ? `${transferLine.color}25`

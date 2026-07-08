@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import MetroMap from './components/MetroMap';
 import LinesPanel from './components/LinesPanel';
 import MicroTrackView from './components/MicroTrackView';
+import StationInterlockingView from './components/StationInterlockingView';
+import { bwrInterlockingData } from './data/stationInterlockingData';
 import { useSimStore } from './store/useSimStore';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
 import { fetchBackendBundle } from './data/backendApi';
@@ -121,11 +123,11 @@ export default function App() {
   return (
     <div className="h-screen w-screen bg-[#020408] flex flex-col p-3" style={{ fontFamily: "'Inter', -apple-system, sans-serif" }}>
       {/* ═══ 标题栏 ═══ */}
-      <header className="flex items-center justify-between px-4 py-3 mb-2 relative" style={{ borderBottom: '1px solid rgba(74, 158, 255, 0.12)' }}>
+      <header className="flex items-center justify-between px-4 py-2 mb-2 relative shrink-0" style={{ borderBottom: '1px solid rgba(74, 158, 255, 0.12)' }}>
         {/* 底边发光 */}
         <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#4a9eff]/30 to-transparent" />
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           {/* 脉冲状态 LED */}
           <div className="relative flex items-center justify-center">
             <span className="animated-pulse block w-2 h-2 bg-[#00ff88] relative z-10" style={{ boxShadow: '0 0 8px #00ff88, 0 0 16px rgba(0,255,136,0.4)' }} />
@@ -136,33 +138,17 @@ export default function App() {
             BJTUMetroSim
           </span>
 
-          <span className="text-[10px] tracking-[0.15em] uppercase text-[#4a5568] px-2 py-0.5 border border-[#1a2240]/60">
-            Dispatch Console
-          </span>
-
-          <div className="ml-3 flex items-center border border-[#1a2240]/70">
-            <button
-              type="button"
-              onClick={() => setViewMode('macro')}
-              className="px-3 py-1 text-[10px] cursor-pointer"
-              style={{
-                color: viewMode === 'macro' ? '#dce8f8' : '#52647b',
-                background: viewMode === 'macro' ? 'rgba(74,158,255,0.12)' : 'transparent',
-              }}
-            >
+          {/* 导航按钮组 */}
+          <div className="ml-4 flex items-center gap-1">
+            <NavBtn active={viewMode === 'macro'} color="#58a6ff" onClick={() => setViewMode('macro')}>
               宏观线路
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('micro')}
-              className="px-3 py-1 text-[10px] cursor-pointer"
-              style={{
-                color: viewMode === 'micro' ? '#dce8f8' : '#52647b',
-                background: viewMode === 'micro' ? 'rgba(143,195,31,0.14)' : 'transparent',
-              }}
-            >
+            </NavBtn>
+            <NavBtn active={viewMode === 'micro'} color="#8FC31F" onClick={() => setViewMode('micro')}>
               轨道级
-            </button>
+            </NavBtn>
+            <NavBtn active={viewMode === 'interlocking'} color="#f85149" onClick={() => setViewMode('interlocking')}>
+              联锁图
+            </NavBtn>
           </div>
         </div>
 
@@ -188,7 +174,7 @@ export default function App() {
           <div className="pointer-events-none absolute top-0 right-0 w-4 h-4 border-t border-r border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
           <div className="pointer-events-none absolute bottom-0 left-0 w-4 h-4 border-b border-l border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
           <div className="pointer-events-none absolute bottom-0 right-0 w-4 h-4 border-b border-r border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
-          {viewMode === 'macro' ? <MetroMap /> : <MicroTrackView />}
+          {viewMode === 'macro' ? <MetroMap /> : viewMode === 'interlocking' ? <StationInterlockingView data={bwrInterlockingData()} /> : <MicroTrackView />}
         </div>
 
         {/* 折叠按钮 */}
@@ -245,5 +231,25 @@ export default function App() {
         <span className="text-[9px] font-mono" style={{ color: '#1a2240' }}>v0.1.0</span>
       </footer>
     </div>
+  );
+}
+
+// ── 导航按钮 ──
+function NavBtn({ active, color, onClick, children }: { active: boolean; color: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="px-3 py-1.5 text-[12px] font-medium cursor-pointer rounded transition-all duration-150"
+      style={{
+        color: active ? '#ffffff' : '#6a7a90',
+        background: active ? `${color}20` : 'transparent',
+        border: active ? `1px solid ${color}50` : '1px solid transparent',
+      }}
+      onMouseEnter={e => { if (!active) e.currentTarget.style.color = '#d0d8e8'; }}
+      onMouseLeave={e => { if (!active) e.currentTarget.style.color = '#6a7a90'; }}
+    >
+      {children}
+    </button>
   );
 }

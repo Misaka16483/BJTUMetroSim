@@ -38,10 +38,10 @@ export default function ControlPanel() {
   return (
     <div className="p-4 rounded-lg border border-[#21262d] bg-[#161b22]">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-[#c9d1d9] uppercase tracking-wider">
+        <h3 className="text-base font-semibold text-[#c9d1d9] uppercase tracking-wider">
           仿真控制
         </h3>
-        <Tag color={dayColors[dayType]} className="border-0 text-xs">
+        <Tag color={dayColors[dayType]} className="border-0 text-sm">
           {dayLabel}
         </Tag>
       </div>
@@ -57,7 +57,7 @@ export default function ControlPanel() {
       </div>
 
       {/* 控制按钮 */}
-      <div className="flex gap-2 justify-center mb-5">
+      <div className="flex gap-3 justify-center mb-5">
         <Button
           type={isRunning ? 'default' : 'primary'}
           icon={isRunning ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
@@ -79,7 +79,7 @@ export default function ControlPanel() {
 
       {/* 速度 */}
       <div className="mb-4">
-        <div className="text-xs text-[#8b949e] mb-1 uppercase tracking-wider">
+        <div className="text-sm text-[#8b949e] mb-1 uppercase tracking-wider">
           Simulation Speed
         </div>
         <Slider
@@ -98,7 +98,7 @@ export default function ControlPanel() {
 
       {/* 日型 */}
       <div>
-        <div className="text-xs text-[#8b949e] mb-1 uppercase tracking-wider">
+        <div className="text-sm text-[#8b949e] mb-1 uppercase tracking-wider">
           Day Type
         </div>
         <Select

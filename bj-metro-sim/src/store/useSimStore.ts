@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
 import type { TrackMapData } from '../data/backendApi';
 
-type ViewMode = 'macro' | 'micro';
+type ViewMode = 'macro' | 'micro' | 'interlocking';
 
 interface SimState {
   // 仿真状态
@@ -30,11 +30,15 @@ interface SimState {
   // 选中的列车ID
   selectedTrainId: string | null;
 
+  // 选中的车站代码 (用于轨道级→联锁图跳转)
+  selectedStationCode: string | null;
+
   // 动作
   toggleRunning: () => void;
   setSpeed: (speed: number) => void;
   setDayType: (dayType: 'weekday' | 'friday' | 'saturday' | 'sunday') => void;
   selectTrain: (id: string | null) => void;
+  setSelectedStationCode: (code: string | null) => void;
   tick: () => void;
 
   // 线路管理
@@ -68,11 +72,13 @@ export const useSimStore = create<SimState>((set, get) => ({
   totalPassengers: 0,
   totalBoarded: 0,
   selectedTrainId: null,
+  selectedStationCode: null,
 
   toggleRunning: () => set((s) => ({ isRunning: !s.isRunning })),
   setSpeed: (speed: number) => set({ speed }),
   setDayType: (dayType) => set({ dayType }),
   selectTrain: (id: string | null) => set({ selectedTrainId: id }),
+  setSelectedStationCode: (code: string | null) => set({ selectedStationCode: code }),
 
   setMetroLines: (lines) => set({ metroLines: lines, linesLoading: false, hiddenLines: new Set<string>() }),
   setLinesLoading: (loading) => set({ linesLoading: loading }),
