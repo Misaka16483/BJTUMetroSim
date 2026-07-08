@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.clock import SimulationClock
 from app.core.message_bus import MessageBus
+from app.domain.control import run_ato_stop_demo
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.infra.excel_importer import LineDataImporter, validate_line_map
 from app.infra.recorder import RunRecorder
@@ -119,6 +120,19 @@ def bus_demo(args: argparse.Namespace) -> None:
         recorder.close()
 
 
+def vehicle_demo(args: argparse.Namespace) -> None:
+    result = run_ato_stop_demo(
+        target_position_m=args.target_position,
+        permitted_speed_mps=args.permitted_speed,
+        dt_s=args.dt,
+        max_ticks=args.max_ticks,
+        expected_deceleration_mps2=args.expected_deceleration,
+        stop_tolerance_m=args.stop_tolerance,
+        train_id=args.train_id,
+    )
+    _print_json(result.to_dict(include_history=args.include_history))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rail transit simulation Phase 0 CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -152,6 +166,22 @@ def build_parser() -> argparse.ArgumentParser:
     bus_parser = subparsers.add_parser("bus-demo", help="Run a minimal message bus and recorder demo")
     bus_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
     bus_parser.set_defaults(func=bus_demo)
+
+    vehicle_parser = subparsers.add_parser("vehicle-demo", help="Run a single-train ATO stopping demo")
+    vehicle_parser.add_argument("--train-id", default="T001", help="Train id")
+    vehicle_parser.add_argument("--target-position", type=float, default=200.0, help="Target stop position in meters")
+    vehicle_parser.add_argument("--permitted-speed", type=float, default=12.0, help="Permitted speed in m/s")
+    vehicle_parser.add_argument("--dt", type=float, default=1.0, help="Simulation tick length in seconds")
+    vehicle_parser.add_argument("--max-ticks", type=int, default=120, help="Maximum simulation ticks")
+    vehicle_parser.add_argument(
+        "--expected-deceleration",
+        type=float,
+        default=0.6,
+        help="ATO expected deceleration in m/s^2",
+    )
+    vehicle_parser.add_argument("--stop-tolerance", type=float, default=1.0, help="Acceptable stop error in meters")
+    vehicle_parser.add_argument("--include-history", action="store_true", help="Include per-tick state history")
+    vehicle_parser.set_defaults(func=vehicle_demo)
     return parser
 
 
