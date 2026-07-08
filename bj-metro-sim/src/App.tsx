@@ -3,7 +3,7 @@ import MetroMap from './components/MetroMap';
 import LinesPanel from './components/LinesPanel';
 import MicroTrackView from './components/MicroTrackView';
 import StationInterlockingView from './components/StationInterlockingView';
-import { bwrInterlockingData } from './data/stationInterlockingData';
+import { getInterlockingData } from './data/stationInterlockingData';
 import { useSimStore } from './store/useSimStore';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
 import { fetchBackendBundle } from './data/backendApi';
@@ -21,6 +21,7 @@ export default function App() {
   const setViewMode = useSimStore((s) => s.setViewMode);
   const backendStatus = useSimStore((s) => s.backendStatus);
   const trackMap = useSimStore((s) => s.trackMap);
+  const selectedStationCode = useSimStore((s) => s.selectedStationCode);
 
   const [collapsed, setCollapsed] = useState(false);
 
@@ -174,7 +175,7 @@ export default function App() {
           <div className="pointer-events-none absolute top-0 right-0 w-4 h-4 border-t border-r border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
           <div className="pointer-events-none absolute bottom-0 left-0 w-4 h-4 border-b border-l border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
           <div className="pointer-events-none absolute bottom-0 right-0 w-4 h-4 border-b border-r border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
-          {viewMode === 'macro' ? <MetroMap /> : viewMode === 'interlocking' ? <StationInterlockingView data={bwrInterlockingData()} /> : <MicroTrackView />}
+          {viewMode === 'macro' ? <MetroMap /> : viewMode === 'interlocking' ? <StationInterlockingView data={getInterlockingData(selectedStationCode ?? 'BWR')!} /> : <MicroTrackView />}
         </div>
 
         {/* 折叠按钮 */}
