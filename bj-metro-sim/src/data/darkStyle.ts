@@ -1,6 +1,6 @@
 // 高德北京底图 + 地铁线路叠加
 const darkStyle = {
-  version: 8,
+  version: 8 as const,
   name: 'BJTUMetroSim',
   glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
   sources: {

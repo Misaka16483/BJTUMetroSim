@@ -1,4 +1,4 @@
-import { Button, Slider, Select, Space, Tag } from 'antd';
+import { Button, Slider, Select, Tag } from 'antd';
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,

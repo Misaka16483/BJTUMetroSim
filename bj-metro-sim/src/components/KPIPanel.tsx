@@ -10,7 +10,7 @@ import { useSimStore } from '../store/useSimStore';
 export default function KPIPanel() {
   const {
     punctuality, avgWaitTime, avgLoadRate,
-    totalPassengers, totalBoarded, simTime, metroLines,
+    totalBoarded, simTime, metroLines,
   } = useSimStore();
 
   const punctColor = punctuality >= 95 ? '#3fb950' : punctuality >= 90 ? '#d29922' : '#f85149';

@@ -1,5 +1,8 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
+import type { TrackMapData } from '../data/backendApi';
+
+type ViewMode = 'macro' | 'micro';
 
 interface SimState {
   // 仿真状态
@@ -12,7 +15,10 @@ interface SimState {
   metroLines: MetroLineData[];
   linesLoading: boolean;
   linesError: string | null;
+  backendStatus: 'idle' | 'connected' | 'fallback' | 'error';
   hiddenLines: Set<string>;
+  trackMap: TrackMapData | null;
+  viewMode: ViewMode;
 
   // KPI
   punctuality: number;
@@ -35,6 +41,9 @@ interface SimState {
   setMetroLines: (lines: MetroLineData[]) => void;
   setLinesLoading: (loading: boolean) => void;
   setLinesError: (error: string | null) => void;
+  setBackendStatus: (status: 'idle' | 'connected' | 'fallback' | 'error') => void;
+  setTrackMap: (trackMap: TrackMapData | null) => void;
+  setViewMode: (viewMode: ViewMode) => void;
   toggleLineVisibility: (lineId: string) => void;
   showAllLines: () => void;
   hideAllLines: () => void;
@@ -49,7 +58,10 @@ export const useSimStore = create<SimState>((set, get) => ({
   metroLines: [],
   linesLoading: false,
   linesError: null,
+  backendStatus: 'idle',
   hiddenLines: new Set<string>(),
+  trackMap: null,
+  viewMode: 'macro',
   punctuality: 98.5,
   avgWaitTime: 145,
   avgLoadRate: 68,
@@ -62,9 +74,12 @@ export const useSimStore = create<SimState>((set, get) => ({
   setDayType: (dayType) => set({ dayType }),
   selectTrain: (id: string | null) => set({ selectedTrainId: id }),
 
-  setMetroLines: (lines) => set({ metroLines: lines, linesLoading: false }),
+  setMetroLines: (lines) => set({ metroLines: lines, linesLoading: false, hiddenLines: new Set<string>() }),
   setLinesLoading: (loading) => set({ linesLoading: loading }),
   setLinesError: (error) => set({ linesError: error, linesLoading: false }),
+  setBackendStatus: (status) => set({ backendStatus: status }),
+  setTrackMap: (trackMap) => set({ trackMap }),
+  setViewMode: (viewMode) => set({ viewMode }),
 
   toggleLineVisibility: (lineId) => set((s) => {
     const next = new Set(s.hiddenLines);
@@ -97,7 +112,6 @@ export const useSimStore = create<SimState>((set, get) => ({
     const speed = state.speed;
     const step = 0.005 * speed;
 
-    const totalPass = state.metroLines.flatMap((l) => l.stations).length;
     const waitTime = 100 + Math.floor(Math.random() * 80);
     const punct = 96 + Math.random() * 3;
 
