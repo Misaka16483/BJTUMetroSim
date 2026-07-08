@@ -5,6 +5,7 @@ import darkStyle from '../data/darkStyle';
 import MAPTILER_KEY, { MAPTILER_STYLE } from '../data/maptilerKey';
 import { useSimStore } from '../store/useSimStore';
 import type { MetroLineData } from '../data/amapMetroApi';
+import { computeStationTransfers } from '../data/transferUtils';
 
 // 判断是否有有效的 MapTiler Key
 const hasMapTilerKey = Boolean(MAPTILER_KEY) && String(MAPTILER_KEY) !== 'YOUR_KEY_HERE';
@@ -15,6 +16,7 @@ const styleConfig: string | maplibregl.StyleSpecification = hasMapTilerKey
 // ── 模块级：防重复注册 & 弹窗引用 ──
 const registeredClickLayers = new Set<string>();
 let popupRef: maplibregl.Popup | null = null;
+let trainMarkerRef: maplibregl.Marker | null = null;
 
 export default function MetroMap() {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -25,6 +27,9 @@ export default function MetroMap() {
   const hiddenLines = useSimStore((s) => s.hiddenLines);
   const linesLoading = useSimStore((s) => s.linesLoading);
   const linesError = useSimStore((s) => s.linesError);
+  const trainLat = useSimStore((s) => s.trainLat);
+  const trainLng = useSimStore((s) => s.trainLng);
+  const isRunning = useSimStore((s) => s.isRunning);
 
   // ── 初始化地图 ──
   useEffect(() => {
@@ -84,6 +89,27 @@ export default function MetroMap() {
       };
       map.once('style.load', handler);
     }
+
+    // 自动适配地图视野到可见线路
+    const visibleLines = metroLines.filter((l) => !hiddenLines.has(l.id));
+    if (visibleLines.length === 0) return;
+    const bounds = new maplibregl.LngLatBounds();
+    for (const line of visibleLines) {
+      for (const seg of line.coordinates) {
+        for (const [lat, lng] of seg) {
+          // 过滤异常坐标（北京范围外的不参与 bounds）
+          if (lat > 39.0 && lat < 41.0 && lng > 115.0 && lng < 118.0) {
+            bounds.extend([lng, lat]);
+          }
+        }
+      }
+    }
+    // 兜底：如果没收集到有效 bounds，使用北京默认范围
+    if (bounds.isEmpty()) {
+      bounds.extend([116.1, 39.7]);
+      bounds.extend([116.7, 40.1]);
+    }
+    map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 600 });
   }, [metroLines, hiddenLines]);
 
   // ── 换乘站坐标集（用于站点点色标记 — 按站名匹配, 基于网络拓扑） ──
@@ -231,6 +257,37 @@ export default function MetroMap() {
 
     return set;
   }, [metroLines, hiddenLines]);
+
+  // ── 列车位置标记 ──
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded.current) return;
+
+    // 清除旧标记
+    if (trainMarkerRef) {
+      trainMarkerRef.remove();
+      trainMarkerRef = null;
+    }
+
+    if (!isRunning || trainLat == null || trainLng == null) return;
+
+    const el = document.createElement('div');
+    el.className = 'train-marker';
+    el.innerHTML = `
+      <div style="
+        width: 18px; height: 18px;
+        background: var(--l9, #8FC31F);
+        border-radius: 50% 50% 50% 0;
+        transform: rotate(-45deg);
+        box-shadow: 0 0 12px rgba(168,214,74,0.5), 0 0 24px rgba(168,214,74,0.2);
+        border: 2px solid rgba(255,255,255,0.5);
+      "></div>
+    `;
+
+    trainMarkerRef = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+      .setLngLat([trainLng, trainLat])
+      .addTo(map);
+  }, [trainLat, trainLng, isRunning]);
 
   return (
     <div className="relative w-full h-full">
@@ -403,43 +460,44 @@ function renderMetroLines(
     // ── 站点点击弹窗（每层只注册一次） ──
     if (!registeredClickLayers.has(stationSourceId)) {
       registeredClickLayers.add(stationSourceId);
-      console.log('[Popup] registering click on:', stationSourceId);
       map.on('click', `${stationSourceId}-dot`, (e) => {
-        console.log('[Popup] click fired, layer:', stationSourceId, 'features:', e.features?.length);
-        if (!e.features || e.features.length === 0) {
-          console.log('[Popup] no features, skipping');
-          return;
-        }
-        const properties = e.features[0].properties as {
-          name: string;
-          lineId: string;
-          code?: string;
-          mileageM?: number;
-          platformIds?: string;
-          platformSegmentIds?: string;
-        };
-        const { name, lineId } = properties;
-        console.log('[Popup] props:', { name, lineId });
-        if (!name) {
-          console.log('[Popup] no name, skipping');
-          return;
-        }
+        // 从 store 实时获取最新数据，避免 stale closure
+        const { metroLines: latestLines } = useSimStore.getState();
+        if (!e.features || e.features.length === 0) return;
+        const { name, lineId } = e.features[0].properties as { name: string; lineId: string };
+        if (!name) return;
 
-        // 按站名匹配所有可见线路中的同名站点（与换乘检测逻辑一致）
+        const allTransfers = computeStationTransfers(latestLines);
         const clickedNorm = name.replace(/站$/, '').trim();
         const stationEntries: { line: MetroLineData; index: number }[] = [];
-        for (const l of lines) {
-          if (hiddenLines.has(l.id)) continue;
-          const idx = l.stations.findIndex((s) => s.name.replace(/站$/, '').trim() === clickedNorm);
-          if (idx !== -1) stationEntries.push({ line: l, index: idx });
+
+        for (const st of allTransfers) {
+          const stNorm = st.name.replace(/站$/, '').trim();
+          if (stNorm !== clickedNorm) continue;
+          const l = latestLines.find((ln) => ln.id === st.lineId);
+          if (!l) continue;
+          const idx = l.stations.findIndex(
+            (s) => s.name.replace(/站$/, '').trim() === clickedNorm
+          );
+          if (idx !== -1 && !stationEntries.some((en) => en.line.id === l.id)) {
+            stationEntries.push({ line: l, index: idx });
+          }
         }
-        console.log('[Popup] stationEntries:', stationEntries.map((e) => `${e.line.name}#${e.index + 1}`), 'name:', clickedNorm);
+
+        if (stationEntries.length === 0) {
+          const curLine = latestLines.find((l) => l.id === lineId);
+          if (curLine) {
+            const idx = curLine.stations.findIndex(
+              (s) => s.name.replace(/站$/, '').trim() === clickedNorm
+            );
+            if (idx !== -1) stationEntries.push({ line: curLine, index: idx });
+          }
+        }
 
         if (popupRef) popupRef.remove();
-        const html = buildPopupHtml(name, stationEntries, properties);
-        console.log('[Popup] HTML:', html.substring(0, 200));
+        const html = buildPopupHtml(name, stationEntries);
         popupRef = new maplibregl.Popup({
-          closeButton: true,
+          closeButton: false,
           closeOnClick: true,
           className: 'metro-station-popup',
           maxWidth: '240px',
@@ -448,7 +506,6 @@ function renderMetroLines(
           .setLngLat(e.lngLat)
           .setHTML(html)
           .addTo(map);
-        console.log('[Popup] added to map');
       });
     }
 

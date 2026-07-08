@@ -1,10 +1,3 @@
-import { Card, Statistic, Progress, Row, Col } from 'antd';
-import {
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  UserOutlined,
-  DashboardOutlined,
-} from '@ant-design/icons';
 import { useSimStore } from '../store/useSimStore';
 
 export default function KPIPanel() {
@@ -13,87 +6,62 @@ export default function KPIPanel() {
     totalBoarded, simTime, metroLines,
   } = useSimStore();
 
-  const punctColor = punctuality >= 95 ? '#3fb950' : punctuality >= 90 ? '#d29922' : '#f85149';
-  const loadColor = avgLoadRate > 120 ? '#f85149' : avgLoadRate > 100 ? '#d29922' : '#3fb950';
-  const waitColor = avgWaitTime < 180 ? '#3fb950' : '#d29922';
+  const cards = [
+    {
+      label: '准点率', unit: '%', value: punctuality.toFixed(1),
+      color: punctuality >= 95 ? 'var(--green)' : punctuality >= 90 ? 'var(--amber)' : 'var(--red)',
+    },
+    {
+      label: '平均等待', unit: 's', value: String(avgWaitTime),
+      color: avgWaitTime < 180 ? 'var(--green)' : 'var(--amber)',
+    },
+    {
+      label: '满载率', unit: '%', value: String(avgLoadRate),
+      color: avgLoadRate > 120 ? 'var(--red)' : avgLoadRate > 100 ? 'var(--amber)' : 'var(--green)',
+    },
+    {
+      label: '客运量', unit: '', value: totalBoarded.toLocaleString(),
+      color: 'var(--text-dim)',
+    },
+  ];
 
   return (
-    <div className="p-4 rounded-lg border border-[#21262d] bg-[#161b22] h-full overflow-auto">
-      <h3 className="text-sm font-semibold text-[#c9d1d9] uppercase tracking-wider mb-4">
-        运营指标
-      </h3>
+    <div className="glass p-5 flex flex-col h-full">
+      <div className="flex items-center justify-between mb-3">
+        <span className="label" style={{ color: 'var(--text-muted)' }}>运营指标</span>
+        <span className="board-num text-[9px]" style={{ color: 'var(--text-muted)' }}>KPI</span>
+      </div>
 
-      <Row gutter={[10, 10]}>
-        <Col span={12}>
-          <Card size="small" className="text-center !bg-[#0d1117] !border-[#21262d]">
-            <Statistic
-              title={<span className="text-xs text-[#8b949e]">准点率</span>}
-              value={punctuality}
-              suffix="%"
-              styles={{ content: { color: punctColor, fontSize: 26 } }}
-              prefix={<CheckCircleOutlined style={{ color: punctColor }} />}
-              precision={1}
-            />
-            <Progress
-              percent={punctuality}
-              showInfo={false}
-              strokeColor={punctColor}
-              railColor="#21262d"
-              size="small"
-            />
-          </Card>
-        </Col>
+      <div className="grid grid-cols-2 gap-2 flex-1">
+        {cards.map((c) => (
+          <div
+            key={c.label}
+            className="card flex flex-col justify-between"
+            style={{ padding: '13px 14px' }}
+          >
+            <span className="label mb-2.5" style={{ color: 'var(--text-muted)' }}>
+              {c.label.toUpperCase()}
+            </span>
+            <div className="flex items-baseline gap-0.5">
+              <span
+                className="board-num text-[28px] font-bold leading-none tabular-nums"
+                style={{ color: c.color }}
+              >
+                {c.value}
+              </span>
+              {c.unit && (
+                <span className="board-num text-[12px]" style={{ color: 'var(--text-dim)' }}>
+                  {c.unit}
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
 
-        <Col span={12}>
-          <Card size="small" className="text-center !bg-[#0d1117] !border-[#21262d]">
-            <Statistic
-              title={<span className="text-xs text-[#8b949e]">平均等待</span>}
-              value={avgWaitTime}
-              suffix="s"
-              styles={{ content: { color: waitColor, fontSize: 26 } }}
-              prefix={<ClockCircleOutlined style={{ color: waitColor }} />}
-            />
-            <div className="text-[10px] text-[#484f58] mt-1">高峰目标 &lt;180s</div>
-          </Card>
-        </Col>
-
-        <Col span={12}>
-          <Card size="small" className="text-center !bg-[#0d1117] !border-[#21262d]">
-            <Statistic
-              title={<span className="text-xs text-[#8b949e]">满载率</span>}
-              value={avgLoadRate}
-              suffix="%"
-              styles={{ content: { color: loadColor, fontSize: 26 } }}
-              prefix={<DashboardOutlined style={{ color: loadColor }} />}
-            />
-            <Progress
-              percent={avgLoadRate}
-              showInfo={false}
-              strokeColor={loadColor}
-              railColor="#21262d"
-              size="small"
-            />
-          </Card>
-        </Col>
-
-        <Col span={12}>
-          <Card size="small" className="text-center !bg-[#0d1117] !border-[#21262d]">
-            <Statistic
-              title={<span className="text-xs text-[#8b949e]">客运量</span>}
-              value={totalBoarded}
-              styles={{ content: { color: '#8b949e', fontSize: 24 } }}
-              prefix={<UserOutlined style={{ color: '#8b949e' }} />}
-            />
-            <div className="text-[10px] text-[#484f58] mt-1">仿真实时累计</div>
-          </Card>
-        </Col>
-      </Row>
-
-      <div className="mt-4 pt-3 border-t border-[#21262d]">
-        <div className="flex justify-between text-[11px] text-[#484f58]">
-          <span>已加载线路 <span className="text-[#58a6ff] font-bold">{metroLines.length}</span> 条</span>
-          <span>仿真时钟 <span className="text-[#58a6ff] font-bold">{simTime}</span></span>
-        </div>
+      <div className="flex justify-between mt-2 text-[9px] board-num" style={{ color: 'var(--text-muted)' }}>
+        <span>LINES <span style={{ color: 'var(--cyan)' }}>{metroLines.length}</span></span>
+        <span>CLK <span style={{ color: 'var(--cyan)' }}>{simTime}</span></span>
       </div>
     </div>
   );
