@@ -15,7 +15,6 @@ export default function ControlPanel() {
 
   return (
     <div className="glass shrink-0 flex items-center gap-4 px-5" style={{ height: 50 }}>
-      {/* START / STOP */}
       <button
         onClick={toggleRunning}
         className="flex items-center gap-1.5 cursor-pointer label rounded-lg"
@@ -27,16 +26,20 @@ export default function ControlPanel() {
         }}
       >
         {isRunning ? (
-          <svg width="8" height="8" viewBox="0 0 8 8"><rect x="1" y="1" width="2.5" height="6" rx="0.5" fill="currentColor"/><rect x="4.5" y="1" width="2.5" height="6" rx="0.5" fill="currentColor"/></svg>
+          <svg width="8" height="8" viewBox="0 0 8 8">
+            <rect x="1" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+            <rect x="4.5" y="1" width="2.5" height="6" rx="0.5" fill="currentColor" />
+          </svg>
         ) : (
-          <svg width="8" height="8" viewBox="0 0 8 8"><polygon points="2,1 7,4 2,7" fill="currentColor"/></svg>
+          <svg width="8" height="8" viewBox="0 0 8 8">
+            <polygon points="2,1 7,4 2,7" fill="currentColor" />
+          </svg>
         )}
         {isRunning ? 'STOP' : 'START'}
       </button>
 
       <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.06)' }} />
 
-      {/* 时钟 */}
       <div className="flex items-baseline gap-2">
         <span
           className="board-xl text-[26px] leading-none tabular-nums"
@@ -49,7 +52,6 @@ export default function ControlPanel() {
 
       <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.06)' }} />
 
-      {/* 速度 */}
       <div className="flex items-center gap-1">
         <span className="label" style={{ color: 'var(--text-muted)' }}>SPD</span>
         {[1, 2, 5, 10].map((x) => (

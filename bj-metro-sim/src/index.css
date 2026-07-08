@@ -213,3 +213,22 @@ button, .btn, [role="button"], .clickable {
 .popup-row-color { width: 8px; height: 8px; border-radius: 3px; flex-shrink: 0; }
 .popup-row-label { flex: 1; color: var(--text-dim); }
 .popup-row-num { color: var(--text-muted); font-family: monospace; font-size: 11px; }
+.popup-meta {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(74,158,255,0.12);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px 10px;
+  font-size: 11px;
+}
+.popup-meta span {
+  display: block;
+  color: #5a6a80;
+  margin-bottom: 1px;
+}
+.popup-meta b {
+  color: #c7d5e8;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-weight: 500;
+}

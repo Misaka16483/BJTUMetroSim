@@ -16,6 +16,8 @@ function SpeedGauge({ speedKmh, limitKmh, targetKmh }: { speedKmh: number; limit
   });
 
   const needleAngle = START_ANGLE + (Math.min(speedKmh, MAX) / MAX) * SWEEP;
+  const limitAngle = START_ANGLE + (Math.min(limitKmh, MAX) / MAX) * SWEEP;
+  const targetAngle = START_ANGLE + (Math.min(targetKmh, MAX) / MAX) * SWEEP;
 
   const arcPath = (start: number, end: number, radius: number) => {
     const s = arcPoint(start, radius);
@@ -48,6 +50,26 @@ function SpeedGauge({ speedKmh, limitKmh, targetKmh }: { speedKmh: number; limit
             }}
           />
         )}
+
+        <line
+          x1={arcPoint(limitAngle, R - 14).x}
+          y1={arcPoint(limitAngle, R - 14).y}
+          x2={arcPoint(limitAngle, R + 4).x}
+          y2={arcPoint(limitAngle, R + 4).y}
+          stroke="var(--amber)"
+          strokeWidth="2"
+          strokeLinecap="round"
+        />
+        <line
+          x1={arcPoint(targetAngle, R - 20).x}
+          y1={arcPoint(targetAngle, R - 20).y}
+          x2={arcPoint(targetAngle, R - 4).x}
+          y2={arcPoint(targetAngle, R - 4).y}
+          stroke="var(--cyan)"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          opacity="0.7"
+        />
 
         {/* 刻度 */}
         {[...Array(19)].map((_, i) => {
@@ -135,6 +157,7 @@ function PISStationStrip({ stations, currentIdx, direction }: { stations: string
   const DOT_R = 4;
   const ACTIVE_DOT_R = 6;
   const SPACING = 36;
+  const isUp = direction === 'UP';
 
   return (
     <div className="overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
@@ -149,7 +172,7 @@ function PISStationStrip({ stations, currentIdx, direction }: { stations: string
           const x1 = 30 + i * SPACING + ACTIVE_DOT_R;
           const x2 = 30 + (i + 1) * SPACING - ACTIVE_DOT_R;
           const y = STATION_H + ACTIVE_DOT_R;
-          const isPast = i < currentIdx;
+          const isPast = isUp ? i > currentIdx : i < currentIdx;
           return (
             <line
               key={`line-${i}`}
@@ -161,11 +184,11 @@ function PISStationStrip({ stations, currentIdx, direction }: { stations: string
         })}
 
         {/* ═══ 站点圆点 ═══ */}
-        {stations.map((name, i) => {
+        {stations.map((_name, i) => {
           const cx = 30 + i * SPACING;
           const cy = STATION_H + ACTIVE_DOT_R;
           const isCurrent = i === currentIdx;
-          const isPast = i < currentIdx;
+          const isPast = isUp ? i > currentIdx : i < currentIdx;
           const isEnd = i === stations.length - 1;
 
           return (
@@ -208,7 +231,7 @@ function PISStationStrip({ stations, currentIdx, direction }: { stations: string
         {stations.map((name, i) => {
           const cx = 30 + i * SPACING;
           const isCurrent = i === currentIdx;
-          const isPast = i < currentIdx;
+          const isPast = isUp ? i > currentIdx : i < currentIdx;
           const tY = STATION_H + ACTIVE_DOT_R + 16;
 
           return (

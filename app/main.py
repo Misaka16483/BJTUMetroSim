@@ -9,6 +9,7 @@ from typing import Any
 from app.core.clock import SimulationClock
 from app.core.message_bus import MessageBus
 from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
 from app.infra.excel_importer import LineDataImporter, validate_line_map
 from app.infra.recorder import RunRecorder
 
@@ -119,6 +120,11 @@ def bus_demo(args: argparse.Namespace) -> None:
         recorder.close()
 
 
+def member_d_demo(args: argparse.Namespace) -> None:
+    runner = Phase2MemberDDemoRunner(Path(args.output_dir) / "phase2_member_d_demo.sqlite")
+    _print_json(runner.run())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rail transit simulation Phase 0 CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -152,6 +158,13 @@ def build_parser() -> argparse.ArgumentParser:
     bus_parser = subparsers.add_parser("bus-demo", help="Run a minimal message bus and recorder demo")
     bus_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
     bus_parser.set_defaults(func=bus_demo)
+
+    member_d_parser = subparsers.add_parser(
+        "member-d-demo",
+        help="Run Phase 2 member D passenger, dispatch and self-simulated power demo",
+    )
+    member_d_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
+    member_d_parser.set_defaults(func=member_d_demo)
     return parser
 
 

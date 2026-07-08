@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.api_server import Line9DataService
 
@@ -24,7 +26,23 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(track_map["counts"]["platforms"], 56)
         self.assertEqual(track_map["counts"]["routes"], 249)
 
+    def test_member_d_demo_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = Line9DataService(run_dir=Path(tmp))
+            payload = service.member_d_demo()
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["lineId"], "9")
+            self.assertEqual(payload["phase"], 2)
+            summary = payload["summary"]
+            self.assertEqual(summary["counts"]["dispatch_decisions"], 3)
+            self.assertLess(summary["power"]["PWR-0901"]["tractionLimitRatio"], 1.0)
+            self.assertEqual(summary["power"]["PWR-0901"]["source"], "SELF_SIM")
+            self.assertIn(
+                "STAGGER_DEPARTURE",
+                {decision["action"] for decision in summary["dispatch"]},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
-

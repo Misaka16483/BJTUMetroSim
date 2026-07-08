@@ -3,39 +3,36 @@ import type { MetroLineData } from '../data/amapMetroApi';
 import type { TrackMapData } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro';
+type BackendStatus = 'idle' | 'connected' | 'fallback' | 'error';
 
-/** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {
   if (!line9) return [];
   return line9.stations.map((s) => s.name.replace(/站$/, ''));
 }
 
 interface SimState {
-  // 仿真状态
   isRunning: boolean;
   speed: number;
   simTime: string;
   dayType: 'weekday' | 'friday' | 'saturday' | 'sunday';
 
-  // 地铁线路数据
   metroLines: MetroLineData[];
   linesLoading: boolean;
   linesError: string | null;
-  backendStatus: 'idle' | 'connected' | 'fallback' | 'error';
+  backendStatus: BackendStatus;
   hiddenLines: Set<string>;
   line9Stations: string[];
+  trackMap: TrackMapData | null;
+  viewMode: ViewMode;
 
-  // KPI
   punctuality: number;
   avgWaitTime: number;
   avgLoadRate: number;
   totalPassengers: number;
   totalBoarded: number;
 
-  // 选中的列车ID
   selectedTrainId: string | null;
 
-  // 信号屏 / MMI 字段
   driveMode: string;
   currentStation: string;
   nextStation: string;
@@ -48,25 +45,20 @@ interface SimState {
   runDirection: 'UP' | 'DOWN';
   stationIndex: number;
 
-  // 列车在地图上的位置
   trainLat: number | null;
   trainLng: number | null;
-
-  // 当前区间进度 0~1
   segmentProgress: number;
 
-  // 动作
   toggleRunning: () => void;
   setSpeed: (speed: number) => void;
   setDayType: (dayType: 'weekday' | 'friday' | 'saturday' | 'sunday') => void;
   selectTrain: (id: string | null) => void;
   tick: () => void;
 
-  // 线路管理
   setMetroLines: (lines: MetroLineData[]) => void;
   setLinesLoading: (loading: boolean) => void;
   setLinesError: (error: string | null) => void;
-  setBackendStatus: (status: 'idle' | 'connected' | 'fallback' | 'error') => void;
+  setBackendStatus: (status: BackendStatus) => void;
   setTrackMap: (trackMap: TrackMapData | null) => void;
   setViewMode: (viewMode: ViewMode) => void;
   toggleLineVisibility: (lineId: string) => void;
@@ -76,14 +68,12 @@ interface SimState {
 }
 
 let tickCount = 0;
-let simSecAccum = 7 * 3600; // 07:00:00 起点
+let simSecAccum = 7 * 3600;
 let currentRunDirection: 'UP' | 'DOWN' = 'DOWN';
 
-// ── 9号线 polyline 缓存（用于列车地图位置插值）──
 let cachedPolyline: [number, number][] | null = null;
-let cachedStationPolyIdx: number[] | null = null; // stationIndex → polylineIndex
+let cachedStationPolyIdx: number[] | null = null;
 
-/** 构建 polyline 缓存：扁平化坐标 + 每个站点在 polyline 上的最近点索引 */
 function buildPolylineCache(line9: MetroLineData) {
   const flat: [number, number][] = [];
   for (const seg of line9.coordinates) {
@@ -93,21 +83,22 @@ function buildPolylineCache(line9: MetroLineData) {
   }
   cachedPolyline = flat;
 
-  // 为每个站点找 polyline 上最近的点
   const indices: number[] = [];
-  for (const stn of line9.stations) {
+  for (const station of line9.stations) {
     let bestIdx = 0;
     let bestDist = Infinity;
     for (let i = 0; i < flat.length; i++) {
-      const d = (flat[i][0] - stn.lat) ** 2 + (flat[i][1] - stn.lng) ** 2;
-      if (d < bestDist) { bestDist = d; bestIdx = i; }
+      const d = (flat[i][0] - station.lat) ** 2 + (flat[i][1] - station.lng) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
     }
     indices.push(bestIdx);
   }
   cachedStationPolyIdx = indices;
 }
 
-/** 沿 polyline 在两个站点之间插值，progress: 0=fromStation, 1=toStation */
 function interpolateOnPolyline(
   fromStationIdx: number,
   toStationIdx: number,
@@ -118,9 +109,8 @@ function interpolateOnPolyline(
 
   let fromIdx = cachedStationPolyIdx[fromStationIdx];
   let toIdx = cachedStationPolyIdx[toStationIdx];
-
-  // 确保 fromIdx < toIdx（polyline 本身是下行方向）
   if (fromIdx === undefined || toIdx === undefined) return null;
+
   const reversed = fromIdx > toIdx;
   if (reversed) {
     [fromIdx, toIdx] = [toIdx, fromIdx];
@@ -129,7 +119,6 @@ function interpolateOnPolyline(
 
   if (fromIdx === toIdx) return poly[fromIdx];
 
-  // 取子段并计算累计距离
   const sub = poly.slice(fromIdx, toIdx + 1);
   const dists: number[] = [0];
   for (let i = 1; i < sub.length; i++) {
@@ -166,6 +155,8 @@ export const useSimStore = create<SimState>((set, get) => ({
   backendStatus: 'idle',
   hiddenLines: new Set<string>(),
   line9Stations: [],
+  trackMap: null,
+  viewMode: 'macro',
   punctuality: 98.5,
   avgWaitTime: 145,
   avgLoadRate: 68,
@@ -173,7 +164,6 @@ export const useSimStore = create<SimState>((set, get) => ({
   totalBoarded: 0,
   selectedTrainId: null,
 
-  // 信号屏默认值
   driveMode: 'AM',
   currentStation: '郭公庄',
   nextStation: '丰台科技园',
@@ -191,7 +181,11 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   toggleRunning: () => {
     const next = !get().isRunning;
-    if (!next) { tickCount = 0; simSecAccum = 7 * 3600; currentRunDirection = 'DOWN'; }
+    if (!next) {
+      tickCount = 0;
+      simSecAccum = 7 * 3600;
+      currentRunDirection = 'DOWN';
+    }
     set({ isRunning: next, trainLat: null, trainLng: null });
   },
   setSpeed: (speed: number) => set({ speed }),
@@ -199,9 +193,14 @@ export const useSimStore = create<SimState>((set, get) => ({
   selectTrain: (id: string | null) => set({ selectedTrainId: id }),
 
   setMetroLines: (lines) => {
-    const line9 = lines.find((l) => l.id === '9');
+    const line9 = lines.find((line) => line.id === '9');
     if (line9) buildPolylineCache(line9);
-    set({ metroLines: lines, linesLoading: false, line9Stations: deriveStations9(line9) });
+    set({
+      metroLines: lines,
+      linesLoading: false,
+      line9Stations: deriveStations9(line9),
+      hiddenLines: new Set<string>(),
+    });
   },
   setLinesLoading: (loading) => set({ linesLoading: loading }),
   setLinesError: (error) => set({ linesError: error, linesLoading: false }),
@@ -209,8 +208,8 @@ export const useSimStore = create<SimState>((set, get) => ({
   setTrackMap: (trackMap) => set({ trackMap }),
   setViewMode: (viewMode) => set({ viewMode }),
 
-  toggleLineVisibility: (lineId) => set((s) => {
-    const next = new Set(s.hiddenLines);
+  toggleLineVisibility: (lineId) => set((state) => {
+    const next = new Set(state.hiddenLines);
     if (next.has(lineId)) next.delete(lineId);
     else next.add(lineId);
     return { hiddenLines: next };
@@ -218,13 +217,13 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   showAllLines: () => set({ hiddenLines: new Set() }),
 
-  hideAllLines: () => set((s) => {
-    const all = new Set(s.metroLines.map((l) => l.id));
+  hideAllLines: () => set((state) => {
+    const all = new Set(state.metroLines.map((line) => line.id));
     return { hiddenLines: all };
   }),
 
-  showOnlyLines: (lineIds) => set((s) => {
-    const all = new Set(s.metroLines.map((l) => l.id));
+  showOnlyLines: (lineIds) => set((state) => {
+    const all = new Set(state.metroLines.map((line) => line.id));
     lineIds.forEach((id) => all.delete(id));
     return { hiddenLines: all };
   }),
@@ -237,10 +236,8 @@ export const useSimStore = create<SimState>((set, get) => ({
     if (stations.length === 0) return;
 
     tickCount++;
-    const speedMult = state.speed;
-    const dt = 0.1 * speedMult; // real seconds per tick
+    const dt = 0.1 * state.speed;
 
-    // 仿真时钟: 1:1 推进
     simSecAccum += dt;
     const totalSec = simSecAccum;
     const h = Math.floor(totalSec / 3600) % 24;
@@ -248,42 +245,32 @@ export const useSimStore = create<SimState>((set, get) => ({
     const s = Math.floor(totalSec % 60);
     const newTime = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 
-    // 真实 9号线: 每站约 2min (120s), 站距 ~1300m, 最高 80km/h
-    // 速度曲线: 加速(~30s)→巡航(~60s)→制动(~30s)
-    const segDist = 1347; // 郭公庄→丰台科技园 ~1347m
-    const stationTime = 120; // 每站 120 秒 仿真时间
+    const segDist = 1347;
+    const stationTime = 120;
     const totalSegments = stations.length - 1;
-    const routeTime = stationTime * totalSegments; // 单程总时间
+    const routeTime = stationTime * totalSegments;
 
-    // ═══ 上下行方向自动循环 ═══
-    // 根据累计仿真时间判断当前属于哪个半程
     const elapsedInCycle = simSecAccum % (routeTime * 2);
     currentRunDirection = elapsedInCycle < routeTime ? 'DOWN' : 'UP';
 
-    // 当前半程内的位置
     const phaseTime = elapsedInCycle % routeTime;
     const simTravelDist = phaseTime * (segDist / stationTime);
     const curSegment = Math.floor(simTravelDist / segDist);
     const offsetInSegment = simTravelDist % segDist;
 
-    // 根据方向映射站点索引
     let curStationIdx: number;
     let nextIdx: number;
-
     if (currentRunDirection === 'DOWN') {
-      // 下行: 郭公庄(0) → 国家图书馆(N-1)
       curStationIdx = Math.min(curSegment, totalSegments - 1);
       nextIdx = Math.min(curSegment + 1, totalSegments);
     } else {
-      // 上行: 国家图书馆(N-1) → 郭公庄(0)
       curStationIdx = totalSegments - Math.min(curSegment, totalSegments - 1);
       nextIdx = Math.max(curStationIdx - 1, 0);
     }
 
-    // 加速段 25%, 巡航 50%, 制动 25%
     const accelLen = segDist * 0.25;
     const brakeLen = segDist * 0.25;
-    const cruiseSpd = 22.22; // 80 km/h
+    const cruiseSpd = 22.22;
 
     let spd = 0;
     if (offsetInSegment < accelLen) {
@@ -296,20 +283,12 @@ export const useSimStore = create<SimState>((set, get) => ({
     spd = Math.max(0, Math.min(cruiseSpd, spd));
 
     const targetDist = segDist - offsetInSegment;
-
-    // KPI 平滑波动
-    const kpiWait = 100 + Math.floor(Math.random() * 80);
-    const kpiPunct = 96 + Math.random() * 3;
-
-    // 当前区间进度 0~1
     const segProgress = segDist > 0 ? offsetInSegment / segDist : 0;
 
-    // 列车地图位置 — 沿9号线 polyline 插值
     let trainLat: number | null = null;
     let trainLng: number | null = null;
-    const line9 = state.metroLines.find((l) => l.id === '9');
+    const line9 = state.metroLines.find((line) => line.id === '9');
     if (line9 && cachedPolyline) {
-      // 如缓存未建则重建
       if (!cachedStationPolyIdx || cachedStationPolyIdx.length !== line9.stations.length) {
         buildPolylineCache(line9);
       }
@@ -319,6 +298,9 @@ export const useSimStore = create<SimState>((set, get) => ({
         trainLng = pos[1];
       }
     }
+
+    const kpiWait = 100 + Math.floor(Math.random() * 80);
+    const kpiPunct = 96 + Math.random() * 3;
 
     set({
       simTime: newTime,
@@ -336,8 +318,6 @@ export const useSimStore = create<SimState>((set, get) => ({
       segmentProgress: Math.round(segProgress * 1000) / 1000,
       trainLat,
       trainLng,
-
-      // KPI
       punctuality: Math.round(kpiPunct * 10) / 10,
       avgWaitTime: kpiWait,
       avgLoadRate: 60 + Math.floor(Math.random() * 30),
