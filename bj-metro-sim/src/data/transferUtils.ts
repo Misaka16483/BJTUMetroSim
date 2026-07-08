@@ -1,4 +1,4 @@
-import type { MetroLineData } from './metroApi';
+import type { MetroLineData } from './amapMetroApi';
 
 export interface TransferStation {
   name: string;

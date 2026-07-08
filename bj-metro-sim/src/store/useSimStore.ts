@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { MetroLineData } from '../data/metroApi';
+import type { MetroLineData } from '../data/amapMetroApi';
 
 interface SimState {
   // 仿真状态

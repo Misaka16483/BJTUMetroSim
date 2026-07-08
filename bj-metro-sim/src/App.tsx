@@ -2,19 +2,7 @@ import { useEffect, useState } from 'react';
 import MetroMap from './components/MetroMap';
 import LinesPanel from './components/LinesPanel';
 import { useSimStore } from './store/useSimStore';
-import { fetchBeijingMetro, getCachedMetroData, cacheMetroData } from './data/metroApi';
-import { fetchAmapBeijingMetro, getCachedAmapData, cacheAmapData } from './data/amapMetroApi';
-
-type DataSource = 'osm' | 'amap';
-
-// 默认数据源（可从 localStorage 读取持久化偏好）
-function getDefaultSource(): DataSource {
-  try {
-    const saved = localStorage.getItem('bj_metro_datasource');
-    if (saved === 'osm' || saved === 'amap') return saved;
-  } catch {}
-  return 'osm';
-}
+import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
 
 // 模块级标记, 防止 StrictMode 重挂载触发双重请求
 let globalFetching = false;
@@ -25,86 +13,55 @@ export default function App() {
   const setLinesError = useSimStore((s) => s.setLinesError);
 
   const [collapsed, setCollapsed] = useState(false);
-  const [source, setSource] = useState<DataSource>(getDefaultSource);
 
-  const switchSource = (s: DataSource) => {
-    setSource(s);
-    localStorage.setItem('bj_metro_datasource', s);
-    // 触发重新加载
-    globalFetching = false;
-    loadFromSource(s);
-  };
-
-  function loadFromSource(s: DataSource) {
+  function loadAmapData() {
     if (globalFetching) return;
 
-    if (s === 'amap') {
-      const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
-      const hasAmapKey = amapKey && amapKey !== 'your_amap_key_here';
-      if (!hasAmapKey) {
-        setLinesError('请先在 .env 中配置 VITE_AMAP_KEY');
-        return;
-      }
-
-      // 优先缓存
-      const cached = getCachedAmapData();
-      if (cached && cached.length > 0) {
-        console.log(`[MetroData] 高德缓存命中: ${cached.length} 条线路`);
-        setMetroLines(cached);
-        setLinesError(null);
-        return;
-      }
-
-      globalFetching = true;
-      setLinesLoading(true);
-      fetchAmapBeijingMetro(amapKey)
-        .then((lines) => {
-          console.log(`[MetroData] 高德返回: ${lines.length} 条线路`);
-          cacheAmapData(lines);
-          setMetroLines(lines);
-          setLinesError(null);
-        })
-        .catch((err) => {
-          console.error('[MetroData] 高德加载失败:', err);
-          const msg = err instanceof Error ? err.message : '未知错误';
-          setLinesError(`高德加载失败: ${msg}`);
-        })
-        .finally(() => {
-          setLinesLoading(false);
-          globalFetching = false;
-        });
-    } else {
-      // OSM
-      const cached = getCachedMetroData();
-      if (cached && cached.length > 0) {
-        console.log(`[MetroData] OSM 缓存命中: ${cached.length} 条线路`);
-        setMetroLines(cached);
-        setLinesError(null);
-        return;
-      }
-
-      globalFetching = true;
-      setLinesLoading(true);
-      fetchBeijingMetro()
-        .then((lines) => {
-          console.log(`[MetroData] OSM 返回: ${lines.length} 条线路`);
-          cacheMetroData(lines);
-          setMetroLines(lines);
-          setLinesError(null);
-        })
-        .catch((err) => {
-          console.error('[MetroData] OSM 加载失败:', err);
-          setLinesError(`加载失败: ${err instanceof Error ? err.message : '未知错误'}`);
-        })
-        .finally(() => {
-          setLinesLoading(false);
-          globalFetching = false;
-        });
+    const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
+    const hasAmapKey = amapKey && amapKey !== 'your_amap_key_here';
+    if (!hasAmapKey) {
+      setLinesError('请先在 .env 中配置 VITE_AMAP_KEY');
+      return;
     }
+
+    // 优先缓存
+    const cached = getCachedAmapData();
+    if (cached && cached.length > 0) {
+      console.log(`[MetroData] 缓存命中: ${cached.length} 条线路`);
+      setMetroLines(cached);
+      setLinesError(null);
+      return;
+    }
+
+    globalFetching = true;
+    setLinesLoading(true);
+    fetchAmapBeijingMetro(amapKey)
+      .then((lines) => {
+        console.log(`[MetroData] 高德返回: ${lines.length} 条线路`);
+        cacheAmapData(lines);
+        setMetroLines(lines);
+        setLinesError(null);
+      })
+      .catch((err) => {
+        console.error('[MetroData] 加载失败:', err);
+        const fallback = getPartialAmapCache();
+        if (fallback && fallback.length > 0) {
+          console.warn(`[MetroData] 降级使用缓存: ${fallback.length} 条 (不完整)`);
+          setMetroLines(fallback);
+          setLinesError(`API受限, 仅显示已缓存 ${fallback.length} 条线路`);
+        } else {
+          const msg = err instanceof Error ? err.message : '未知错误';
+          setLinesError(`加载失败: ${msg}`);
+        }
+      })
+      .finally(() => {
+        setLinesLoading(false);
+        globalFetching = false;
+      });
   }
 
   useEffect(() => {
-    loadFromSource(source);
+    loadAmapData();
   }, []);
 
   return (
@@ -130,30 +87,12 @@ export default function App() {
           </span>
         </div>
 
-        <div className="flex items-center gap-4">
-          {/* 数据源切换 */}
-          <div className="flex items-center gap-1.5 rounded-full px-2 py-0.5" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(74,158,255,0.15)' }}>
-            <button
-              onClick={() => switchSource('osm')}
-              style={{ transition: 'all 200ms' }}
-              className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${source === 'osm' ? 'bg-[#4a9eff]/20 text-[#4a9eff]' : 'text-[#3a4a60] hover:text-[#6a7a90]'}`}
-            >
-              OSM
-            </button>
-            <button
-              onClick={() => switchSource('amap')}
-              style={{ transition: 'all 200ms' }}
-              className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${source === 'amap' ? 'bg-[#4a9eff]/20 text-[#4a9eff]' : 'text-[#3a4a60] hover:text-[#6a7a90]'}`}
-            >
-              AMAP
-            </button>
-          </div>
-
-          <div className="flex items-center gap-4 text-[10px] font-mono text-[#3a4a60]">
-            <span>SYS <span className="text-[#00ff88]">ONLINE</span></span>
-            <span className="text-[#1a2240]">|</span>
-            <span>UTC+8</span>
-          </div>
+        <div className="flex items-center gap-4 text-[10px] font-mono text-[#3a4a60]">
+          <span>SYS <span className="text-[#00ff88]">ONLINE</span></span>
+          <span className="text-[#1a2240]">|</span>
+          <span>AMAP</span>
+          <span className="text-[#1a2240]">|</span>
+          <span>UTC+8</span>
         </div>
       </header>
 
@@ -214,7 +153,7 @@ export default function App() {
         <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#4a9eff]/15 to-transparent" />
         <div className="flex items-center gap-3 text-[9px] font-mono" style={{ color: '#2a3040' }}>
           <span className="text-[#00ff88]">■</span>
-          <span>{source === 'amap' ? 'RASTER / VECTOR · AMAP' : 'RASTER / VECTOR · OSM'}</span>
+          <span>RASTER / VECTOR · AMAP</span>
         </div>
         <span className="text-[9px] font-mono" style={{ color: '#1a2240' }}>v0.1.0</span>
       </footer>

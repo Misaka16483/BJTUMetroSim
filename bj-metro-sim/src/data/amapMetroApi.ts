@@ -34,7 +34,13 @@ const LINE_COLORS: Record<string, string> = {
   '西郊': '#CE3D3A', // 西郊线
 };
 
-import type { MetroLineData } from './metroApi';
+export interface MetroLineData {
+  id: string;
+  name: string;
+  color: string;
+  coordinates: [number, number][][]; // MultiLineString segments
+  stations: { name: string; lat: number; lng: number }[];
+}
 
 // v3/bus/linename 返回类型
 interface AmapBusStop {
@@ -142,8 +148,10 @@ async function queryBusLine(apiKey: string, keyword: string): Promise<AmapBusLin
   const json: AmapBusResponse = await resp.json();
   // 检测 API 错误（如配额耗尽）
   if (json.status !== '1') {
-    const errMsg = json.status === '0' ? `API错误(info=${json.count})` : `status=${json.status}`;
-    throw new Error(`高德公交API返回异常: ${errMsg}`);
+    // 高德 API 错误信息在 info / infocode 字段（非 count）
+    const raw = JSON.stringify(json);
+    console.error(`[AmapAPI] 查询 "${keyword}" 失败, 完整响应:`, json);
+    throw new Error(`高德API错误: ${raw}`);
   }
   return json.buslines || [];
 }
@@ -189,32 +197,66 @@ const LINE_QUERIES: { id: string; keywords: string[] }[] = [
 ];
 
 /**
- * 从高德公交线路 API 获取北京地铁数据（逐条查询）
+ * 从高德公交线路 API 获取北京地铁数据（逐条查询，支持增量缓存续传）
  */
 export async function fetchAmapBeijingMetro(apiKey: string): Promise<MetroLineData[]> {
-  console.log('[AmapMetro] 开始逐条查询北京地铁线路...');
-  const result: MetroLineData[] = [];
-  const seenNames = new Set<string>();
+  // 先加载已有缓存（可能是不完整的部分数据）
+  const cached = loadIncrementalCache();
+  const result: MetroLineData[] = [...cached];
+  const seenNames = new Set<string>(result.map((l) => `${l.id}_${l.name}`));
+  const cachedIds = new Set(result.map((l) => l.id));
+  const totalQueries = LINE_QUERIES.length;
+  const skipCount = LINE_QUERIES.filter((q) => cachedIds.has(q.id)).length;
+
+  if (cached.length > 0) {
+    console.log(`[AmapMetro] 增量缓存命中: ${cached.length}/${totalQueries} 条已缓存, 继续查询剩余 ${totalQueries - skipCount} 条...`);
+  } else {
+    console.log(`[AmapMetro] 开始逐条查询北京地铁线路 (${totalQueries} 条)...`);
+  }
+
+  let quotaExhausted = false;
 
   for (let qi = 0; qi < LINE_QUERIES.length; qi++) {
     const q = LINE_QUERIES[qi];
+
+    // 跳过已缓存的线路
+    if (cachedIds.has(q.id)) {
+      continue;
+    }
+
+    // 配额已耗尽，不再查询剩余线路
+    if (quotaExhausted) {
+      console.warn(`[AmapMetro] 跳过 ${q.keywords[0]} (配额耗尽, 已缓存 ${result.length} 条)`);
+      continue;
+    }
+
     let bestLine: AmapBusLine | null = null;
 
     // 尝试不同关键字
     for (const kw of q.keywords) {
       if (qi > 0) await sleep(800); // 限流延时（QPS限制约1-2次/秒）
-      const lines = await queryBusLine(apiKey, kw);
+      try {
+        const lines = await queryBusLine(apiKey, kw);
 
-      // 筛选地铁类型，排除支线/环线（优先选主线）
-      const subwayLines = lines.filter((l) => l.type === '地铁');
-      if (subwayLines.length === 0) continue;
+        // 筛选地铁类型，排除支线/环线（优先选主线）
+        const subwayLines = lines.filter((l) => l.type === '地铁');
+        if (subwayLines.length === 0) continue;
 
-      // 首选非支线/非环线的
-      const mainLine = subwayLines.find(
-        (l) => !l.name.includes('支线') && !l.name.includes('内环') && !l.name.includes('外环')
-      );
-      bestLine = mainLine || subwayLines[0];
-      break;
+        // 首选非支线/非环线的
+        const mainLine = subwayLines.find(
+          (l) => !l.name.includes('支线') && !l.name.includes('内环') && !l.name.includes('外环')
+        );
+        bestLine = mainLine || subwayLines[0];
+        break;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('CUQPS') || msg.includes('LIMIT') || msg.includes('10021')) {
+          console.warn(`[AmapMetro] 高德日配额耗尽, 停止查询。已缓存 ${result.length} 条线路`);
+          quotaExhausted = true;
+          break; // 跳出关键字循环
+        }
+        throw err; // 其他错误正常抛出
+      }
     }
 
     if (!bestLine) {
@@ -280,6 +322,9 @@ export async function fetchAmapBeijingMetro(apiKey: string): Promise<MetroLineDa
     seenNames.add(dedupKey);
 
     result.push({ id: actualId, name: displayName, color, coordinates: segments, stations });
+
+    // 逐条增量写入缓存（中断后可续传）
+    saveIncrementalCache(result);
   }
 
   // 合并 1号线 + 八通线
@@ -302,13 +347,46 @@ function getRandomColor(key: string): string {
 }
 
 // ═══════════════════════════════════════════════
-// 本地缓存
+// 增量本地缓存（支持中途中断后续传）
 // ═══════════════════════════════════════════════
-const CACHE_KEY = 'bj_metro_amap_v2';
-const CACHE_TS_KEY = 'bj_metro_amap_v2_ts';
+const CACHE_KEY = 'bj_metro_amap_v3';
+const CACHE_TS_KEY = 'bj_metro_amap_v3_ts';
 const CACHE_TTL = 24 * 60 * 60 * 1000;
 
+/** 加载增量缓存（可能是不完整的部分数据） */
+function loadIncrementalCache(): MetroLineData[] {
+  try {
+    const ts = localStorage.getItem(CACHE_TS_KEY);
+    if (!ts || Date.now() - parseInt(ts) > CACHE_TTL) {
+      // 过期则清空
+      localStorage.removeItem(CACHE_KEY);
+      localStorage.removeItem(CACHE_TS_KEY);
+      return [];
+    }
+    const data = localStorage.getItem(CACHE_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 增量写入缓存（每查完一条线就保存） */
+function saveIncrementalCache(lines: MetroLineData[]): void {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(lines));
+    localStorage.setItem(CACHE_TS_KEY, String(Date.now()));
+  } catch { /* localStorage 满了，忽略 */ }
+}
+
+/** 获取完整缓存（仅当 29 条全部缓存时返回，否则返回 null 走增量加载） */
 export function getCachedAmapData(): MetroLineData[] | null {
+  const lines = getPartialAmapCache();
+  if (lines && lines.length >= LINE_QUERIES.length) return lines;
+  return null;
+}
+
+/** 获取不完整缓存（不管有多少条都返回，用于降级显示） */
+export function getPartialAmapCache(): MetroLineData[] | null {
   try {
     const ts = localStorage.getItem(CACHE_TS_KEY);
     if (!ts || Date.now() - parseInt(ts) > CACHE_TTL) {
@@ -317,15 +395,15 @@ export function getCachedAmapData(): MetroLineData[] | null {
       return null;
     }
     const data = localStorage.getItem(CACHE_KEY);
-    return data ? JSON.parse(data) : null;
+    if (!data) return null;
+    const lines: MetroLineData[] = JSON.parse(data);
+    return lines.length > 0 ? lines : null;
   } catch {
     return null;
   }
 }
 
+/** 全量写入缓存（仅在 fetchAmapBeijingMetro 全部完成后外部调用） */
 export function cacheAmapData(data: MetroLineData[]): void {
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(data));
-    localStorage.setItem(CACHE_TS_KEY, String(Date.now()));
-  } catch { /* ignore */ }
+  saveIncrementalCache(data);
 }

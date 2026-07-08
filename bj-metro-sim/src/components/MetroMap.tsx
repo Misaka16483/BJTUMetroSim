@@ -4,7 +4,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import darkStyle from '../data/darkStyle';
 import MAPTILER_KEY, { MAPTILER_STYLE } from '../data/maptilerKey';
 import { useSimStore } from '../store/useSimStore';
-import type { MetroLineData } from '../data/metroApi';
+import type { MetroLineData } from '../data/amapMetroApi';
 
 // 判断是否有有效的 MapTiler Key
 const hasMapTilerKey = MAPTILER_KEY && MAPTILER_KEY !== 'YOUR_KEY_HERE';
