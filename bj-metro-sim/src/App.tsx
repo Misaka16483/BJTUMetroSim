@@ -17,46 +17,66 @@ export default function App() {
   function loadAmapData() {
     if (globalFetching) return;
 
-    const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
-    const hasAmapKey = amapKey && amapKey !== 'your_amap_key_here';
-    if (!hasAmapKey) {
-      setLinesError('请先在 .env 中配置 VITE_AMAP_KEY');
-      return;
-    }
-
-    // 优先缓存
-    const cached = getCachedAmapData();
-    if (cached && cached.length > 0) {
-      console.log(`[MetroData] 缓存命中: ${cached.length} 条线路`);
-      setMetroLines(cached);
-      setLinesError(null);
-      return;
-    }
-
+    // 1) 优先加载仓库内置的静态 JSON（无需 API key，秒加载）
     globalFetching = true;
     setLinesLoading(true);
-    fetchAmapBeijingMetro(amapKey)
+    fetch('/beijing_metro_lines.json')
+      .then((resp) => {
+        if (!resp.ok) throw new Error('no static file');
+        return resp.json();
+      })
       .then((lines) => {
-        console.log(`[MetroData] 高德返回: ${lines.length} 条线路`);
-        cacheAmapData(lines);
+        console.log(`[MetroData] 静态JSON命中: ${lines.length} 条线路`);
         setMetroLines(lines);
         setLinesError(null);
-      })
-      .catch((err) => {
-        console.error('[MetroData] 加载失败:', err);
-        const fallback = getPartialAmapCache();
-        if (fallback && fallback.length > 0) {
-          console.warn(`[MetroData] 降级使用缓存: ${fallback.length} 条 (不完整)`);
-          setMetroLines(fallback);
-          setLinesError(`API受限, 仅显示已缓存 ${fallback.length} 条线路`);
-        } else {
-          const msg = err instanceof Error ? err.message : '未知错误';
-          setLinesError(`加载失败: ${msg}`);
-        }
-      })
-      .finally(() => {
         setLinesLoading(false);
         globalFetching = false;
+      })
+      .catch(() => {
+        // 2) 静态文件不存在，降级到 localStorage 缓存
+        const cached = getCachedAmapData();
+        if (cached && cached.length > 0) {
+          console.log(`[MetroData] localStorage缓存命中: ${cached.length} 条线路`);
+          setMetroLines(cached);
+          setLinesError(null);
+          setLinesLoading(false);
+          globalFetching = false;
+          return;
+        }
+
+        // 3) 最后走 AMAP API
+        const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
+        const hasAmapKey = amapKey && amapKey !== 'your_amap_key_here';
+        if (!hasAmapKey) {
+          setLinesError('请先在 .env 中配置 VITE_AMAP_KEY');
+          setLinesLoading(false);
+          globalFetching = false;
+          return;
+        }
+
+        fetchAmapBeijingMetro(amapKey)
+          .then((lines) => {
+            console.log(`[MetroData] 高德返回: ${lines.length} 条线路`);
+            cacheAmapData(lines);
+            setMetroLines(lines);
+            setLinesError(null);
+          })
+          .catch((err) => {
+            console.error('[MetroData] 加载失败:', err);
+            const fallback = getPartialAmapCache();
+            if (fallback && fallback.length > 0) {
+              console.warn(`[MetroData] 降级使用缓存: ${fallback.length} 条 (不完整)`);
+              setMetroLines(fallback);
+              setLinesError(`API受限, 仅显示已缓存 ${fallback.length} 条线路`);
+            } else {
+              const msg = err instanceof Error ? err.message : '未知错误';
+              setLinesError(`加载失败: ${msg}`);
+            }
+          })
+          .finally(() => {
+            setLinesLoading(false);
+            globalFetching = false;
+          });
       });
   }
 
