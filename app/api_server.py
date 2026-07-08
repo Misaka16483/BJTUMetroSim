@@ -12,12 +12,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
 
 
 JsonDict = dict[str, Any]
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = ROOT / "data" / "cache" / "line_map.json"
+DEFAULT_RUN_DIR = ROOT / "outputs" / "runs"
 REPO_STATIONS = ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
 WORKSPACE_STATIONS = (
     ROOT / "external" / "BJTUMetroSim" / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
@@ -43,9 +45,15 @@ LINE9_COORDS: dict[str, tuple[float, float]] = {
 
 
 class Line9DataService:
-    def __init__(self, cache_path: Path = DEFAULT_CACHE, stations_path: Path = DEFAULT_STATIONS) -> None:
+    def __init__(
+        self,
+        cache_path: Path = DEFAULT_CACHE,
+        stations_path: Path = DEFAULT_STATIONS,
+        run_dir: Path = DEFAULT_RUN_DIR,
+    ) -> None:
         self.cache_path = cache_path
         self.stations_path = stations_path
+        self.run_dir = run_dir
         self._line_map: JsonDict | None = None
         self._stations: list[JsonDict] | None = None
 
@@ -235,6 +243,18 @@ class Line9DataService:
             "sectionOccupancies": [],
         }
 
+    def member_d_demo(self) -> JsonDict:
+        db_path = self.run_dir / "phase2_member_d_demo.sqlite"
+        summary = Phase2MemberDDemoRunner(db_path).run()
+        return {
+            "ok": True,
+            "lineId": "9",
+            "phase": 2,
+            "module": "member-d",
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "summary": summary,
+        }
+
     def _load_station_catalog(self) -> list[JsonDict]:
         with self.stations_path.open("r", encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
@@ -284,6 +304,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.track_map())
             elif path == "/api/sim/state":
                 self._send_json(self.service.sim_state())
+            elif path == "/api/phase2/member-d/demo":
+                self._send_json(self.service.member_d_demo())
             elif match := re.fullmatch(r"/api/track/segments/(\d+)/context", path):
                 self._send_json(self.service.segment_context(int(match.group(1))))
             else:
@@ -328,9 +350,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--cache", default=str(DEFAULT_CACHE))
     parser.add_argument("--stations", default=str(DEFAULT_STATIONS))
+    parser.add_argument("--run-dir", default=str(DEFAULT_RUN_DIR))
     args = parser.parse_args()
 
-    service = Line9DataService(Path(args.cache), Path(args.stations))
+    service = Line9DataService(Path(args.cache), Path(args.stations), Path(args.run_dir))
     server = build_server(args.host, args.port, service)
     print(f"Phase 0 API listening on http://{args.host}:{args.port}")
     server.serve_forever()
