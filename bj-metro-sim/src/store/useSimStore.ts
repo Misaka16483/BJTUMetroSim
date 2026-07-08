@@ -1,5 +1,8 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
+import type { TrackMapData } from '../data/backendApi';
+
+type ViewMode = 'macro' | 'micro';
 
 /** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {
@@ -18,6 +21,7 @@ interface SimState {
   metroLines: MetroLineData[];
   linesLoading: boolean;
   linesError: string | null;
+  backendStatus: 'idle' | 'connected' | 'fallback' | 'error';
   hiddenLines: Set<string>;
   line9Stations: string[];
 
@@ -62,6 +66,9 @@ interface SimState {
   setMetroLines: (lines: MetroLineData[]) => void;
   setLinesLoading: (loading: boolean) => void;
   setLinesError: (error: string | null) => void;
+  setBackendStatus: (status: 'idle' | 'connected' | 'fallback' | 'error') => void;
+  setTrackMap: (trackMap: TrackMapData | null) => void;
+  setViewMode: (viewMode: ViewMode) => void;
   toggleLineVisibility: (lineId: string) => void;
   showAllLines: () => void;
   hideAllLines: () => void;
@@ -156,6 +163,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   metroLines: [],
   linesLoading: false,
   linesError: null,
+  backendStatus: 'idle',
   hiddenLines: new Set<string>(),
   line9Stations: [],
   punctuality: 98.5,
@@ -197,6 +205,9 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
   setLinesLoading: (loading) => set({ linesLoading: loading }),
   setLinesError: (error) => set({ linesError: error, linesLoading: false }),
+  setBackendStatus: (status) => set({ backendStatus: status }),
+  setTrackMap: (trackMap) => set({ trackMap }),
+  setViewMode: (viewMode) => set({ viewMode }),
 
   toggleLineVisibility: (lineId) => set((s) => {
     const next = new Set(s.hiddenLines);

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime outputs
+outputs/
+*.sqlite
+*.db
+MetroDynamicsJavaDemo/out/
+MetroDynamicsJavaDemo/output/
+
+# Node
+node_modules/
+dist/
+build/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Office temporary lock files
+~$*
+
+# Logs
+*.log

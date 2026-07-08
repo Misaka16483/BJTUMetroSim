@@ -39,7 +39,15 @@ export interface MetroLineData {
   name: string;
   color: string;
   coordinates: [number, number][][]; // MultiLineString segments
-  stations: { name: string; lat: number; lng: number }[];
+  stations: {
+    name: string;
+    lat: number;
+    lng: number;
+    code?: string;
+    mileageM?: number;
+    platformIds?: number[];
+    platformSegmentIds?: number[];
+  }[];
 }
 
 // v3/bus/linename 返回类型

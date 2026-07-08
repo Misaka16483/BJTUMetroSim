@@ -6,6 +6,7 @@ import KPIPanel from './components/KPIPanel';
 import SignalScreenPanel from './components/SignalScreenPanel';
 import { useSimStore } from './store/useSimStore';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
+import { fetchBackendBundle } from './data/backendApi';
 
 let globalFetching = false;
 const PANEL_W = 320;
@@ -19,10 +20,12 @@ export default function App() {
   const linesLoading = useSimStore((s) => s.linesLoading);
   const [collapsed, setCollapsed] = useState(false);
 
-  function loadAmapData() {
+  function loadAmapData(reason: string) {
     if (globalFetching) return;
     globalFetching = true;
     setLinesLoading(true);
+
+    // 1) 后端不可用时，优先加载仓库内置静态 JSON。
     fetch('/beijing_metro_lines.json')
       .then((resp) => {
         if (!resp.ok) throw new Error('no static file');
@@ -31,6 +34,7 @@ export default function App() {
       .then((lines) => {
         setMetroLines(lines);
         setLinesError(null);
+        setBackendStatus('fallback');
         setLinesLoading(false);
         globalFetching = false;
       })
@@ -39,6 +43,7 @@ export default function App() {
         if (cached && cached.length > 0) {
           setMetroLines(cached);
           setLinesError(null);
+          setBackendStatus('fallback');
           setLinesLoading(false);
           globalFetching = false;
           return;
@@ -100,6 +105,31 @@ export default function App() {
           >
             LINE 9 GGZ→GTG
           </span>
+
+          <div className="ml-3 flex items-center border border-[#1a2240]/70">
+            <button
+              type="button"
+              onClick={() => setViewMode('macro')}
+              className="px-3 py-1 text-[10px] cursor-pointer"
+              style={{
+                color: viewMode === 'macro' ? '#dce8f8' : '#52647b',
+                background: viewMode === 'macro' ? 'rgba(74,158,255,0.12)' : 'transparent',
+              }}
+            >
+              宏观线路
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('micro')}
+              className="px-3 py-1 text-[10px] cursor-pointer"
+              style={{
+                color: viewMode === 'micro' ? '#dce8f8' : '#52647b',
+                background: viewMode === 'micro' ? 'rgba(143,195,31,0.14)' : 'transparent',
+              }}
+            >
+              轨道级
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
           <span className="led led-online" /> SYS ONLINE
@@ -142,6 +172,7 @@ export default function App() {
             }
           </svg>
         </button>
+        )}
 
         {/* right panels */}
         <div
@@ -166,6 +197,7 @@ export default function App() {
             </div>
           </div>
         </div>
+        )}
       </div>
 
       {/* ═══════════════ footer ═══════════════ */}

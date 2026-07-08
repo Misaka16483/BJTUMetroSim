@@ -8,8 +8,10 @@ import type { MetroLineData } from '../data/amapMetroApi';
 import { computeStationTransfers } from '../data/transferUtils';
 
 // 判断是否有有效的 MapTiler Key
-const hasMapTilerKey = MAPTILER_KEY && MAPTILER_KEY !== 'YOUR_KEY_HERE';
-const styleConfig = hasMapTilerKey ? MAPTILER_STYLE : darkStyle;
+const hasMapTilerKey = Boolean(MAPTILER_KEY) && String(MAPTILER_KEY) !== 'YOUR_KEY_HERE';
+const styleConfig: string | maplibregl.StyleSpecification = hasMapTilerKey
+  ? MAPTILER_STYLE
+  : darkStyle as maplibregl.StyleSpecification;
 
 // ── 模块级：防重复注册 & 弹窗引用 ──
 const registeredClickLayers = new Set<string>();
@@ -41,7 +43,6 @@ export default function MetroMap() {
       minZoom: 9,
       maxZoom: 16,
       attributionControl: false,
-      antialias: true,
     });
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
@@ -330,7 +331,7 @@ function renderMetroLines(
     }
 
     // 构建 MultiLineString GeoJSON
-    const geojson: GeoJSON.Feature<GeoJSON.MultiLineString> = {
+    const geojson = {
       type: 'Feature',
       properties: { id: line.id, name: line.name, color: line.color },
       geometry: {
@@ -339,21 +340,25 @@ function renderMetroLines(
           seg.map(([lat, lng]) => [lng, lat])
         ),
       },
-    };
+    } as maplibregl.GeoJSONSourceSpecification['data'];
 
     // 站点 Point GeoJSON
-    const stationsGeojson: GeoJSON.FeatureCollection<GeoJSON.Point> = {
+    const stationsGeojson = {
       type: 'FeatureCollection',
       features: line.stations.map((s) => ({
         type: 'Feature',
         properties: {
           name: s.name,
           lineId: line.id,
+          code: s.code ?? '',
+          mileageM: s.mileageM ?? null,
+          platformIds: (s.platformIds ?? []).join(', '),
+          platformSegmentIds: (s.platformSegmentIds ?? []).join(', '),
           isTransfer: transferCoordSet.has(`${s.lat.toFixed(4)},${s.lng.toFixed(4)}`),
         },
         geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
       })),
-    };
+    } as maplibregl.GeoJSONSourceSpecification['data'];
 
     const stationSourceId = `metro-station-${line.id}`;
 
@@ -537,7 +542,13 @@ function addLayerIfNotExists(map: maplibregl.Map, layer: maplibregl.LayerSpecifi
 
 function buildPopupHtml(
   name: string,
-  entries: { line: MetroLineData; index: number }[]
+  entries: { line: MetroLineData; index: number }[],
+  properties: {
+    code?: string;
+    mileageM?: number;
+    platformIds?: string;
+    platformSegmentIds?: string;
+  }
 ): string {
   const isTransfer = entries.length > 1;
   const rows = entries
@@ -557,6 +568,14 @@ function buildPopupHtml(
     <div class="station-popup">
       <div class="popup-name">${name}${transferBadge}</div>
       <div class="popup-rows">${rows}</div>
+      ${properties.code ? `
+        <div class="popup-meta">
+          <div><span>站码</span><b>${properties.code}</b></div>
+          <div><span>里程</span><b>K${((properties.mileageM ?? 0) / 1000).toFixed(3)}</b></div>
+          <div><span>站台</span><b>${properties.platformIds || '-'}</b></div>
+          <div><span>Seg</span><b>${properties.platformSegmentIds || '-'}</b></div>
+        </div>
+      ` : ''}
     </div>
   `;
 }
