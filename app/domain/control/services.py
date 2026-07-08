@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
+from app.domain.control.models import AtoConfig, AtoTarget, DriverHandleMode, DriverInput, OperationMode
 from app.domain.vehicle.models import CommandSource, ControlCommand, TrainState
 
 
@@ -85,7 +85,50 @@ class CabControlService:
         self._require_train_id(train_id, manual_command)
         return manual_command
 
+    def command_from_driver_input(
+        self,
+        driver_input: DriverInput,
+        max_traction_level: int = 5,
+        max_brake_level: int = 5,
+    ) -> ControlCommand:
+        if max_traction_level <= 0:
+            raise ValueError("max_traction_level must be positive")
+        if max_brake_level <= 0:
+            raise ValueError("max_brake_level must be positive")
+
+        if driver_input.emergency_brake:
+            return ControlCommand(
+                driver_input.train_id,
+                emergency_brake=True,
+                source=driver_input.to_command_source(),
+            )
+        if driver_input.handle_mode == DriverHandleMode.TRACTION:
+            return ControlCommand(
+                driver_input.train_id,
+                traction_level=self._percent_to_level(driver_input.traction_percent, max_traction_level),
+                source=driver_input.to_command_source(),
+            )
+        if driver_input.handle_mode == DriverHandleMode.BRAKE:
+            return ControlCommand(
+                driver_input.train_id,
+                brake_level=self._percent_to_level(driver_input.brake_percent, max_brake_level),
+                source=driver_input.to_command_source(),
+            )
+        if driver_input.handle_mode == DriverHandleMode.FAST_BRAKE:
+            return ControlCommand(
+                driver_input.train_id,
+                brake_level=max_brake_level,
+                source=driver_input.to_command_source(),
+            )
+        return ControlCommand.coast(driver_input.train_id, source=driver_input.to_command_source())
+
     @staticmethod
     def _require_train_id(train_id: str, command: ControlCommand) -> None:
         if command.train_id != train_id:
             raise ValueError("command train_id must match requested train_id")
+
+    @staticmethod
+    def _percent_to_level(percent: float, max_level: int) -> int:
+        if percent <= 0:
+            return 0
+        return max(1, min(max_level, math.ceil(percent / 100.0 * max_level)))

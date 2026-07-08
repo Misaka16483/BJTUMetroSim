@@ -3,12 +3,52 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from app.domain.vehicle.models import CommandSource
+
 
 class OperationMode(str, Enum):
     MANUAL = "MANUAL"
     ATO = "ATO"
     ATP_SUPERVISED = "ATP_SUPERVISED"
     SH = "SH"
+
+
+class DriverHandleMode(str, Enum):
+    NEUTRAL = "NEUTRAL"
+    TRACTION = "TRACTION"
+    BRAKE = "BRAKE"
+    FAST_BRAKE = "FAST_BRAKE"
+
+
+def _require_percent(value: float, field_name: str) -> None:
+    if value < 0 or value > 100:
+        raise ValueError(f"{field_name} must be between 0 and 100")
+
+
+@dataclass(frozen=True)
+class DriverInput:
+    train_id: str
+    handle_mode: DriverHandleMode = DriverHandleMode.NEUTRAL
+    traction_percent: float = 0.0
+    brake_percent: float = 0.0
+    emergency_brake: bool = False
+    reported_speed_mps: float | None = None
+    source: str = "PLC"
+
+    def __post_init__(self) -> None:
+        if not self.train_id:
+            raise ValueError("train_id must not be empty")
+        if not isinstance(self.handle_mode, DriverHandleMode):
+            object.__setattr__(self, "handle_mode", DriverHandleMode(str(self.handle_mode)))
+        _require_percent(self.traction_percent, "traction_percent")
+        _require_percent(self.brake_percent, "brake_percent")
+        if self.reported_speed_mps is not None and self.reported_speed_mps < 0:
+            raise ValueError("reported_speed_mps must be non-negative")
+        if not self.source:
+            raise ValueError("source must not be empty")
+
+    def to_command_source(self) -> CommandSource:
+        return CommandSource.MANUAL
 
 
 @dataclass(frozen=True)

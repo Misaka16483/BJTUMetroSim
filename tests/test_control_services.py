@@ -8,6 +8,7 @@ from app.domain.control import (
     AtoTarget,
     CabControlService,
     OperationMode,
+    VehicleInteractiveSession,
     run_ato_stop_demo,
 )
 from app.domain.vehicle import CommandSource, ControlCommand, SimpleVehicleModel, TrainState
@@ -98,6 +99,57 @@ class VehicleDemoScenarioTests(unittest.TestCase):
         self.assertEqual(payload["status"], "STOPPED_AT_TARGET")
         self.assertLessEqual(abs(payload["stop_error_m"]), 1.0)
         self.assertEqual(payload["final_speed_mps"], 0.0)
+
+
+class VehicleInteractiveSessionTests(unittest.TestCase):
+    def test_manual_traction_and_brake_commands_step_state(self) -> None:
+        session = VehicleInteractiveSession(target_position_m=200.0)
+
+        after_traction = session.apply_command("traction 3")
+        after_brake = session.apply_command("brake 2")
+
+        self.assertEqual(after_traction["command"]["mode"], "TRACTION")
+        self.assertGreater(after_traction["speedMps"], 0)
+        self.assertEqual(after_brake["command"]["mode"], "BRAKE")
+        self.assertEqual(after_brake["ticks"], 2)
+
+    def test_ato_command_can_be_applied_interactively(self) -> None:
+        session = VehicleInteractiveSession(target_position_m=200.0)
+        payload = session.apply_command("ato")
+
+        self.assertEqual(payload["command"]["source"], "ATO")
+        self.assertGreater(payload["command"]["tractionLevel"], 0)
+
+    def test_reset_restores_initial_state(self) -> None:
+        session = VehicleInteractiveSession(target_position_m=200.0)
+        session.apply_command("traction 3")
+
+        payload = session.apply_command("reset")
+
+        self.assertEqual(payload["message"], "reset")
+        self.assertEqual(payload["positionM"], 0.0)
+        self.assertEqual(payload["ticks"], 0)
+
+    def test_handle_level_maps_to_traction_and_brake(self) -> None:
+        session = VehicleInteractiveSession(target_position_m=200.0)
+
+        traction = session.command_from_handle_level(3)
+        coast = session.command_from_handle_level(0)
+        brake = session.command_from_handle_level(-2)
+
+        self.assertEqual(traction.traction_level, 3)
+        self.assertEqual(coast.traction_level, 0)
+        self.assertEqual(coast.brake_level, 0)
+        self.assertEqual(brake.brake_level, 2)
+
+    def test_handle_level_steps_state(self) -> None:
+        session = VehicleInteractiveSession(target_position_m=200.0)
+
+        payload = session.apply_handle_level(2)
+
+        self.assertEqual(payload["command"]["mode"], "TRACTION")
+        self.assertEqual(payload["command"]["tractionLevel"], 2)
+        self.assertEqual(payload["ticks"], 1)
 
 
 if __name__ == "__main__":
