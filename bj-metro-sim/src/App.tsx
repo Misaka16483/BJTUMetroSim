@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import MetroMap from './components/MetroMap';
 import LinesPanel from './components/LinesPanel';
-import MicroTrackView from './components/MicroTrackView';
 import ControlPanel from './components/ControlPanel';
 import KPIPanel from './components/KPIPanel';
 import SignalScreenPanel from './components/SignalScreenPanel';
+import MicroTrackView from './components/MicroTrackView';
 import { useSimStore } from './store/useSimStore';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
 import { fetchBackendBundle } from './data/backendApi';
@@ -18,20 +18,21 @@ export default function App() {
   const setLinesError = useSimStore((s) => s.setLinesError);
   const setTrackMap = useSimStore((s) => s.setTrackMap);
   const setBackendStatus = useSimStore((s) => s.setBackendStatus);
+  const viewMode = useSimStore((s) => s.viewMode);
+  const setViewMode = useSimStore((s) => s.setViewMode);
+  const backendStatus = useSimStore((s) => s.backendStatus);
+  const trackMap = useSimStore((s) => s.trackMap);
   const showOnlyLines = useSimStore((s) => s.showOnlyLines);
   const metroLines = useSimStore((s) => s.metroLines);
   const linesLoading = useSimStore((s) => s.linesLoading);
-  const backendStatus = useSimStore((s) => s.backendStatus);
-  const trackMap = useSimStore((s) => s.trackMap);
-  const viewMode = useSimStore((s) => s.viewMode);
-  const setViewMode = useSimStore((s) => s.setViewMode);
   const [collapsed, setCollapsed] = useState(false);
 
-  function loadAmapData(reason = '本地后端不可用') {
+  function loadAmapData(reason: string) {
     if (globalFetching) return;
     globalFetching = true;
     setLinesLoading(true);
 
+    // 1) 后端不可用时，优先加载仓库内置静态 JSON
     fetch('/beijing_metro_lines.json')
       .then((resp) => {
         if (!resp.ok) throw new Error('no static file');
@@ -40,7 +41,6 @@ export default function App() {
       .then((lines) => {
         setMetroLines(lines);
         setLinesError(null);
-        setBackendStatus('fallback');
         setLinesLoading(false);
         globalFetching = false;
       })
@@ -49,47 +49,33 @@ export default function App() {
         if (cached && cached.length > 0) {
           setMetroLines(cached);
           setLinesError(null);
-          setBackendStatus('fallback');
           setLinesLoading(false);
           globalFetching = false;
           return;
         }
-
         const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
         if (!amapKey || amapKey === 'your_amap_key_here') {
-          setLinesError(`${reason}; 请配置 VITE_AMAP_KEY`);
-          setBackendStatus('error');
+          setLinesError('请配置 VITE_AMAP_KEY');
           setLinesLoading(false);
           globalFetching = false;
           return;
         }
-
         fetchAmapBeijingMetro(amapKey)
-          .then((lines) => {
-            cacheAmapData(lines);
-            setMetroLines(lines);
-            setLinesError(null);
-            setBackendStatus('fallback');
-          })
+          .then((lines) => { cacheAmapData(lines); setMetroLines(lines); setLinesError(null); })
           .catch((err) => {
             const fallback = getPartialAmapCache();
             if (fallback?.length) {
               setMetroLines(fallback);
-              setLinesError(`API受限, 仅显示已缓存 ${fallback.length} 条线路`);
-              setBackendStatus('fallback');
+              setLinesError(`API受限, ${fallback.length} 条线路`);
             } else {
-              const msg = err instanceof Error ? err.message : '未知错误';
-              setLinesError(`加载失败: ${msg}`);
-              setBackendStatus('error');
+              setLinesError(err instanceof Error ? err.message : '未知错误');
             }
           })
-          .finally(() => {
-            setLinesLoading(false);
-            globalFetching = false;
-          });
+          .finally(() => { setLinesLoading(false); globalFetching = false; });
       });
   }
 
+  // 首次加载: 优先后端 → 失败则 AMAP 兜底
   useEffect(() => {
     if (globalFetching) return;
     globalFetching = true;
@@ -103,8 +89,10 @@ export default function App() {
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
+        console.warn('[App] 后端不可用, AMAP 兜底:', msg);
         globalFetching = false;
-        loadAmapData(`本地后端不可用: ${msg}`);
+        setBackendStatus('fallback');
+        loadAmapData(`后端不可用: ${msg}`);
       })
       .finally(() => {
         setLinesLoading(false);
@@ -112,22 +100,18 @@ export default function App() {
       });
   }, []);
 
+  // 只默认显示9号线
   useEffect(() => {
     if (metroLines.length === 0) return;
     requestAnimationFrame(() => showOnlyLines(['9']));
-  }, [metroLines.length, showOnlyLines]);
-
-  const statusColor = backendStatus === 'connected'
-    ? 'var(--green)'
-    : backendStatus === 'error'
-      ? 'var(--red)'
-      : 'var(--amber)';
+  }, [metroLines.length]);
 
   return (
     <div
       className="h-screen w-screen flex flex-col"
       style={{ padding: 12, gap: 8, background: 'var(--bg)' }}
     >
+      {/* ═══════════════ header ═══════════════ */}
       <header className="glass shrink-0 flex items-center justify-between px-5 h-12">
         <div className="flex items-center gap-3">
           <span className="led led-online" />
@@ -148,31 +132,51 @@ export default function App() {
               background: 'rgba(168,214,74,0.06)',
             }}
           >
-            LINE 9 GGZ→GTG
+            LINE 9
           </span>
 
-          <div className="ml-3 flex items-center" style={{ border: '1px solid rgba(255,255,255,0.06)', borderRadius: 6 }}>
+          {/* ─── 宏观 / 轨道级 切换 ─── */}
+          <div
+            className="flex items-center relative rounded-full select-none"
+            style={{
+              border: '1px solid rgba(255,255,255,0.10)',
+              background: 'rgba(255,255,255,0.03)',
+            }}
+          >
+            {/* sliding pill indicator */}
+            <div
+              className="absolute top-0 rounded-full"
+              style={{
+                left: viewMode === 'macro' ? 0 : '50%',
+                width: '50%',
+                bottom: 0,
+                background: viewMode === 'macro'
+                  ? 'rgba(74,158,255,0.35)'
+                  : 'rgba(143,195,31,0.38)',
+                transition: 'left 280ms cubic-bezier(0.33, 1, 0.68, 1), background 280ms ease',
+              }}
+            />
             <button
               type="button"
               onClick={() => setViewMode('macro')}
-              className="px-3 py-1 text-[10px] cursor-pointer label"
+              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
               style={{
-                color: viewMode === 'macro' ? 'var(--cyan)' : 'var(--text-muted)',
-                background: viewMode === 'macro' ? 'rgba(100,210,255,0.08)' : 'transparent',
+                color: viewMode === 'macro' ? '#fff' : 'var(--text-muted)',
+                transition: 'color 250ms ease',
               }}
             >
-              宏观线路
+              宏观
             </button>
             <button
               type="button"
               onClick={() => setViewMode('micro')}
-              className="px-3 py-1 text-[10px] cursor-pointer label"
+              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
               style={{
-                color: viewMode === 'micro' ? 'var(--l9)' : 'var(--text-muted)',
-                background: viewMode === 'micro' ? 'rgba(168,214,74,0.08)' : 'transparent',
+                color: viewMode === 'micro' ? '#fff' : 'var(--text-muted)',
+                transition: 'color 250ms ease',
               }}
             >
-              轨道级
+              轨道
             </button>
           </div>
         </div>
@@ -180,75 +184,88 @@ export default function App() {
         <div className="flex items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
           <span className="led led-online" /> SYS ONLINE
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
-          <span>API <span style={{ color: statusColor }}>{backendStatus.toUpperCase()}</span></span>
+          <span>
+            API{' '}
+            <span style={{ color: backendStatus === 'connected' ? 'var(--cyan)' : 'var(--amber)' }}>
+              {backendStatus.toUpperCase()}
+            </span>
+          </span>
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
           <span>UTC+8</span>
           {linesLoading && <span style={{ color: 'var(--amber)' }}>LOADING</span>}
         </div>
       </header>
 
+      {/* ═══════════════ control ═══════════════ */}
       <ControlPanel />
 
-      <div className="flex-1 flex min-h-0" style={{ gap: 8 }}>
+      {/* ═══════════════ body ═══════════════ */}
+      <div className="flex-1 flex min-h-0 relative" style={{ gap: 8 }}>
+        {/* map */}
         <div className="flex-1 overflow-hidden relative min-w-0 map-frame">
           {viewMode === 'macro' ? <MetroMap /> : <MicroTrackView />}
         </div>
 
+        {/* collapse toggle — only in macro */}
         {viewMode === 'macro' && (
-          <button
-            onClick={() => setCollapsed((v) => !v)}
-            className="absolute top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center z-20 cursor-pointer rounded-full"
-            style={{
-              right: collapsed ? 4 : `${PANEL_W + 4}px`,
-              background: 'var(--glass)',
-              backdropFilter: 'blur(28px)',
-              border: '1px solid rgba(255,255,255,0.06)',
-              color: 'var(--text-muted)',
-              transition: 'right 320ms cubic-bezier(0.33, 1, 0.68, 1)',
-            }}
-            title={collapsed ? '展开' : '收起'}
-          >
-            <svg width="6" height="10" viewBox="0 0 6 10" fill="none">
-              {collapsed
-                ? <path d="M5 1L1 5L5 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                : <path d="M1 1L5 5L1 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              }
-            </svg>
-          </button>
+        <button
+          onClick={() => setCollapsed((v) => !v)}
+          className="absolute top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center z-20 cursor-pointer rounded-full"
+          style={{
+            right: collapsed ? 4 : `${PANEL_W + 4}px`,
+            background: 'var(--glass)',
+            backdropFilter: 'blur(28px)',
+            border: '1px solid rgba(255,255,255,0.06)',
+            color: 'var(--text-muted)',
+            transition: 'right 320ms cubic-bezier(0.33, 1, 0.68, 1)',
+          }}
+          title={collapsed ? '展开' : '收起'}
+        >
+          <svg width="6" height="10" viewBox="0 0 6 10" fill="none">
+            {collapsed
+              ? <path d="M5 1L1 5L5 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              : <path d="M1 1L5 5L1 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            }
+          </svg>
+        </button>
         )}
 
+        {/* right panels — only in macro */}
         {viewMode === 'macro' && (
-          <div
-            className="shrink-0 overflow-y-auto"
-            style={{
-              width: collapsed ? '0px' : `${PANEL_W}px`,
-              transition: 'width 320ms cubic-bezier(0.33, 1, 0.68, 1)',
-            }}
-          >
-            <div className="flex flex-col" style={{ width: `${PANEL_W}px`, gap: 8 }}>
-              <div className="shrink-0">
-                <SignalScreenPanel />
-              </div>
-              <div className="shrink-0" style={{ height: 240 }}>
-                <KPIPanel />
-              </div>
-              <div className="shrink-0" style={{ minHeight: 280 }}>
-                <LinesPanel />
-              </div>
+        <div
+          className="shrink-0 overflow-y-auto"
+          style={{
+            width: collapsed ? '0px' : `${PANEL_W}px`,
+            transition: 'width 320ms cubic-bezier(0.33, 1, 0.68, 1)',
+          }}
+        >
+          <div className="flex flex-col" style={{ width: `${PANEL_W}px`, gap: 8 }}>
+            {/* signal screen */}
+            <div className="shrink-0">
+              <SignalScreenPanel />
+            </div>
+            {/* kpi */}
+            <div className="shrink-0" style={{ height: 240 }}>
+              <KPIPanel />
+            </div>
+            {/* lines */}
+            <div className="shrink-0" style={{ minHeight: 280 }}>
+              <LinesPanel />
             </div>
           </div>
+        </div>
         )}
       </div>
 
-      <footer
-        className="flex items-center justify-between px-5 shrink-0 board-num text-[9px]"
-        style={{ color: 'var(--text-muted)', height: 18 }}
-      >
+      {/* ═══════════════ footer ═══════════════ */}
+      <footer className="flex items-center justify-between px-5 shrink-0 board-num text-[9px]" style={{ color: 'var(--text-muted)', height: 18 }}>
         <div className="flex items-center gap-2">
-          <span className="led" style={{ width: 4, height: 4, boxShadow: '0 0 4px rgba(48,209,88,0.3)' }} />
-          <span>MAP: {backendStatus === 'connected' ? 'BACKEND' : 'AMAP/FALLBACK'}</span>
-          <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
-          <span>{trackMap ? `${trackMap.counts.segments} SEG` : 'NO TRACK MAP'}</span>
+          <span className={backendStatus === 'connected' ? 'led led-online' : 'led'} />
+          {backendStatus === 'connected' && trackMap
+            ? `${trackMap.counts.segments} SEG · ${trackMap.counts.signals} SIG · ${trackMap.counts.routes} ROUTE`
+            : backendStatus === 'fallback'
+              ? 'MAP: AMAP'
+              : 'API OFFLINE'}
         </div>
         <span style={{ color: 'rgba(255,255,255,0.04)' }}>v0.2.0</span>
       </footer>
