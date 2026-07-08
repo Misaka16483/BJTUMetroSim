@@ -11,10 +11,14 @@ import tty
 from pathlib import Path
 from typing import Any
 
+from app.adapters.cab import MitsubishiPlcCabOutputFrameBuilder, MitsubishiPlcCabOutputState, MitsubishiPlcTcpClient
+from app.adapters.hmi import NetworkScreenClient, NetworkScreenFrameBuilder, NetworkScreenState
+from app.adapters.mmi import SignalScreenClient, SignalScreenFrameBuilder, SignalScreenState
 from app.core.clock import SimulationClock
 from app.core.message_bus import MessageBus
-from app.domain.control import VehicleInteractiveSession, run_ato_stop_demo
+from app.domain.control import CabControlService, DriverInput, VehicleInteractiveSession, run_ato_stop_demo
 from app.domain.control.scenarios import MAX_HANDLE_LEVEL
+from app.domain.vehicle import ControlCommand
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.infra.excel_importer import LineDataImporter, validate_line_map
 from app.infra.recorder import RunRecorder
@@ -137,6 +141,96 @@ def vehicle_demo(args: argparse.Namespace) -> None:
         train_id=args.train_id,
     )
     _print_json(result.to_dict(include_history=args.include_history))
+
+
+def plc_cab_monitor(args: argparse.Namespace) -> None:
+    client = MitsubishiPlcTcpClient(host=args.host, port=args.port, timeout_s=args.timeout)
+    control_service = CabControlService()
+    max_frames = args.max_frames if args.max_frames > 0 else None
+    try:
+        with client:
+            if not args.json_lines:
+                print(f"plc cab monitor: {args.host}:{args.port}, max_frames={max_frames or 'forever'}")
+            for sequence, driver_input in enumerate(
+                client.iter_driver_inputs(train_id=args.train_id, max_frames=max_frames),
+                start=1,
+            ):
+                command = control_service.command_from_driver_input(driver_input)
+                payload = _plc_cab_payload(sequence, driver_input, command)
+                if args.json_lines:
+                    print(json.dumps(payload, ensure_ascii=False))
+                else:
+                    print(_format_plc_cab_line(payload))
+    except (ConnectionError, OSError, RuntimeError) as exc:
+        print(f"ERROR: PLC connection failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+
+def plc_cab_send_status(args: argparse.Namespace) -> None:
+    speed_cmps = None if args.speed_mps is None else int(round(args.speed_mps * 100))
+    state = MitsubishiPlcCabOutputState(
+        high_breaker_closed_light=args.high_breaker_closed,
+        brake_release_fault_light=args.brake_release_fault,
+        door_open_light=args.door_open,
+        doors_closed_light=args.doors_closed,
+        network_fault_light=args.network_fault,
+        auto_turnback_available=args.auto_turnback_available,
+        ato_available=args.ato_available,
+        wash_mode_entered=args.wash_mode,
+        ato_active=args.ato_active,
+        auto_turnback_active=args.auto_turnback_active,
+        vehicle_speed_cmps=speed_cmps,
+    )
+    frame = MitsubishiPlcCabOutputFrameBuilder().build(state)
+    if args.dry_run:
+        _print_frame_summary("plc-cab-status", frame)
+        return
+    with MitsubishiPlcTcpClient(host=args.host, port=args.port, timeout_s=args.timeout) as client:
+        client.send_frame(frame)
+    print(f"sent plc-cab-status bytes={len(frame)} to {args.host}:{args.port}")
+
+
+def hmi_send_demo(args: argparse.Namespace) -> None:
+    state = NetworkScreenState(
+        curr_station_id=args.curr_station,
+        next_station_id=args.next_station,
+        end_station_id=args.end_station,
+        speed_mps=args.speed_mps,
+        acceleration_mps2=args.acceleration,
+        speed_limit=args.speed_limit,
+        level_pos=args.level_pos,
+        run_mode=args.run_mode,
+        train_no=args.train_no,
+    )
+    frame = NetworkScreenFrameBuilder().build(state)
+    if args.dry_run:
+        _print_frame_summary("hmi-network-screen", frame)
+        return
+    NetworkScreenClient(host=args.host, port=args.port, timeout_s=args.timeout).send_state(state)
+    print(f"sent hmi-network-screen bytes={len(frame)} to {args.host}:{args.port}")
+
+
+def mmi_send_demo(args: argparse.Namespace) -> None:
+    state = SignalScreenState(
+        curr_station_id=args.curr_station,
+        next_station_id=args.next_station,
+        end_station_id=args.end_station,
+        speed_mps=args.speed_mps,
+        acceleration_mps2=args.acceleration,
+        speed_limit=args.speed_limit,
+        mode=args.mode,
+        pull_state=args.pull_state,
+        brake_state=args.brake_state,
+        urgency_stop_state=args.urgency_stop_state,
+        train_no=args.train_no,
+        next_station_distance_m=args.next_station_distance,
+    )
+    frame = SignalScreenFrameBuilder().build(state)
+    if args.dry_run:
+        _print_frame_summary("mmi-signal-screen", frame)
+        return
+    SignalScreenClient(host=args.host, port=args.port, timeout_s=args.timeout).send_state(state)
+    print(f"sent mmi-signal-screen bytes={len(frame)} to {args.host}:{args.port}")
 
 
 def vehicle_console(args: argparse.Namespace) -> None:
@@ -324,6 +418,45 @@ def _format_commands(commands: list[str]) -> str:
     return "\n".join(rows)
 
 
+def _plc_cab_payload(sequence: int, driver_input: DriverInput, command: ControlCommand) -> dict[str, Any]:
+    return {
+        "sequence": sequence,
+        "trainId": driver_input.train_id,
+        "source": driver_input.source,
+        "handleMode": driver_input.handle_mode.value,
+        "tractionPercent": driver_input.traction_percent,
+        "brakePercent": driver_input.brake_percent,
+        "emergencyBrake": driver_input.emergency_brake,
+        "reportedSpeedMps": driver_input.reported_speed_mps,
+        "command": {
+            "tractionLevel": command.traction_level,
+            "brakeLevel": command.brake_level,
+            "emergencyBrake": command.emergency_brake,
+            "source": command.source.value,
+        },
+    }
+
+
+def _format_plc_cab_line(payload: dict[str, Any]) -> str:
+    command = payload["command"]
+    speed = payload["reportedSpeedMps"]
+    speed_text = "-" if speed is None else f"{speed:.2f}m/s"
+    return (
+        f"seq={payload['sequence']} "
+        f"train={payload['trainId']} "
+        f"handle={payload['handleMode']} "
+        f"tr={payload['tractionPercent']:.0f}% "
+        f"br={payload['brakePercent']:.0f}% "
+        f"speed={speed_text} "
+        f"cmd=T{command['tractionLevel']} B{command['brakeLevel']} EB={command['emergencyBrake']}"
+    )
+
+
+def _print_frame_summary(name: str, frame: bytes) -> None:
+    preview = frame[:32].hex(" ")
+    print(f"{name} bytes={len(frame)} head={preview}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rail transit simulation Phase 0 CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -373,6 +506,68 @@ def build_parser() -> argparse.ArgumentParser:
     vehicle_parser.add_argument("--stop-tolerance", type=float, default=1.0, help="Acceptable stop error in meters")
     vehicle_parser.add_argument("--include-history", action="store_true", help="Include per-tick state history")
     vehicle_parser.set_defaults(func=vehicle_demo)
+
+    plc_parser = subparsers.add_parser("plc-cab-monitor", help="Read driver cab frames from the Mitsubishi PLC")
+    plc_parser.add_argument("--host", default="192.168.100.123", help="PLC server IP address")
+    plc_parser.add_argument("--port", type=int, default=8001, choices=[8001, 8002, 8003], help="PLC server TCP port")
+    plc_parser.add_argument("--train-id", default="T001", help="Train id")
+    plc_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/read timeout in seconds")
+    plc_parser.add_argument("--max-frames", type=int, default=0, help="Frames to read; 0 means forever")
+    plc_parser.add_argument("--json-lines", action="store_true", help="Print one JSON object per PLC frame")
+    plc_parser.set_defaults(func=plc_cab_monitor)
+
+    plc_send_parser = subparsers.add_parser("plc-cab-send-status", help="Send one host-to-PLC cab status frame")
+    plc_send_parser.add_argument("--host", default="192.168.100.123", help="PLC server IP address")
+    plc_send_parser.add_argument("--port", type=int, default=8001, choices=[8001, 8002, 8003], help="PLC server TCP port")
+    plc_send_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
+    plc_send_parser.add_argument("--speed-mps", type=float, default=None, help="Optional speed feedback; extends frame to 28 bytes")
+    plc_send_parser.add_argument("--high-breaker-closed", action="store_true", help="Set high breaker closed light")
+    plc_send_parser.add_argument("--brake-release-fault", action="store_true", help="Set brake release fault light")
+    plc_send_parser.add_argument("--door-open", action="store_true", help="Set door open light")
+    plc_send_parser.add_argument("--doors-closed", action="store_true", help="Set doors closed light")
+    plc_send_parser.add_argument("--network-fault", action="store_true", help="Set network fault light")
+    plc_send_parser.add_argument("--auto-turnback-available", action="store_true", help="Set auto turnback available flag")
+    plc_send_parser.add_argument("--ato-available", action="store_true", help="Set ATO available flag")
+    plc_send_parser.add_argument("--wash-mode", action="store_true", help="Set wash mode entered flag")
+    plc_send_parser.add_argument("--ato-active", action="store_true", help="Set ATO active flag")
+    plc_send_parser.add_argument("--auto-turnback-active", action="store_true", help="Set auto turnback active flag")
+    plc_send_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
+    plc_send_parser.set_defaults(func=plc_cab_send_status)
+
+    hmi_parser = subparsers.add_parser("hmi-send-demo", help="Send one 572-byte network screen HMI frame")
+    hmi_parser.add_argument("--host", default="192.168.100.122", help="HMI server IP address")
+    hmi_parser.add_argument("--port", type=int, default=8888, help="HMI server TCP port")
+    hmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
+    hmi_parser.add_argument("--curr-station", type=int, default=0, help="Current station id")
+    hmi_parser.add_argument("--next-station", type=int, default=0, help="Next station id")
+    hmi_parser.add_argument("--end-station", type=int, default=0, help="End station id")
+    hmi_parser.add_argument("--speed-mps", type=float, default=0.0, help="Speed in m/s")
+    hmi_parser.add_argument("--acceleration", type=float, default=0.0, help="Acceleration in m/s^2")
+    hmi_parser.add_argument("--speed-limit", type=int, default=0, help="Speed limit")
+    hmi_parser.add_argument("--level-pos", type=int, default=0, help="Level position")
+    hmi_parser.add_argument("--run-mode", type=int, default=0, help="Run mode byte")
+    hmi_parser.add_argument("--train-no", type=int, default=0, help="Train number")
+    hmi_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
+    hmi_parser.set_defaults(func=hmi_send_demo)
+
+    mmi_parser = subparsers.add_parser("mmi-send-demo", help="Send one 66-byte signal screen MMI frame")
+    mmi_parser.add_argument("--host", default="192.168.100.121", help="MMI server IP address")
+    mmi_parser.add_argument("--port", type=int, default=9999, help="MMI server TCP port")
+    mmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
+    mmi_parser.add_argument("--curr-station", type=int, default=0, help="Current station id")
+    mmi_parser.add_argument("--next-station", type=int, default=0, help="Next station id")
+    mmi_parser.add_argument("--end-station", type=int, default=0, help="End station id")
+    mmi_parser.add_argument("--speed-mps", type=float, default=0.0, help="Speed in m/s")
+    mmi_parser.add_argument("--acceleration", type=float, default=0.0, help="Acceleration in m/s^2")
+    mmi_parser.add_argument("--speed-limit", type=int, default=0, help="Speed limit")
+    mmi_parser.add_argument("--mode", type=int, default=0, help="Signal mode byte")
+    mmi_parser.add_argument("--pull-state", type=int, default=0, help="Traction state")
+    mmi_parser.add_argument("--brake-state", type=int, default=0, help="Brake state")
+    mmi_parser.add_argument("--urgency-stop-state", type=int, default=0, help="Emergency brake state")
+    mmi_parser.add_argument("--train-no", type=int, default=0, help="Train number")
+    mmi_parser.add_argument("--next-station-distance", type=float, default=0.0, help="Distance to next station in meters")
+    mmi_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
+    mmi_parser.set_defaults(func=mmi_send_demo)
 
     console_parser = subparsers.add_parser("vehicle-console", help="Interactively control a single train")
     console_parser.add_argument("--train-id", default="T001", help="Train id")
