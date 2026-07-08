@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import MetroMap from './components/MetroMap';
+import SchematicView from './components/SchematicView';
 import LinesPanel from './components/LinesPanel';
 import { useSimStore } from './store/useSimStore';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -7,12 +8,15 @@ import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAma
 // 模块级标记, 防止 StrictMode 重挂载触发双重请求
 let globalFetching = false;
 
+type ViewMode = 'map' | 'schematic';
+
 export default function App() {
   const setMetroLines = useSimStore((s) => s.setMetroLines);
   const setLinesLoading = useSimStore((s) => s.setLinesLoading);
   const setLinesError = useSimStore((s) => s.setLinesError);
 
   const [collapsed, setCollapsed] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('map');
 
   function loadAmapData() {
     if (globalFetching) return;
@@ -107,12 +111,38 @@ export default function App() {
           </span>
         </div>
 
-        <div className="flex items-center gap-4 text-[10px] font-mono text-[#3a4a60]">
-          <span>SYS <span className="text-[#00ff88]">ONLINE</span></span>
-          <span className="text-[#1a2240]">|</span>
-          <span>AMAP</span>
-          <span className="text-[#1a2240]">|</span>
-          <span>UTC+8</span>
+        <div className="flex items-center gap-3">
+          {/* 地图 / 纯线路 切换 */}
+          <div className="flex rounded border border-[#1a2840] overflow-hidden">
+            <button
+              onClick={() => setViewMode('map')}
+              className="text-[10px] px-2.5 py-0.5 font-mono transition-colors"
+              style={{
+                background: viewMode === 'map' ? 'rgba(74,158,255,0.15)' : 'transparent',
+                color: viewMode === 'map' ? '#4a9eff' : '#3a4a60',
+              }}
+            >
+              MAP
+            </button>
+            <button
+              onClick={() => setViewMode('schematic')}
+              className="text-[10px] px-2.5 py-0.5 font-mono transition-colors"
+              style={{
+                background: viewMode === 'schematic' ? 'rgba(74,158,255,0.15)' : 'transparent',
+                color: viewMode === 'schematic' ? '#4a9eff' : '#3a4a60',
+              }}
+            >
+              LINES
+            </button>
+          </div>
+
+          <div className="flex items-center gap-4 text-[10px] font-mono text-[#3a4a60]">
+            <span>SYS <span className="text-[#00ff88]">ONLINE</span></span>
+            <span className="text-[#1a2240]">|</span>
+            <span>AMAP</span>
+            <span className="text-[#1a2240]">|</span>
+            <span>UTC+8</span>
+          </div>
         </div>
       </header>
 
@@ -125,7 +155,7 @@ export default function App() {
           <div className="pointer-events-none absolute top-0 right-0 w-4 h-4 border-t border-r border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
           <div className="pointer-events-none absolute bottom-0 left-0 w-4 h-4 border-b border-l border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
           <div className="pointer-events-none absolute bottom-0 right-0 w-4 h-4 border-b border-r border-[#4a9eff]/25 z-20" style={{ margin: '-1px' }} />
-          <MetroMap />
+          {viewMode === 'map' ? <MetroMap /> : <SchematicView />}
         </div>
 
         {/* 折叠按钮 */}
@@ -173,7 +203,7 @@ export default function App() {
         <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#4a9eff]/15 to-transparent" />
         <div className="flex items-center gap-3 text-[9px] font-mono" style={{ color: '#2a3040' }}>
           <span className="text-[#00ff88]">■</span>
-          <span>RASTER / VECTOR · AMAP</span>
+          <span>{viewMode === 'map' ? 'MAP' : 'SCHEMATIC'} · AMAP</span>
         </div>
         <span className="text-[9px] font-mono" style={{ color: '#1a2240' }}>v0.1.0</span>
       </footer>
