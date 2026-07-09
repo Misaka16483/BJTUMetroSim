@@ -403,6 +403,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.track_map())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
+            elif path == "/api/sim/speed-profile":
+                self._send_json(self._speed_profile())
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
@@ -504,6 +506,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             "kpi": snap.kpi,
             "source": "simulation-engine",
         }
+
+    def _speed_profile(self) -> JsonDict:
+        if self.engine is None:
+            return {"profiles": {}, "source": "unavailable"}
+        profiles: dict[str, Any] = {}
+        for train in self.engine.trains:
+            profiles[train.train_id] = self.engine.export_speed_profile(train.train_id)
+        return {"profiles": profiles, "source": "simulation-engine"}
 
     def _send_json(self, payload: JsonDict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
