@@ -52,8 +52,8 @@ class MitsubishiPlcCabParserTests(unittest.TestCase):
         command = CabControlService().command_from_driver_input(driver_input)
 
         self.assertEqual(driver_input.handle_mode, DriverHandleMode.BRAKE)
-        self.assertEqual(command.traction_level, 0)
-        self.assertEqual(command.brake_level, 2)
+        self.assertEqual(command.traction_percent, 0)
+        self.assertEqual(command.brake_percent, 40.0)
 
     def test_emergency_button_overrides_handle(self) -> None:
         frame = bytearray(46)
@@ -66,7 +66,7 @@ class MitsubishiPlcCabParserTests(unittest.TestCase):
 
         self.assertTrue(driver_input.emergency_brake)
         self.assertTrue(command.emergency_brake)
-        self.assertEqual(command.traction_level, 0)
+        self.assertEqual(command.traction_percent, 0)
 
     def test_parser_rejects_wrong_frame_length(self) -> None:
         with self.assertRaises(ValueError):

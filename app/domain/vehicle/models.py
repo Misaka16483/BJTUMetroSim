@@ -31,15 +31,18 @@ def _require_positive(value: float, field_name: str) -> None:
         raise ValueError(f"{field_name} must be positive")
 
 
+def _require_percent(value: float, field_name: str) -> None:
+    if value < 0 or value > 100:
+        raise ValueError(f"{field_name} must be between 0 and 100")
+
+
 @dataclass(frozen=True)
 class VehicleConfig:
     train_id: str = "T001"
     mass_kg: float = 180_000.0
     max_speed_mps: float = 22.22
-    max_traction_level: int = 5
-    max_brake_level: int = 5
-    traction_force_per_level_n: float = 20_000.0
-    brake_force_per_level_n: float = 25_000.0
+    max_traction_force_n: float = 100_000.0
+    max_service_brake_force_n: float = 125_000.0
     emergency_brake_force_n: float = 180_000.0
     basic_resistance_n: float = 3_000.0
     stop_speed_threshold_mps: float = 0.05
@@ -48,10 +51,8 @@ class VehicleConfig:
         _require_non_empty(self.train_id, "train_id")
         _require_positive(self.mass_kg, "mass_kg")
         _require_positive(self.max_speed_mps, "max_speed_mps")
-        _require_positive(self.max_traction_level, "max_traction_level")
-        _require_positive(self.max_brake_level, "max_brake_level")
-        _require_positive(self.traction_force_per_level_n, "traction_force_per_level_n")
-        _require_positive(self.brake_force_per_level_n, "brake_force_per_level_n")
+        _require_positive(self.max_traction_force_n, "max_traction_force_n")
+        _require_positive(self.max_service_brake_force_n, "max_service_brake_force_n")
         _require_positive(self.emergency_brake_force_n, "emergency_brake_force_n")
         _require_non_negative(self.basic_resistance_n, "basic_resistance_n")
         _require_positive(self.stop_speed_threshold_mps, "stop_speed_threshold_mps")
@@ -86,21 +87,21 @@ class TrainState:
 @dataclass(frozen=True)
 class ControlCommand:
     train_id: str
-    traction_level: int = 0
-    brake_level: int = 0
+    traction_percent: float = 0.0
+    brake_percent: float = 0.0
     emergency_brake: bool = False
     source: CommandSource = CommandSource.MANUAL
 
     def __post_init__(self) -> None:
         _require_non_empty(self.train_id, "train_id")
-        _require_non_negative(self.traction_level, "traction_level")
-        _require_non_negative(self.brake_level, "brake_level")
+        _require_percent(self.traction_percent, "traction_percent")
+        _require_percent(self.brake_percent, "brake_percent")
         if not isinstance(self.source, CommandSource):
             object.__setattr__(self, "source", CommandSource(str(self.source)))
-        if self.traction_level > 0 and self.brake_level > 0:
-            raise ValueError("traction_level and brake_level cannot both be active")
-        if self.emergency_brake and self.traction_level > 0:
-            raise ValueError("emergency_brake requires traction_level to be 0")
+        if self.traction_percent > 0 and self.brake_percent > 0:
+            raise ValueError("traction_percent and brake_percent cannot both be active")
+        if self.emergency_brake and self.traction_percent > 0:
+            raise ValueError("emergency_brake requires traction_percent to be 0")
 
     @classmethod
     def coast(cls, train_id: str, source: CommandSource = CommandSource.MANUAL) -> ControlCommand:

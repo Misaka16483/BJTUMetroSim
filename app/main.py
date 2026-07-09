@@ -17,7 +17,7 @@ from app.adapters.mmi import SignalScreenClient, SignalScreenFrameBuilder, Signa
 from app.core.clock import SimulationClock
 from app.core.message_bus import MessageBus
 from app.domain.control import CabControlService, DriverInput, VehicleInteractiveSession, run_ato_stop_demo
-from app.domain.control.scenarios import MAX_HANDLE_LEVEL
+from app.domain.control.scenarios import MAX_HANDLE_STEP
 from app.domain.vehicle import ControlCommand
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.infra.excel_importer import LineDataImporter, validate_line_map
@@ -269,7 +269,7 @@ def vehicle_live_console(session: VehicleInteractiveSession, refresh_interval_s:
     if refresh_interval_s <= 0:
         raise ValueError("refresh_interval_s must be positive")
 
-    handle_level = 0
+    handle_step = 0
     paused = False
     last_payload = session.status_payload()
     input_buffer = ""
@@ -289,14 +289,14 @@ def vehicle_live_console(session: VehicleInteractiveSession, refresh_interval_s:
                     should_quit = True
                     break
                 if key == "UP":
-                    handle_level = min(MAX_HANDLE_LEVEL, handle_level + 1)
+                    handle_step = min(MAX_HANDLE_STEP, handle_step + 1)
                 elif key == "DOWN":
-                    handle_level = max(-MAX_HANDLE_LEVEL, handle_level - 1)
+                    handle_step = max(-MAX_HANDLE_STEP, handle_step - 1)
                 elif key in {" ", "0"}:
-                    handle_level = 0
+                    handle_step = 0
                 elif key in {"r", "R"}:
                     last_payload = session.apply_command("reset")
-                    handle_level = 0
+                    handle_step = 0
                     did_step = True
                 elif key in {"p", "P"}:
                     paused = not paused
@@ -306,9 +306,9 @@ def vehicle_live_console(session: VehicleInteractiveSession, refresh_interval_s:
             if should_quit:
                 break
             if not paused and not did_step:
-                last_payload = session.apply_handle_level(handle_level)
+                last_payload = session.apply_handle_step(handle_step)
 
-            _render_live_console(last_payload, handle_level, paused)
+            _render_live_console(last_payload, handle_step, paused)
             time.sleep(refresh_interval_s)
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_termios)
@@ -341,20 +341,20 @@ def _pop_key(buffer: str) -> tuple[str | None, str]:
     return buffer[0], buffer[1:]
 
 
-def _render_live_console(payload: dict[str, Any], handle_level: int, paused: bool) -> None:
+def _render_live_console(payload: dict[str, Any], handle_step: int, paused: bool) -> None:
     state = "PAUSED" if paused else payload["status"]
-    mode = _handle_mode(handle_level)
+    mode = _handle_mode(handle_step)
     command = payload.get("command")
     command_text = "cmd=-"
     if command:
         command_text = (
-            f"cmd={command['mode']} T{command['tractionLevel']} B{command['brakeLevel']} "
+            f"cmd={command['mode']} T{command['tractionPercent']:.0f}% B{command['brakePercent']:.0f}% "
             f"EB={command['emergencyBrake']} src={command['source']}"
         )
     lines = [
         "\x1b[H\x1b[J",
         f"vehicle-console {state} train={payload['trainId']} tick={payload['ticks']} t={payload['simTimeS']:.1f}s",
-        f"handle={handle_level:+d} mode={mode}",
+        f"handleStep={handle_step:+d} mode={mode}",
         _format_motion(payload),
         command_text,
         "keys: up/down handle, space coast, p pause, r reset, e eb, q quit",
@@ -362,10 +362,10 @@ def _render_live_console(payload: dict[str, Any], handle_level: int, paused: boo
     print("\n".join(lines), end="", flush=True)
 
 
-def _handle_mode(handle_level: int) -> str:
-    if handle_level > 0:
+def _handle_mode(handle_step: int) -> str:
+    if handle_step > 0:
         return "TRACTION"
-    if handle_level < 0:
+    if handle_step < 0:
         return "BRAKE"
     return "COAST"
 
@@ -398,7 +398,7 @@ def _format_console_line(payload: dict[str, Any]) -> str:
     command = payload.get("command")
     command_text = "cmd=STATUS"
     if command:
-        command_text = f"cmd={command['mode']} T{command['tractionLevel']} B{command['brakeLevel']}"
+        command_text = f"cmd={command['mode']} T{command['tractionPercent']:.0f}% B{command['brakePercent']:.0f}%"
         if command["emergencyBrake"]:
             command_text += " EB"
     message = f" msg={payload['message']}" if "message" in payload else ""
@@ -429,8 +429,8 @@ def _plc_cab_payload(sequence: int, driver_input: DriverInput, command: ControlC
         "emergencyBrake": driver_input.emergency_brake,
         "reportedSpeedMps": driver_input.reported_speed_mps,
         "command": {
-            "tractionLevel": command.traction_level,
-            "brakeLevel": command.brake_level,
+            "tractionPercent": command.traction_percent,
+            "brakePercent": command.brake_percent,
             "emergencyBrake": command.emergency_brake,
             "source": command.source.value,
         },
@@ -448,7 +448,7 @@ def _format_plc_cab_line(payload: dict[str, Any]) -> str:
         f"tr={payload['tractionPercent']:.0f}% "
         f"br={payload['brakePercent']:.0f}% "
         f"speed={speed_text} "
-        f"cmd=T{command['tractionLevel']} B{command['brakeLevel']} EB={command['emergencyBrake']}"
+        f"cmd=T{command['tractionPercent']:.0f}% B{command['brakePercent']:.0f}% EB={command['emergencyBrake']}"
     )
 
 
