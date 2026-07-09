@@ -7,6 +7,7 @@ import MicroTrackView from './components/MicroTrackView';
 import StationInterlockingView from './components/StationInterlockingView';
 import { getInterlockingData } from './data/stationInterlockingData';
 import { useSimStore } from './store/useSimStore';
+import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
 import { fetchBackendBundle, fetchSimState } from './data/backendApi';
 

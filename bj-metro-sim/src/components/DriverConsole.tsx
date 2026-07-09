@@ -43,7 +43,11 @@ function TopBar({ lines, activeLineId, onSelect, color }: {
 
   return (
     <div className="shrink-0 flex items-center gap-6 px-5 h-11"
-      style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)' }}>
+      style={{
+        borderBottom: '1px solid rgba(255,255,255,0.08)',
+        background: 'rgba(255,255,255,0.03)',
+        boxShadow: `inset 0 -1px 0 rgba(${hexToRgb(color)},0.10)`,
+      }}>
       <div className="flex items-center gap-2">
         <span className="text-[9px] font-medium uppercase tracking-[0.15em] text-[#6b7280] shrink-0 select-none">LINE</span>
         <div className="flex flex-wrap gap-1">

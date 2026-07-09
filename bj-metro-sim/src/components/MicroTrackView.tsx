@@ -49,7 +49,6 @@ export default function MicroTrackView() {
           <TrackContent
             trackMap={trackMap!}
             selectedStation={selectedStation}
-            selectedCode={selectedCode}
             onStationClick={setSelectedCode}
             onStationDoubleClick={(code) => {
               setSelectedStationCode(code);
@@ -134,13 +133,11 @@ function NoDataPlaceholder({ line }: { line: MetroLineData | undefined }) {
 function TrackContent({
   trackMap,
   selectedStation,
-  selectedCode,
   onStationClick,
   onStationDoubleClick,
 }: {
   trackMap: NonNullable<ReturnType<typeof useSimStore.getState>['trackMap']>;
   selectedStation: Line9Station | null;
-  selectedCode: string | null;
   onStationClick: (code: string) => void;
   onStationDoubleClick: (code: string) => void;
 }) {

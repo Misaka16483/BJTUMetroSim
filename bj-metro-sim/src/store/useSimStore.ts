@@ -380,8 +380,6 @@ export const useSimStore = create<SimState>((set, get) => ({
 
     // 列车地图位置 — 沿9号线 polyline 插值
     const newPositions: Record<string, { lat: number; lng: number }> = {};
-    let trainLat: number | null = null;
-    let trainLng: number | null = null;
     const line9 = state.metroLines.find((l) => l.id === '9');
     if (line9 && cachedPolyline) {
       // 如缓存未建则重建
@@ -390,8 +388,6 @@ export const useSimStore = create<SimState>((set, get) => ({
       }
       const pos = interpolateOnPolyline(curStationIdx, nextIdx, segProgress);
       if (pos) {
-        trainLat = pos[0];
-        trainLng = pos[1];
         newPositions['9'] = { lat: pos[0], lng: pos[1] };
       }
     }
