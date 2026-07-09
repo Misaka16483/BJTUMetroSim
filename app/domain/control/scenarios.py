@@ -15,8 +15,8 @@ JsonDict = dict[str, Any]
 INTERACTIVE_COMMANDS = [
     "status",
     "ato",
-    "traction <level>",
-    "brake <level>",
+    "traction <percent>",
+    "brake <percent>",
     "coast",
     "eb",
     "reset",
@@ -24,7 +24,8 @@ INTERACTIVE_COMMANDS = [
     "quit",
 ]
 
-MAX_HANDLE_LEVEL = 5
+MAX_HANDLE_STEP = 5
+HANDLE_PERCENT_STEP = 20.0
 
 
 @dataclass(frozen=True)
@@ -103,9 +104,13 @@ def run_ato_stop_demo(
                 "positionM": round(state.position_m, 3),
                 "speedMps": round(state.speed_mps, 3),
                 "accelerationMps2": round(state.acceleration_mps2, 3),
+                "targetSpeedMps": round(controller.last_target_speed_mps, 3),
+                "targetProfileMode": controller.last_profile_mode,
+                "speedErrorMps": round(controller.last_speed_error_mps, 3),
+                "pidOutputPercent": round(controller.last_pid_output_percent, 3),
                 "mode": mode,
-                "tractionLevel": command.traction_level,
-                "brakeLevel": command.brake_level,
+                "tractionPercent": round(command.traction_percent, 3),
+                "brakePercent": round(command.brake_percent, 3),
             }
         )
         if state.speed_mps <= vehicle.config.stop_speed_threshold_mps and abs(state.position_m - target_position_m) <= stop_tolerance_m:
@@ -189,16 +194,24 @@ class VehicleInteractiveSession:
         command = self._command_from_parts(name, parts)
         return self._step(command)
 
-    def apply_handle_level(self, handle_level: int) -> JsonDict:
-        return self._step(self.command_from_handle_level(handle_level))
+    def apply_handle_step(self, handle_step: int) -> JsonDict:
+        return self._step(self.command_from_handle_step(handle_step))
 
-    def command_from_handle_level(self, handle_level: int) -> ControlCommand:
-        if handle_level > MAX_HANDLE_LEVEL or handle_level < -MAX_HANDLE_LEVEL:
-            raise ValueError(f"handle_level must be between {-MAX_HANDLE_LEVEL} and {MAX_HANDLE_LEVEL}")
-        if handle_level > 0:
-            return ControlCommand(self.train_id, traction_level=handle_level, source=CommandSource.MANUAL)
-        if handle_level < 0:
-            return ControlCommand(self.train_id, brake_level=abs(handle_level), source=CommandSource.MANUAL)
+    def command_from_handle_step(self, handle_step: int) -> ControlCommand:
+        if handle_step > MAX_HANDLE_STEP or handle_step < -MAX_HANDLE_STEP:
+            raise ValueError(f"handle_step must be between {-MAX_HANDLE_STEP} and {MAX_HANDLE_STEP}")
+        if handle_step > 0:
+            return ControlCommand(
+                self.train_id,
+                traction_percent=handle_step * HANDLE_PERCENT_STEP,
+                source=CommandSource.MANUAL,
+            )
+        if handle_step < 0:
+            return ControlCommand(
+                self.train_id,
+                brake_percent=abs(handle_step) * HANDLE_PERCENT_STEP,
+                source=CommandSource.MANUAL,
+            )
         return ControlCommand.coast(self.train_id, source=CommandSource.MANUAL)
 
     def status_payload(self, message: str | None = None) -> JsonDict:
@@ -225,11 +238,11 @@ class VehicleInteractiveSession:
         if name in {"ato", "a"}:
             return self.controller.decide(self.state, self.target)
         if name in {"traction", "t"}:
-            level = self._parse_level(parts, "traction")
-            return ControlCommand(self.train_id, traction_level=level, source=CommandSource.MANUAL)
+            percent = self._parse_percent(parts, "traction")
+            return ControlCommand(self.train_id, traction_percent=percent, source=CommandSource.MANUAL)
         if name in {"brake", "b"}:
-            level = self._parse_level(parts, "brake")
-            return ControlCommand(self.train_id, brake_level=level, source=CommandSource.MANUAL)
+            percent = self._parse_percent(parts, "brake")
+            return ControlCommand(self.train_id, brake_percent=percent, source=CommandSource.MANUAL)
         if name in {"coast", "c"}:
             return ControlCommand.coast(self.train_id, source=CommandSource.MANUAL)
         if name in {"eb", "emergency", "emergency-brake"}:
@@ -246,10 +259,14 @@ class VehicleInteractiveSession:
         payload = self.status_payload()
         payload["command"] = {
             "mode": mode,
-            "tractionLevel": command.traction_level,
-            "brakeLevel": command.brake_level,
+            "tractionPercent": round(command.traction_percent, 3),
+            "brakePercent": round(command.brake_percent, 3),
             "emergencyBrake": command.emergency_brake,
             "source": command.source.value,
+            "targetSpeedMps": round(self.controller.last_target_speed_mps, 3),
+            "targetProfileMode": self.controller.last_profile_mode,
+            "speedErrorMps": round(self.controller.last_speed_error_mps, 3),
+            "pidOutputPercent": round(self.controller.last_pid_output_percent, 3),
         }
         return payload
 
@@ -262,10 +279,13 @@ class VehicleInteractiveSession:
         return "RUNNING"
 
     @staticmethod
-    def _parse_level(parts: list[str], command_name: str) -> int:
+    def _parse_percent(parts: list[str], command_name: str) -> float:
         if len(parts) != 2:
-            raise ValueError(f"{command_name} requires a level argument")
-        return int(parts[1])
+            raise ValueError(f"{command_name} requires a percent argument")
+        percent = float(parts[1])
+        if percent < 0 or percent > 100:
+            raise ValueError(f"{command_name} percent must be between 0 and 100")
+        return percent
 
     def _initial_state(self) -> TrainState:
         return TrainState(
@@ -280,8 +300,8 @@ class VehicleInteractiveSession:
 def _command_mode(command: ControlCommand) -> str:
     if command.emergency_brake:
         return "EMERGENCY_BRAKE"
-    if command.traction_level > 0:
+    if command.traction_percent > 0:
         return "TRACTION"
-    if command.brake_level > 0:
+    if command.brake_percent > 0:
         return "BRAKE"
     return "COAST"

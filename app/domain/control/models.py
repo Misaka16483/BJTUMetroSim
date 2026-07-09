@@ -57,10 +57,26 @@ class AtoConfig:
     expected_deceleration_mps2: float = 0.8
     brake_margin_m: float = 20.0
     stop_tolerance_m: float = 1.0
-    hold_brake_level: int = 1
-    max_traction_level: int = 4
-    max_brake_level: int = 4
+    hold_brake_percent: float = 20.0
+    max_traction_percent: float = 100.0
+    max_brake_percent: float = 100.0
     stop_speed_threshold_mps: float = 0.05
+    control_period_s: float = 1.0
+    pid_kp: float = 0.55
+    pid_ki: float = 0.015
+    pid_kd: float = 0.25
+    pid_output_percent_per_unit: float = 25.0
+    pid_integral_limit: float = 25.0
+    pid_derivative_filter_ratio: float = 0.65
+    pid_deadband_mps: float = 0.08
+    use_dynamic_programming_profile: bool = True
+    profile_run_time_s: float | None = None
+    profile_runtime_margin_ratio: float = 1.18
+    profile_time_step_s: float = 1.0
+    profile_position_step_m: float = 5.0
+    profile_speed_step_mps: float = 0.5
+    profile_lookahead_m: float = 5.0
+    profile_max_states_per_stage: int = 1800
 
     def __post_init__(self) -> None:
         if self.target_cruise_speed_mps <= 0:
@@ -71,14 +87,41 @@ class AtoConfig:
             raise ValueError("brake_margin_m must be non-negative")
         if self.stop_tolerance_m <= 0:
             raise ValueError("stop_tolerance_m must be positive")
-        if self.hold_brake_level <= 0:
-            raise ValueError("hold_brake_level must be positive")
-        if self.max_traction_level <= 0:
-            raise ValueError("max_traction_level must be positive")
-        if self.max_brake_level <= 0:
-            raise ValueError("max_brake_level must be positive")
+        _require_percent(self.hold_brake_percent, "hold_brake_percent")
+        _require_percent(self.max_traction_percent, "max_traction_percent")
+        _require_percent(self.max_brake_percent, "max_brake_percent")
+        if self.hold_brake_percent <= 0:
+            raise ValueError("hold_brake_percent must be positive")
+        if self.max_traction_percent <= 0:
+            raise ValueError("max_traction_percent must be positive")
+        if self.max_brake_percent <= 0:
+            raise ValueError("max_brake_percent must be positive")
         if self.stop_speed_threshold_mps <= 0:
             raise ValueError("stop_speed_threshold_mps must be positive")
+        if self.control_period_s <= 0:
+            raise ValueError("control_period_s must be positive")
+        if self.pid_output_percent_per_unit <= 0:
+            raise ValueError("pid_output_percent_per_unit must be positive")
+        if self.pid_integral_limit <= 0:
+            raise ValueError("pid_integral_limit must be positive")
+        if self.pid_derivative_filter_ratio < 0 or self.pid_derivative_filter_ratio >= 1:
+            raise ValueError("pid_derivative_filter_ratio must be in [0, 1)")
+        if self.pid_deadband_mps < 0:
+            raise ValueError("pid_deadband_mps must be non-negative")
+        if self.profile_run_time_s is not None and self.profile_run_time_s <= 0:
+            raise ValueError("profile_run_time_s must be positive when provided")
+        if self.profile_runtime_margin_ratio <= 0:
+            raise ValueError("profile_runtime_margin_ratio must be positive")
+        if self.profile_time_step_s <= 0:
+            raise ValueError("profile_time_step_s must be positive")
+        if self.profile_position_step_m <= 0:
+            raise ValueError("profile_position_step_m must be positive")
+        if self.profile_speed_step_mps <= 0:
+            raise ValueError("profile_speed_step_mps must be positive")
+        if self.profile_lookahead_m < 0:
+            raise ValueError("profile_lookahead_m must be non-negative")
+        if self.profile_max_states_per_stage <= 0:
+            raise ValueError("profile_max_states_per_stage must be positive")
 
 
 @dataclass(frozen=True)

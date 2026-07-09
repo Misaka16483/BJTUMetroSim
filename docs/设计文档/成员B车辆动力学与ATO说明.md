@@ -1,8 +1,8 @@
 # 成员 B 车辆动力学与 ATO 说明
 
-版本：v0.1
-日期：2026-07-08
-对应分支：`feature/dynamics`
+版本：v0.1  
+日期：2026-07-08  
+对应分支：`feature/dynamics`  
 对应提交：`0e2892f feat(vehicle): add ATO dynamics demo`
 
 ## 1. 模块目标

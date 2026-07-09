@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import select
 import sys
+import termios
+import time
+import tty
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +17,7 @@ from app.adapters.mmi import SignalScreenClient, SignalScreenFrameBuilder, Signa
 from app.core.clock import SimulationClock
 from app.core.message_bus import MessageBus
 from app.domain.control import CabControlService, DriverInput, VehicleInteractiveSession, run_ato_stop_demo
+from app.domain.control.scenarios import MAX_HANDLE_STEP
 from app.domain.vehicle import ControlCommand
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
@@ -247,6 +253,10 @@ def vehicle_console(args: argparse.Namespace) -> None:
         stop_tolerance_m=args.stop_tolerance,
         train_id=args.train_id,
     )
+    if not args.line_mode and sys.stdin.isatty() and sys.stdout.isatty():
+        vehicle_live_console(session, args.refresh_interval)
+        return
+
     show_prompt = sys.stdin.isatty()
     print("vehicle console: help, quit")
     _print_console_payload(session.status_payload(), as_json=args.json_lines)
@@ -266,6 +276,67 @@ def vehicle_console(args: argparse.Namespace) -> None:
             _print_console_payload({"ok": False, "error": str(exc)}, as_json=args.json_lines)
 
 
+def vehicle_live_console(session: VehicleInteractiveSession, refresh_interval_s: float) -> None:
+    if refresh_interval_s <= 0:
+        raise ValueError("refresh_interval_s must be positive")
+
+    handle_step = 0
+    paused = False
+    last_payload = session.status_payload()
+    input_buffer = ""
+    old_termios = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        print("\x1b[?25l", end="")
+        while True:
+            input_buffer += _read_available_stdin()
+            should_quit = False
+            did_step = False
+            while True:
+                key, input_buffer = _pop_key(input_buffer)
+                if key is None:
+                    break
+                if key in {"q", "Q", "\x03"}:
+                    should_quit = True
+                    break
+                if key == "UP":
+                    handle_step = min(MAX_HANDLE_STEP, handle_step + 1)
+                elif key == "DOWN":
+                    handle_step = max(-MAX_HANDLE_STEP, handle_step - 1)
+                elif key in {" ", "0"}:
+                    handle_step = 0
+                elif key in {"r", "R"}:
+                    last_payload = session.apply_command("reset")
+                    handle_step = 0
+                    did_step = True
+                elif key in {"p", "P"}:
+                    paused = not paused
+                elif key in {"e", "E"}:
+                    last_payload = session.apply_command("eb")
+                    did_step = True
+            if should_quit:
+                break
+            if not paused and not did_step:
+                last_payload = session.apply_handle_step(handle_step)
+
+            _render_live_console(last_payload, handle_step, paused)
+            time.sleep(refresh_interval_s)
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_termios)
+        print("\x1b[?25h\x1b[0m")
+
+
+def _read_available_stdin() -> str:
+    chunks: list[str] = []
+    fd = sys.stdin.fileno()
+    while True:
+        readable, _, _ = select.select([fd], [], [], 0)
+        if not readable:
+            break
+        chunks.append(os.read(fd, 1024).decode("utf-8", errors="ignore"))
+    return "".join(chunks)
+
+
 def _pop_key(buffer: str) -> tuple[str | None, str]:
     if not buffer:
         return None, buffer
@@ -279,6 +350,35 @@ def _pop_key(buffer: str) -> tuple[str | None, str]:
             return "DOWN", buffer[3:]
         return "ESC", buffer[1:]
     return buffer[0], buffer[1:]
+
+
+def _render_live_console(payload: dict[str, Any], handle_step: int, paused: bool) -> None:
+    state = "PAUSED" if paused else payload["status"]
+    mode = _handle_mode(handle_step)
+    command = payload.get("command")
+    command_text = "cmd=-"
+    if command:
+        command_text = (
+            f"cmd={command['mode']} T{command['tractionPercent']:.0f}% B{command['brakePercent']:.0f}% "
+            f"EB={command['emergencyBrake']} src={command['source']}"
+        )
+    lines = [
+        "\x1b[H\x1b[J",
+        f"vehicle-console {state} train={payload['trainId']} tick={payload['ticks']} t={payload['simTimeS']:.1f}s",
+        f"handleStep={handle_step:+d} mode={mode}",
+        _format_motion(payload),
+        command_text,
+        "keys: up/down handle, space coast, p pause, r reset, e eb, q quit",
+    ]
+    print("\n".join(lines), end="", flush=True)
+
+
+def _handle_mode(handle_step: int) -> str:
+    if handle_step > 0:
+        return "TRACTION"
+    if handle_step < 0:
+        return "BRAKE"
+    return "COAST"
 
 
 def _format_motion(payload: dict[str, Any]) -> str:
@@ -309,7 +409,7 @@ def _format_console_line(payload: dict[str, Any]) -> str:
     command = payload.get("command")
     command_text = "cmd=STATUS"
     if command:
-        command_text = f"cmd={command['mode']} T{command['tractionLevel']} B{command['brakeLevel']}"
+        command_text = f"cmd={command['mode']} T{command['tractionPercent']:.0f}% B{command['brakePercent']:.0f}%"
         if command["emergencyBrake"]:
             command_text += " EB"
     message = f" msg={payload['message']}" if "message" in payload else ""
@@ -340,8 +440,8 @@ def _plc_cab_payload(sequence: int, driver_input: DriverInput, command: ControlC
         "emergencyBrake": driver_input.emergency_brake,
         "reportedSpeedMps": driver_input.reported_speed_mps,
         "command": {
-            "tractionLevel": command.traction_level,
-            "brakeLevel": command.brake_level,
+            "tractionPercent": command.traction_percent,
+            "brakePercent": command.brake_percent,
             "emergencyBrake": command.emergency_brake,
             "source": command.source.value,
         },
@@ -359,13 +459,15 @@ def _format_plc_cab_line(payload: dict[str, Any]) -> str:
         f"tr={payload['tractionPercent']:.0f}% "
         f"br={payload['brakePercent']:.0f}% "
         f"speed={speed_text} "
-        f"cmd=T{command['tractionLevel']} B{command['brakeLevel']} EB={command['emergencyBrake']}"
+        f"cmd=T{command['tractionPercent']:.0f}% B{command['brakePercent']:.0f}% EB={command['emergencyBrake']}"
     )
 
 
 def _print_frame_summary(name: str, frame: bytes) -> None:
     preview = frame[:32].hex(" ")
     print(f"{name} bytes={len(frame)} head={preview}")
+
+
 def phase0_member_d_demo(args: argparse.Namespace) -> None:
     runner = Phase0MemberDDemoRunner(Path(args.output_dir) / "phase0_member_d_demo.sqlite")
     _print_json(runner.run())
@@ -507,7 +609,6 @@ def signal_demo(args: argparse.Namespace) -> None:
     })
 
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rail transit simulation Phase 0 CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -592,7 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     plc_send_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
     plc_send_parser.set_defaults(func=plc_cab_send_status)
 
-    hmi_parser = subparsers.add_parser("hmi-send-demo", help="Send one network screen HMI frame")
+    hmi_parser = subparsers.add_parser("hmi-send-demo", help="Send one 572-byte network screen HMI frame")
     hmi_parser.add_argument("--host", default="192.168.100.122", help="HMI server IP address")
     hmi_parser.add_argument("--port", type=int, default=8888, help="HMI server TCP port")
     hmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
@@ -608,7 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     hmi_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
     hmi_parser.set_defaults(func=hmi_send_demo)
 
-    mmi_parser = subparsers.add_parser("mmi-send-demo", help="Send one signal screen MMI frame")
+    mmi_parser = subparsers.add_parser("mmi-send-demo", help="Send one 66-byte signal screen MMI frame")
     mmi_parser.add_argument("--host", default="192.168.100.121", help="MMI server IP address")
     mmi_parser.add_argument("--port", type=int, default=9999, help="MMI server TCP port")
     mmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
@@ -639,8 +740,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="ATO expected deceleration in m/s^2",
     )
     console_parser.add_argument("--stop-tolerance", type=float, default=1.0, help="Acceptable stop error in meters")
-    console_parser.add_argument("--json-lines", action="store_true", help="Print JSON payloads")
+    console_parser.add_argument("--line-mode", action="store_true", help="Use blocking line-input console instead of live TTY mode")
+    console_parser.add_argument("--json-lines", action="store_true", help="Print JSON payloads in line-input mode")
+    console_parser.add_argument("--refresh-interval", type=float, default=0.1, help="Live console refresh interval in seconds")
     console_parser.set_defaults(func=vehicle_console)
+
     phase0_member_d_parser = subparsers.add_parser(
         "phase0-member-d-demo",
         help="Phase 0: output default station/power states and metric structure for member D",

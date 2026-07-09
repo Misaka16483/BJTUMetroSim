@@ -9,7 +9,10 @@ from app.domain.control import (
     CabControlService,
     OperationMode,
     VehicleInteractiveSession,
+    estimate_scheduled_run_time_s,
+    optimize_speed_profile_dcdp,
     run_ato_stop_demo,
+    stopping_target_speed_mps,
 )
 from app.domain.vehicle import CommandSource, ControlCommand, SimpleVehicleModel, TrainState
 
@@ -20,7 +23,7 @@ class ATOControllerTests(unittest.TestCase):
         state = TrainState("T001", position_m=0.0, speed_mps=0.0, acceleration_mps2=0.0, sim_time_s=0.0)
         command = controller.decide(state, AtoTarget(target_position_m=1000.0, permitted_speed_mps=12.0))
 
-        self.assertGreater(command.traction_level, 0)
+        self.assertGreater(command.traction_percent, 0)
         self.assertEqual(command.source, CommandSource.ATO)
 
     def test_ato_brakes_when_approaching_target(self) -> None:
@@ -28,15 +31,15 @@ class ATOControllerTests(unittest.TestCase):
         state = TrainState("T001", position_m=970.0, speed_mps=8.0, acceleration_mps2=0.0, sim_time_s=0.0)
         command = controller.decide(state, AtoTarget(target_position_m=1000.0, permitted_speed_mps=12.0))
 
-        self.assertGreater(command.brake_level, 0)
-        self.assertEqual(command.traction_level, 0)
+        self.assertGreater(command.brake_percent, 0)
+        self.assertEqual(command.traction_percent, 0)
 
     def test_ato_holds_brake_when_stopped_at_target(self) -> None:
         controller = ATOController()
         state = TrainState("T001", position_m=1000.0, speed_mps=0.0, acceleration_mps2=0.0, sim_time_s=0.0)
         command = controller.decide(state, AtoTarget(target_position_m=1000.0, permitted_speed_mps=12.0))
 
-        self.assertEqual(command.brake_level, 1)
+        self.assertEqual(command.brake_percent, 20.0)
         self.assertFalse(command.emergency_brake)
 
     def test_ato_emergency_target_overrides_rules(self) -> None:
@@ -48,7 +51,7 @@ class ATOControllerTests(unittest.TestCase):
         )
 
         self.assertTrue(command.emergency_brake)
-        self.assertEqual(command.traction_level, 0)
+        self.assertEqual(command.traction_percent, 0)
 
     def test_ato_vehicle_loop_stops_near_target(self) -> None:
         controller = ATOController(AtoConfig(expected_deceleration_mps2=0.6))
@@ -65,11 +68,73 @@ class ATOControllerTests(unittest.TestCase):
         self.assertLessEqual(abs(state.position_m - target_position_m), 1.0)
         self.assertLessEqual(state.speed_mps, 0.05)
 
+    def test_speed_profile_drops_near_stop_target(self) -> None:
+        far_speed = stopping_target_speed_mps(
+            position_m=0.0,
+            target_position_m=200.0,
+            permitted_speed_mps=12.0,
+            cruise_speed_mps=12.0,
+            expected_deceleration_mps2=0.6,
+            stop_tolerance_m=1.0,
+        )
+        near_speed = stopping_target_speed_mps(
+            position_m=190.0,
+            target_position_m=200.0,
+            permitted_speed_mps=12.0,
+            cruise_speed_mps=12.0,
+            expected_deceleration_mps2=0.6,
+            stop_tolerance_m=1.0,
+        )
+
+        self.assertEqual(far_speed, 12.0)
+        self.assertLess(near_speed, far_speed)
+
+    def test_dynamic_programming_profile_starts_and_stops_smoothly(self) -> None:
+        scheduled_time_s = estimate_scheduled_run_time_s(
+            target_position_m=200.0,
+            permitted_speed_mps=12.0,
+            acceleration_mps2=0.54,
+            deceleration_mps2=0.6,
+        )
+        profile = optimize_speed_profile_dcdp(
+            target_position_m=200.0,
+            permitted_speed_mps=12.0,
+            scheduled_run_time_s=scheduled_time_s,
+            dt_s=1.0,
+            position_step_m=5.0,
+            speed_step_mps=0.5,
+        )
+
+        self.assertEqual(profile.points[0].speed_mps, 0.0)
+        self.assertEqual(profile.points[-1].position_m, 200.0)
+        self.assertEqual(profile.points[-1].speed_mps, 0.0)
+        self.assertLess(profile.speed_at_position_mps(5.0), 12.0)
+        self.assertLessEqual(max(point.speed_mps for point in profile.points), 12.0)
+
+    def test_ato_dynamic_profile_does_not_start_at_full_speed(self) -> None:
+        controller = ATOController(AtoConfig(expected_deceleration_mps2=0.6))
+        state = TrainState("T001", position_m=0.0, speed_mps=0.0, acceleration_mps2=0.0, sim_time_s=0.0)
+        command = controller.decide(state, AtoTarget(target_position_m=200.0, permitted_speed_mps=12.0))
+
+        self.assertGreater(command.traction_percent, 0.0)
+        self.assertGreater(controller.last_target_speed_mps, 0.0)
+        self.assertLess(controller.last_target_speed_mps, 12.0)
+
+    def test_ato_records_pid_tracking_diagnostics(self) -> None:
+        controller = ATOController(AtoConfig(expected_deceleration_mps2=0.6))
+        state = TrainState("T001", position_m=100.0, speed_mps=12.0, acceleration_mps2=0.0, sim_time_s=10.0)
+        command = controller.decide(state, AtoTarget(target_position_m=120.0, permitted_speed_mps=12.0))
+
+        self.assertLess(controller.last_target_speed_mps, state.speed_mps)
+        self.assertLess(controller.last_speed_error_mps, 0.0)
+        self.assertLess(controller.last_pid_output_percent, 0.0)
+        self.assertGreater(command.brake_percent, 0)
+
 
 class CabControlServiceTests(unittest.TestCase):
     def test_cab_uses_ato_command_in_ato_mode(self) -> None:
         service = CabControlService()
-        ato_command = ControlCommand("T001", traction_level=2, source=CommandSource.ATO)
+        ato_command = ControlCommand("T001", traction_percent=40.0, source=CommandSource.ATO)
 
         final_command = service.compose("T001", OperationMode.ATO, ato_command=ato_command)
 
@@ -77,7 +142,7 @@ class CabControlServiceTests(unittest.TestCase):
 
     def test_cab_atp_emergency_overrides_ato(self) -> None:
         service = CabControlService()
-        ato_command = ControlCommand("T001", traction_level=2, source=CommandSource.ATO)
+        ato_command = ControlCommand("T001", traction_percent=40.0, source=CommandSource.ATO)
 
         final_command = service.compose(
             "T001",
@@ -105,8 +170,8 @@ class VehicleInteractiveSessionTests(unittest.TestCase):
     def test_manual_traction_and_brake_commands_step_state(self) -> None:
         session = VehicleInteractiveSession(target_position_m=200.0)
 
-        after_traction = session.apply_command("traction 3")
-        after_brake = session.apply_command("brake 2")
+        after_traction = session.apply_command("traction 60")
+        after_brake = session.apply_command("brake 40")
 
         self.assertEqual(after_traction["command"]["mode"], "TRACTION")
         self.assertGreater(after_traction["speedMps"], 0)
@@ -118,7 +183,8 @@ class VehicleInteractiveSessionTests(unittest.TestCase):
         payload = session.apply_command("ato")
 
         self.assertEqual(payload["command"]["source"], "ATO")
-        self.assertGreater(payload["command"]["tractionLevel"], 0)
+        self.assertGreater(payload["command"]["tractionPercent"], 0)
+        self.assertIn("targetSpeedMps", payload["command"])
 
     def test_reset_restores_initial_state(self) -> None:
         session = VehicleInteractiveSession(target_position_m=200.0)
@@ -130,25 +196,25 @@ class VehicleInteractiveSessionTests(unittest.TestCase):
         self.assertEqual(payload["positionM"], 0.0)
         self.assertEqual(payload["ticks"], 0)
 
-    def test_handle_level_maps_to_traction_and_brake(self) -> None:
+    def test_handle_step_maps_to_traction_and_brake_percent(self) -> None:
         session = VehicleInteractiveSession(target_position_m=200.0)
 
-        traction = session.command_from_handle_level(3)
-        coast = session.command_from_handle_level(0)
-        brake = session.command_from_handle_level(-2)
+        traction = session.command_from_handle_step(3)
+        coast = session.command_from_handle_step(0)
+        brake = session.command_from_handle_step(-2)
 
-        self.assertEqual(traction.traction_level, 3)
-        self.assertEqual(coast.traction_level, 0)
-        self.assertEqual(coast.brake_level, 0)
-        self.assertEqual(brake.brake_level, 2)
+        self.assertEqual(traction.traction_percent, 60.0)
+        self.assertEqual(coast.traction_percent, 0)
+        self.assertEqual(coast.brake_percent, 0)
+        self.assertEqual(brake.brake_percent, 40.0)
 
-    def test_handle_level_steps_state(self) -> None:
+    def test_handle_step_steps_state(self) -> None:
         session = VehicleInteractiveSession(target_position_m=200.0)
 
-        payload = session.apply_handle_level(2)
+        payload = session.apply_handle_step(2)
 
         self.assertEqual(payload["command"]["mode"], "TRACTION")
-        self.assertEqual(payload["command"]["tractionLevel"], 2)
+        self.assertEqual(payload["command"]["tractionPercent"], 40.0)
         self.assertEqual(payload["ticks"], 1)
 
 

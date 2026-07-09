@@ -25,14 +25,10 @@ class SimpleVehicleModel:
             raise ValueError("dt_s must be positive")
         if state.train_id != self.config.train_id or command.train_id != self.config.train_id:
             raise ValueError("state, command, and config train_id must match")
-        if command.traction_level > self.config.max_traction_level:
-            raise ValueError("traction_level exceeds vehicle config")
-        if command.brake_level > self.config.max_brake_level:
-            raise ValueError("brake_level exceeds vehicle config")
 
         traction_limit = _clamp(traction_limit_ratio, 0.0, 1.0)
-        traction_force_n = command.traction_level * self.config.traction_force_per_level_n * traction_limit
-        brake_force_n = command.brake_level * self.config.brake_force_per_level_n
+        traction_force_n = self.config.max_traction_force_n * command.traction_percent / 100.0 * traction_limit
+        brake_force_n = self.config.max_service_brake_force_n * command.brake_percent / 100.0
         if command.emergency_brake:
             traction_force_n = 0.0
             brake_force_n = self.config.emergency_brake_force_n
