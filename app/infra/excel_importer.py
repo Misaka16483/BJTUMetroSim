@@ -291,7 +291,17 @@ try {{
 
     def _switch(self, row: JsonDict) -> JsonDict:
         values = self._values(row)
-        return self._with_raw(row, {"id": to_int(values[0]), "name": values[1]})
+        return self._with_raw(
+            row,
+            {
+                "id": to_int(values[0]),
+                "name": values[1],
+                "type": to_int(values[3]),
+                "normalSegId": to_int(values[4]),
+                "reverseSegId": to_int(values[5]),
+                "frogSegId": to_int(values[6]),
+            },
+        )
 
     def _signal(self, row: JsonDict) -> JsonDict:
         values = self._values(row)

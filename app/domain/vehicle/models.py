@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
+from app.domain.signal.models import TrainState  # canonical B/C/D train state
 
 JsonDict = dict[str, Any]
 
@@ -56,29 +57,6 @@ class VehicleConfig:
         _require_positive(self.emergency_brake_force_n, "emergency_brake_force_n")
         _require_non_negative(self.basic_resistance_n, "basic_resistance_n")
         _require_positive(self.stop_speed_threshold_mps, "stop_speed_threshold_mps")
-
-    def to_dict(self) -> JsonDict:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class TrainState:
-    train_id: str
-    position_m: float
-    speed_mps: float
-    acceleration_mps2: float
-    sim_time_s: float
-    segment_id: int | None = None
-    net_energy_kwh: float = 0.0
-
-    def __post_init__(self) -> None:
-        _require_non_empty(self.train_id, "train_id")
-        _require_non_negative(self.position_m, "position_m")
-        _require_non_negative(self.speed_mps, "speed_mps")
-        _require_non_negative(self.sim_time_s, "sim_time_s")
-        _require_non_negative(self.net_energy_kwh, "net_energy_kwh")
-        if self.segment_id is not None and self.segment_id <= 0:
-            raise ValueError("segment_id must be positive when provided")
 
     def to_dict(self) -> JsonDict:
         return asdict(self)
