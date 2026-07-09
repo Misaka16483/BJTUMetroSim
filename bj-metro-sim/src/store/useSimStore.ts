@@ -1,6 +1,14 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
-import type { TrackMapData, SimStateResponse } from '../data/backendApi';
+import type {
+  PowerNetworkState,
+  SimDispatchDecision,
+  SimPowerState,
+  SimStateResponse,
+  SimStationInfo,
+  TrackMapData,
+  SpeedProfilePoint,
+} from '../data/backendApi';
 import { simStart, simPause, simResume, simStop } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'driver' | 'fullLine';
@@ -34,6 +42,19 @@ interface SimState {
   avgLoadRate: number;
   totalPassengers: number;
   totalBoarded: number;
+  totalWaitingPax: number;
+  maxPlatformDensity: number;
+  totalTractionEnergyKwh: number;
+  minTractionLimitRatio: number;
+  minTrainVoltageV: number;
+  totalAbsorbedRegenKw: number;
+  totalWastedRegenKw: number;
+  powerLossesKw: number;
+  lastDispatchAction: string;
+  simStations: SimStationInfo[];
+  simPower: SimPowerState[];
+  simPowerNetwork: PowerNetworkState | null;
+  dispatchDecisions: SimDispatchDecision[];
 
   // 选中的列车ID
   selectedTrainId: string | null;
@@ -51,7 +72,15 @@ interface SimState {
   currentSpeedMps: number;
   permittedSpeedMps: number;
   targetSpeedMps: number;
+  tractionPercent: number;
+  brakePercent: number;
+  energyKwh: number;
+  estimatedRunTimeS: number;
   runDirection: 'UP' | 'DOWN';
+  // ── 速度曲线 ──
+  speedProfile: SpeedProfilePoint[];
+  speedHistory: Array<{ positionM: number; speedMps: number }>;
+  speedTimeHistory: Array<{ elapsedS: number; speedMps: number }>;
   stationIndex: number;
 
   // 多线路列车在地图上的位置
@@ -219,6 +248,19 @@ export const useSimStore = create<SimState>((set, get) => ({
   avgLoadRate: 68,
   totalPassengers: 0,
   totalBoarded: 0,
+  totalWaitingPax: 0,
+  maxPlatformDensity: 0,
+  totalTractionEnergyKwh: 0,
+  minTractionLimitRatio: 1,
+  minTrainVoltageV: 750,
+  totalAbsorbedRegenKw: 0,
+  totalWastedRegenKw: 0,
+  powerLossesKw: 0,
+  lastDispatchAction: 'FOLLOW_TIMETABLE',
+  simStations: [],
+  simPower: [],
+  simPowerNetwork: null,
+  dispatchDecisions: [],
   selectedTrainId: null,
   selectedStationCode: null,
 
@@ -232,7 +274,14 @@ export const useSimStore = create<SimState>((set, get) => ({
   currentSpeedMps: 0,
   permittedSpeedMps: 22.22,
   targetSpeedMps: 22.22,
+  tractionPercent: 0,
+  brakePercent: 0,
+  energyKwh: 0,
+  estimatedRunTimeS: 0,
   runDirection: 'DOWN',
+  speedProfile: [],
+  speedHistory: [],
+  speedTimeHistory: [],
   stationIndex: 0,
   trainPositions: {},
   segmentProgress: 0,
@@ -422,13 +471,30 @@ export const useSimStore = create<SimState>((set, get) => ({
   // ═══════════════════════════════════════════════════
 
   updateFromBackend: (data: SimStateResponse) => {
-    const { clock, trains, kpi } = data;
+    const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions } = data;
     const t0 = trains[0];
-    if (!t0) return;
 
     const state = get();
     const isEngineRunning = clock.state === 'RUNNING';
-    set({ engineClockState: clock.state, isRunning: isEngineRunning });
+    set({
+      engineClockState: clock.state,
+      isRunning: isEngineRunning,
+      simStations: stations ?? [],
+      simPower: power ?? [],
+      simPowerNetwork: powerNetwork ?? null,
+      dispatchDecisions: dispatchDecisions ?? [],
+      totalWaitingPax: kpi.totalWaitingPax ?? 0,
+      maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
+      totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
+      minTractionLimitRatio: kpi.minTractionLimitRatio ?? 1,
+      minTrainVoltageV: kpi.minTrainVoltageV ?? 750,
+      totalAbsorbedRegenKw: kpi.totalAbsorbedRegenKw ?? 0,
+      totalWastedRegenKw: kpi.totalWastedRegenKw ?? 0,
+      powerLossesKw: kpi.powerLossesKw ?? 0,
+      lastDispatchAction: kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
+    });
+
+    if (!t0) return;
 
     if (!isEngineRunning && clock.state !== 'PAUSED') return;
 
@@ -436,6 +502,10 @@ export const useSimStore = create<SimState>((set, get) => ({
     set({ simTime: clock.simTime });
 
     // 信号屏字段
+    // 站台变化时重置速度曲线
+    if (t0.currentStation !== state.currentStation && state.currentStation !== '') {
+      set({ speedHistory: [], speedProfile: [], speedTimeHistory: [] });
+    }
     set({
       currentStation: t0.currentStation,
       nextStation: t0.nextStation,
@@ -447,6 +517,11 @@ export const useSimStore = create<SimState>((set, get) => ({
       stationIndex: t0.stationIndex,
       segmentProgress: t0.segmentProgress,
       driveMode: t0.phase === 'DWELLING' ? 'CM' : 'AM',
+      tractionPercent: t0.tractionPercent ?? 0,
+      brakePercent: t0.brakePercent ?? 0,
+      energyKwh: t0.energyKwh ?? 0,
+      estimatedRunTimeS: t0.estimatedRunTimeS ?? 0,
+      targetSpeedMps: t0.targetSpeedMps ?? 22.22,
     });
 
     // 列车地图位置 — polyline 插值 (支持多线路)
@@ -471,8 +546,42 @@ export const useSimStore = create<SimState>((set, get) => ({
       avgLoadRate: Math.round(t0.loadFactor * 100),
       totalPassengers: t0.onboardPax,
       totalBoarded: kpi.totalOnboardPax,
-      avgWaitTime: kpi.activeTrains > 0 ? 100 + Math.floor(Math.random() * 80) : 0,
+      avgWaitTime: kpi.totalWaitingPax ?? 0,
+      totalWaitingPax: kpi.totalWaitingPax ?? 0,
+      maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
+      totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
+      minTractionLimitRatio: kpi.minTractionLimitRatio ?? 1,
+      minTrainVoltageV: kpi.minTrainVoltageV ?? 750,
+      totalAbsorbedRegenKw: kpi.totalAbsorbedRegenKw ?? 0,
+      totalWastedRegenKw: kpi.totalWastedRegenKw ?? 0,
+      powerLossesKw: kpi.powerLossesKw ?? 0,
+      lastDispatchAction: t0.lastDispatchAction ?? kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
     });
+
+    // 速度历史曲线 — 记录 (位置, 速度) 对
+    const tm = state.trackMap;
+    if (tm?.stations?.length) {
+      const stIdx = t0.stationIndex;
+      const nextIdx = t0.direction === 'UP' ? stIdx + 1 : stIdx - 1;
+      if (nextIdx >= 0 && nextIdx < tm.stations.length) {
+        const curM = tm.stations[stIdx]?.mileageM ?? 0;
+        const nextM = tm.stations[nextIdx]?.mileageM ?? curM + 1347;
+        const positionM = curM + t0.segmentProgress * Math.abs(nextM - curM);
+        const newHistory = [...state.speedHistory, { positionM, speedMps: t0.speedMps }];
+        if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
+        set({ speedHistory: newHistory });
+      }
+    }
+
+    // 速度-时间曲线 — 记录 (发车后秒数, 速度) 对
+    if (t0.phase !== 'DWELLING' && t0.phase !== 'IDLE') {
+      const elapsedS = state.speedTimeHistory.length > 0
+        ? state.speedTimeHistory[state.speedTimeHistory.length - 1].elapsedS + 0.25
+        : 0.25;
+      const newTimeHistory = [...state.speedTimeHistory, { elapsedS, speedMps: t0.speedMps }];
+      if (newTimeHistory.length > 500) newTimeHistory.splice(0, newTimeHistory.length - 500);
+      set({ speedTimeHistory: newTimeHistory });
+    }
   },
 
   startBackendSim: async () => {

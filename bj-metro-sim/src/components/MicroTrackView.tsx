@@ -143,6 +143,13 @@ function TrackContent({
 }) {
   const firstMileage = trackMap.stations[0]?.mileageM ?? 0;
   const span = Math.max(trackMap.lengthM, 1);
+  const simPowerNetwork = useSimStore((s) => s.simPowerNetwork);
+  const substations = simPowerNetwork?.substations ?? [];
+  const trainVoltages = simPowerNetwork?.trainVoltages ?? [];
+  const minVoltage = trainVoltages.length
+    ? Math.min(...trainVoltages.map((item) => item.voltageV))
+    : null;
+  const regen = simPowerNetwork?.regen;
 
   return (
     <>
@@ -162,6 +169,29 @@ function TrackContent({
       <div className="relative h-[360px] border border-[#1b2a3d] bg-[#07101b] overflow-hidden">
         <div className="absolute left-8 right-8 top-[172px] h-[3px] bg-[#8FC31F]" />
         <div className="absolute left-8 right-8 top-[190px] h-px bg-[#2b3c52]" />
+        {substations.map((substation) => (
+          <PowerSubstationMarker
+            key={substation.substationId}
+            leftPercent={8 + ((substation.mileageM - firstMileage) / span) * 84}
+            substation={substation}
+          />
+        ))}
+        {trainVoltages.map((train) => {
+          const relatedSubstation = substations.find((item) => (
+            item.substationId === train.leftSubstationId || item.substationId === train.rightSubstationId
+          ));
+          const mileageM = train.mileageM ?? relatedSubstation?.mileageM ?? firstMileage;
+          return (
+            <TrainVoltageMarker
+              key={train.trainId}
+              leftPercent={8 + ((mileageM - firstMileage) / span) * 84}
+              trainId={train.trainId}
+              voltageV={train.voltageV}
+              currentA={train.currentA}
+              mileageM={mileageM}
+            />
+          );
+        })}
         {trackMap.stations.map((station) => (
           <StationMarker
             key={station.stationCode}
@@ -177,6 +207,15 @@ function TrackContent({
           <span>{fmt(trackMap.lengthM / 1000, 2)} km</span>
           <span>K{fmt((firstMileage + trackMap.lengthM) / 1000, 3)}</span>
         </div>
+        <div className="absolute left-8 right-8 top-5 flex items-center justify-between text-[10px] font-mono">
+          <span className="text-[#5f7088]">PWR: {substations.length || '-'} TS</span>
+          <span className={minVoltage !== null && minVoltage < 650 ? 'text-[#ffb454]' : 'text-[#8FC31F]'}>
+            MIN U {minVoltage !== null ? `${fmt(minVoltage, 0)} V` : '-'}
+          </span>
+          <span className="text-[#58a6ff]">
+            REGEN {regen ? `${fmt(regen.absorbedKw, 0)}/${fmt(regen.wastedKw, 0)} kW` : '-'}
+          </span>
+        </div>
       </div>
 
       <div className="mt-4 grid grid-cols-3 gap-3">
@@ -185,6 +224,76 @@ function TrackContent({
         <LayerStat title="区段" value={trackMap.counts.axleSections + trackMap.counts.logicalSections} detail="计轴 + 逻辑区段" />
       </div>
     </>
+  );
+}
+
+function PowerSubstationMarker({
+  leftPercent,
+  substation,
+}: {
+  leftPercent: number;
+  substation: {
+    substationId: string;
+    name: string;
+    status: string;
+    voltageV: number;
+    currentA: number;
+    loadRatio: number;
+  };
+}) {
+  const warning = substation.status !== 'IN_SERVICE' || substation.loadRatio >= 0.85;
+  return (
+    <div
+      className="absolute top-[104px] -translate-x-1/2 pointer-events-none"
+      style={{ left: `${Math.max(8, Math.min(92, leftPercent))}%` }}
+      title={`${substation.name} ${substation.status}`}
+    >
+      <div
+        className="w-5 h-5 rotate-45 border"
+        style={{
+          background: warning ? 'rgba(255,180,84,0.28)' : 'rgba(88,166,255,0.22)',
+          borderColor: warning ? '#ffb454' : '#58a6ff',
+          boxShadow: warning ? '0 0 14px rgba(255,180,84,0.45)' : '0 0 12px rgba(88,166,255,0.35)',
+        }}
+      />
+      <div className="absolute left-1/2 -translate-x-1/2 top-7 w-[72px] text-center text-[9px] leading-tight text-[#8ba0bb]">
+        {substation.substationId.replace('TS-', '')}
+      </div>
+    </div>
+  );
+}
+
+function TrainVoltageMarker({
+  leftPercent,
+  trainId,
+  voltageV,
+  currentA,
+  mileageM,
+}: {
+  leftPercent: number;
+  trainId: string;
+  voltageV: number;
+  currentA: number;
+  mileageM: number;
+}) {
+  const low = voltageV < 650;
+  return (
+    <div
+      className="absolute top-[219px] -translate-x-1/2 pointer-events-none"
+      style={{ left: `${Math.max(8, Math.min(92, leftPercent))}%` }}
+      title={`${trainId} K${fmt(mileageM / 1000, 3)}`}
+    >
+      <div
+        className="px-1.5 py-0.5 border text-[9px] font-mono whitespace-nowrap"
+        style={{
+          color: low ? '#ffb454' : '#8FC31F',
+          borderColor: low ? 'rgba(255,180,84,0.45)' : 'rgba(143,195,31,0.38)',
+          background: 'rgba(7,16,27,0.86)',
+        }}
+      >
+        {trainId} {fmt(voltageV, 0)}V/{fmt(currentA, 0)}A
+      </div>
+    </div>
   );
 }
 

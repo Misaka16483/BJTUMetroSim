@@ -27,7 +27,7 @@ function FullDriverView() {
         fontFamily: "'PingFang SC','Microsoft YaHei','Noto Sans SC',system-ui,sans-serif",
       }}>
       <TopBar lines={metroLines} activeLineId={activeLineId} onSelect={setActiveLineId} color={color} />
-      {hasEngine ? <ActiveCab color={color} /> : <PendingCab line={line} color={color} />}
+      {hasEngine ? <ActiveCab line9={line!} isBackend={true} /> : <PendingCab line={line} color={color} />}
     </div>
   );
 }
@@ -89,16 +89,18 @@ function TopBar({ lines, activeLineId, onSelect, color }: {
 }
 
 /* ═══ 活跃驾驶舱 ═══ */
-function ActiveCab({ color }: { color: string }) {
+function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: boolean }) {
   const {
     nextStation, distanceToNextStationM, stationIndex, line9Stations,
     runDirection, currentSpeedMps, simTime, avgLoadRate, totalPassengers,
-    backendStatus, engineClockState,
+    engineClockState, tractionPercent, brakePercent,
+    energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedHistory,
+    speedTimeHistory, estimatedRunTimeS,
     startBackendSim, pauseBackendSim, resumeBackendSim, stopBackendSim,
   } = useSimStore();
+  const color = lineColor(line9.id);
 
   const speedKmh = currentSpeedMps * 3.6;
-  const isBackend = backendStatus === 'connected';
   const eta = distanceToNextStationM > 0 && currentSpeedMps > 0
     ? Math.ceil(distanceToNextStationM / currentSpeedMps) : 0;
 
@@ -126,11 +128,34 @@ function ActiveCab({ color }: { color: string }) {
             <CabGauge speedKmh={speedKmh} color={color} />
           </div>
           <div className="flex items-center justify-center gap-3 flex-wrap">
-            <MetricBadge label="TARGET" value="80" unit="km/h" accent="#00a8ff" />
+            <MetricBadge label="TARGET" value={String(Math.round(targetSpeedMps * 3.6))} unit="km/h" accent="#00a8ff" />
             <MetricBadge label="LOAD" value={`${avgLoadRate}%`} unit="" accent="#8FC31F" />
             <MetricBadge label="PAX" value={String(totalPassengers)} unit="" accent="#94a3b8" />
+            <MetricBadge label="ENE" value={energyKwh.toFixed(1)} unit="kWh" accent="#f59e0b" />
+            <MetricBadge label="ETIME" value={estimatedRunTimeS > 0 ? `${estimatedRunTimeS|0}` : '--'} unit="s" accent="#6366f1" />
             <MetricBadge label="MODE" value="AM-CBTC" unit="" accent="#8FC31F" />
           </div>
+          {/* ── 速度-位点曲线 ── */}
+          <SpeedCurveChart
+            profile={speedProfile}
+            history={speedHistory}
+            currentSpeedMps={currentSpeedMps}
+            currentPositionM={
+              speedHistory.length > 0 ? speedHistory[speedHistory.length - 1].positionM : 0
+            }
+            startStation={line9Stations[stationIndex] || '--'}
+            endStation={nextStation || '--'}
+          />
+          {/* ── 速度-时间曲线 ── */}
+          <SpeedTimeCurveChart
+            history={speedTimeHistory}
+            currentSpeedMps={currentSpeedMps}
+            elapsedS={
+              speedTimeHistory.length > 0
+                ? speedTimeHistory[speedTimeHistory.length - 1].elapsedS
+                : 0
+            }
+          />
         </div>
 
         {/* 中列：PIS */}
@@ -151,6 +176,18 @@ function ActiveCab({ color }: { color: string }) {
           </div>
 
           {isBackend && <ControlButtons state={engineClockState} onStart={startBackendSim} onPause={pauseBackendSim} onResume={resumeBackendSim} onStop={stopBackendSim} />}
+
+          {/* ── 牵引 / 制动条 ── */}
+          <div className="flex flex-col" style={{ gap: 8 }}>
+            <DriveBar label="TRACTION" value={tractionPercent} color="#22c55e" />
+            <DriveBar label="BRAKE" value={brakePercent} color="#ef4444" />
+          </div>
+
+          {/* ── 运行信息 ── */}
+          <div className="flex flex-col" style={{ gap: 3 }}>
+            <InfoRow label="PERMITTED" value={`${Math.round(permittedSpeedMps * 3.6)} km/h`} color="#00a8ff" />
+            <InfoRow label="TARGET" value={`${Math.round(targetSpeedMps * 3.6)} km/h`} color="#8FC31F" />
+          </div>
 
           <div className="flex flex-col" style={{ gap: 6 }}>
             <StateIndicator state={engineClockState} />
@@ -374,6 +411,35 @@ function StateIndicator({ state }: { state: string }) {
   );
 }
 
+/* ═══ 牵引/制动进度条 ═══ */
+function DriveBar({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="select-none">
+      <div className="flex justify-between items-center mb-1">
+        <span className="text-[7px] font-semibold uppercase tracking-[0.14em] text-[#6b7280]">{label}</span>
+        <span className="text-[10px] font-bold font-mono" style={{ color }}>{value.toFixed(1)}%</span>
+      </div>
+      <div className="h-1.5 rounded-full w-full" style={{ background: 'rgba(255,255,255,0.06)' }}>
+        <div className="h-full rounded-full transition-all duration-200" style={{
+          width: `${Math.min(value, 100)}%`,
+          background: color,
+          boxShadow: value > 5 ? `0 0 6px ${color}40` : 'none',
+        }} />
+      </div>
+    </div>
+  );
+}
+
+/* ═══ 运行信息行 ═══ */
+function InfoRow({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div className="flex justify-between items-center py-0.5 select-none">
+      <span className="text-[7px] font-semibold uppercase tracking-[0.12em] text-[#6b7280]">{label}</span>
+      <span className="text-[11px] font-bold font-mono" style={{ color }}>{value}</span>
+    </div>
+  );
+}
+
 /* ═══ 待定驾驶舱 ═══ */
 function PendingCab({ line, color }: { line: MetroLineData | undefined; color: string }) {
   const name = line ? line.name : '未知线路';
@@ -406,4 +472,137 @@ function hexToRgb(hex: string): string {
   if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
   const n = parseInt(hex, 16);
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
+
+/* ═══ 速度曲线对比图 ═══ */
+function SpeedCurveChart({
+  profile,
+  history,
+  currentSpeedMps,
+  currentPositionM,
+  startStation,
+  endStation,
+}: {
+  profile: Array<{ positionM: number; speedMps: number }>;
+  history: Array<{ positionM: number; speedMps: number }>;
+  currentSpeedMps: number;
+  currentPositionM: number;
+  startStation: string;
+  endStation: string;
+}) {
+  const W = 320; const H = 90; const PAD = { t: 8, r: 12, b: 22, l: 32 };
+  const iw = W - PAD.l - PAD.r; const ih = H - PAD.t - PAD.b;
+  const maxSpeed = 25; // m/s (~90 km/h)
+
+  const toX = (pos: number, minPos: number, maxPos: number) =>
+    PAD.l + ((pos - minPos) / (maxPos - minPos || 1)) * iw;
+  const toY = (v: number) => PAD.t + (1 - v / maxSpeed) * ih;
+
+  // 计算 X 轴范围
+  const allPositions = [...profile.map(p => p.positionM), ...history.map(p => p.positionM)];
+  const minPos = allPositions.length ? Math.min(...allPositions) : 0;
+  const maxPos = allPositions.length ? Math.max(...allPositions) : 1500;
+
+  const profilePath = profile.length > 1
+    ? `M${toX(profile[0].positionM, minPos, maxPos)},${toY(profile[0].speedMps)}` +
+      profile.slice(1).map(p => `L${toX(p.positionM, minPos, maxPos)},${toY(p.speedMps)}`).join('')
+    : '';
+  const histPath = history.length > 1
+    ? `M${toX(history[0].positionM, minPos, maxPos)},${toY(history[0].speedMps)}` +
+      history.slice(1).map(p => `L${toX(p.positionM, minPos, maxPos)},${toY(p.speedMps)}`).join('')
+    : '';
+
+  return (
+    <div className="select-none" style={{ position: 'relative' }}>
+      <div className="flex items-center justify-between mb-1" style={{ paddingLeft: 32, paddingRight: 12 }}>
+        <span className="text-[7px] font-semibold uppercase tracking-[0.12em] text-[#6b7280]">Speed-Position</span>
+        <div className="flex items-center gap-2" style={{ fontSize: 7 }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+            <span style={{ width: 8, height: 1, background: '#3b82f6', display: 'inline-block', borderRadius: 1 }} />
+            <span className="text-[#64748b]">PLAN</span>
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+            <span style={{ width: 8, height: 1, background: '#22c55e', display: 'inline-block', borderRadius: 1 }} />
+            <span className="text-[#64748b]">ACT</span>
+          </span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: 'block' }}>
+        {/* 网格线 */}
+        {[0, 0.25, 0.5, 0.75, 1].map(r => {
+          const y = PAD.t + r * ih;
+          return <line key={`g${r}`} x1={PAD.l} y1={y} x2={W - PAD.r} y2={y} stroke="rgba(255,255,255,0.04)" strokeWidth={0.5} />;
+        })}
+        {/* Y轴标签 */}
+        <text x={PAD.l - 4} y={PAD.t + 3} textAnchor="end" fill="#64748b" fontSize={6} fontFamily="monospace">{maxSpeed * 3.6 | 0}</text>
+        <text x={PAD.l - 4} y={PAD.t + ih + 3} textAnchor="end" fill="#64748b" fontSize={6} fontFamily="monospace">0</text>
+        <text x={PAD.l - 4} y={PAD.t + ih / 2 + 3} textAnchor="end" fill="#475569" fontSize={5.5} fontFamily="monospace">{(maxSpeed * 3.6 / 2) | 0}</text>
+        {/* X轴标签 — 站名 */}
+        <text x={PAD.l} y={H - 3} textAnchor="start" fill="#94a3b8" fontSize={6.5} fontFamily="monospace" fontWeight={600}>{startStation}</text>
+        <text x={W - PAD.r} y={H - 3} textAnchor="end" fill="#94a3b8" fontSize={6.5} fontFamily="monospace" fontWeight={600}>{endStation}</text>
+        {/* 规划曲线 */}
+        {profilePath && <path d={profilePath} fill="none" stroke="#3b82f6" strokeWidth={1.2} strokeDasharray="3,2" opacity={0.7} />}
+        {/* 实际曲线 */}
+        {histPath && <path d={histPath} fill="none" stroke="#22c55e" strokeWidth={1.2} opacity={0.9} />}
+        {/* 当前速度点 */}
+        {currentPositionM > 0 && (
+          <circle cx={toX(currentPositionM, minPos, maxPos)} cy={toY(currentSpeedMps)} r={2.5}
+            fill="#22c55e" stroke="#111827" strokeWidth={1}
+            style={{ filter: 'drop-shadow(0 0 4px rgba(34,197,94,0.6))' }} />
+        )}
+      </svg>
+    </div>
+  );
+}
+
+/* ── 速度-时间曲线 ── */
+function SpeedTimeCurveChart({
+  history,
+  currentSpeedMps,
+  elapsedS,
+}: {
+  history: Array<{ elapsedS: number; speedMps: number }>;
+  currentSpeedMps: number;
+  elapsedS: number;
+}) {
+  const W = 320; const H = 80; const PAD = { t: 8, r: 12, b: 18, l: 32 };
+  const iw = W - PAD.l - PAD.r; const ih = H - PAD.t - PAD.b;
+  const maxSpeed = 25;
+
+  const maxT = history.length > 0 ? Math.max(history[history.length - 1].elapsedS + 10, 60) : 60;
+  const toX = (t: number) => PAD.l + (t / maxT) * iw;
+  const toY = (v: number) => PAD.t + (1 - v / maxSpeed) * ih;
+
+  const histPath = history.length > 1
+    ? `M${toX(history[0].elapsedS)},${toY(history[0].speedMps)}` +
+      history.slice(1).map(p => `L${toX(p.elapsedS)},${toY(p.speedMps)}`).join('')
+    : '';
+
+  return (
+    <div className="select-none" style={{ position: 'relative' }}>
+      <div className="flex items-center justify-between mb-1" style={{ paddingLeft: 32, paddingRight: 12 }}>
+        <span className="text-[7px] font-semibold uppercase tracking-[0.12em] text-[#6b7280]">Speed-Time</span>
+        <span className="text-[7px] text-[#475569]">{elapsedS.toFixed(1)}s</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: 'block' }}>
+        {[0, 0.25, 0.5, 0.75, 1].map(r => {
+          const y = PAD.t + r * ih;
+          return <line key={`gt${r}`} x1={PAD.l} y1={y} x2={W - PAD.r} y2={y} stroke="rgba(255,255,255,0.04)" strokeWidth={0.5} />;
+        })}
+        <text x={PAD.l - 4} y={PAD.t + 3} textAnchor="end" fill="#64748b" fontSize={6} fontFamily="monospace">{maxSpeed * 3.6 | 0}</text>
+        <text x={PAD.l - 4} y={PAD.t + ih + 3} textAnchor="end" fill="#64748b" fontSize={6} fontFamily="monospace">0</text>
+        <text x={PAD.l} y={H - 2} textAnchor="start" fill="#475569" fontSize={5.5} fontFamily="monospace">0s</text>
+        <text x={W - PAD.r} y={H - 2} textAnchor="end" fill="#475569" fontSize={5.5} fontFamily="monospace">{maxT | 0}s</text>
+        {[0.25, 0.5, 0.75].map(r => (
+          <text key={`xt${r}`} x={PAD.l + r * iw} y={H - 2} textAnchor="middle" fill="#334155" fontSize={5} fontFamily="monospace">{(maxT * r) | 0}s</text>
+        ))}
+        {histPath && <path d={histPath} fill="none" stroke="#22c55e" strokeWidth={1.2} opacity={0.9} />}
+        {elapsedS > 0 && (
+          <circle cx={toX(elapsedS)} cy={toY(currentSpeedMps)} r={2.5}
+            fill="#22c55e" stroke="#111827" strokeWidth={1}
+            style={{ filter: 'drop-shadow(0 0 4px rgba(34,197,94,0.6))' }} />
+        )}
+      </svg>
+    </div>
+  );
 }

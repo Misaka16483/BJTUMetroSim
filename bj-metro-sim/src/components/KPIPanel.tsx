@@ -12,8 +12,8 @@ export default function KPIPanel() {
       color: punctuality >= 95 ? 'var(--green)' : punctuality >= 90 ? 'var(--amber)' : 'var(--red)',
     },
     {
-      label: '平均等待', unit: 's', value: String(avgWaitTime),
-      color: avgWaitTime < 180 ? 'var(--green)' : 'var(--amber)',
+      label: '站台等待', unit: 'pax', value: String(avgWaitTime),
+      color: avgWaitTime < 180 ? 'var(--green)' : avgWaitTime < 360 ? 'var(--amber)' : 'var(--red)',
     },
     {
       label: '满载率', unit: '%', value: String(avgLoadRate),

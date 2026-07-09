@@ -116,6 +116,8 @@ export interface SimTrainState {
   stationIndex: number;
   direction: 'UP' | 'DOWN';
   phase: string;
+  currentStationCode: string;
+  nextStationCode: string;
   speedMps: number;
   permittedSpeedMps: number;
   distanceToNextM: number;
@@ -127,11 +129,112 @@ export interface SimTrainState {
   currentStation: string;
   nextStation: string;
   segmentProgress: number;
+  lastDispatchAction: string;
+  lastDispatchReason: string;
+  tractionPercent?: number;
+  brakePercent?: number;
+  energyKwh?: number;
+  targetSpeedMps?: number;
+  estimatedRunTimeS?: number;
 }
 
 export interface SimStationInfo {
   name: string;
   code: string;
+  waitingPax?: number;
+  leftBehindPax?: number;
+  arrivalsLastTick?: number;
+  platformDensity?: number;
+  crowdingLevel?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | string;
+  direction?: string;
+}
+
+export interface SimPowerState {
+  powerSectionId: string;
+  requestedPowerKw: number;
+  availablePowerKw: number;
+  tractionLimitRatio: number;
+  voltageLevel: string;
+  energyKwh: number;
+  regenEnergyKwh: number;
+  absorbedRegenKw: number;
+  wastedRegenKw: number;
+  minTrainVoltageV?: number;
+  maxTrainCurrentA?: number;
+  substationCount?: number;
+  overloadedSubstations?: number;
+  overloadedFeeders?: number;
+  lossesKw?: number;
+  feedbackRegenKw?: number;
+  alerts?: Array<Record<string, unknown>>;
+  source: string;
+  quality: string;
+}
+
+export interface PowerSubstationState {
+  substationId: string;
+  name: string;
+  mileageM: number;
+  voltageV: number;
+  currentA: number;
+  powerKw: number;
+  energyKwh: number;
+  loadRatio: number;
+  status: string;
+}
+
+export interface PowerFeederState {
+  feederId: string;
+  substationId: string;
+  direction: string;
+  side: string;
+  currentA: number;
+  powerKw: number;
+  loadRatio: number;
+  status: string;
+}
+
+export interface TrainVoltageState {
+  trainId: string;
+  powerSectionId: string;
+  mileageM?: number;
+  voltageV: number;
+  currentA: number;
+  requestedPowerKw: number;
+  tractionLimitRatio: number;
+  regenLimitRatio: number;
+  voltageLevel: string;
+  leftSubstationId?: string | null;
+  rightSubstationId?: string | null;
+}
+
+export interface PowerNetworkState {
+  simTimeMs?: number;
+  substations: PowerSubstationState[];
+  feeders: PowerFeederState[];
+  trainVoltages: TrainVoltageState[];
+  regen: {
+    generatedKw: number;
+    absorbedKw: number;
+    feedbackKw: number;
+    wastedKw: number;
+  };
+  lossesKw: number;
+  alerts: Array<Record<string, unknown>>;
+  source?: string;
+  quality?: string;
+}
+
+export interface SimDispatchDecision {
+  decisionId: string;
+  simTimeMs: number;
+  trainId: string | null;
+  stationId: string | null;
+  action: string;
+  durationSec: number;
+  reason: string;
+  applied: boolean;
+  expectedImpact: Record<string, number | string | boolean>;
 }
 
 export interface SimKpi {
@@ -139,6 +242,15 @@ export interface SimKpi {
   totalTrains: number;
   avgSpeed: number;
   totalOnboardPax: number;
+  totalWaitingPax?: number;
+  maxPlatformDensity?: number;
+  totalTractionEnergyKwh?: number;
+  minTractionLimitRatio?: number;
+  minTrainVoltageV?: number;
+  totalAbsorbedRegenKw?: number;
+  totalWastedRegenKw?: number;
+  powerLossesKw?: number;
+  lastDispatchAction?: string;
 }
 
 export interface SimClock {
@@ -152,12 +264,31 @@ export interface SimStateResponse {
   clock: SimClock;
   trains: SimTrainState[];
   stations: SimStationInfo[];
+  power?: SimPowerState[];
+  powerNetwork?: PowerNetworkState;
+  dispatchDecisions?: SimDispatchDecision[];
   kpi: SimKpi;
+  source: string;
+}
+
+// ── 速度规划曲线 ──
+export interface SpeedProfilePoint {
+  positionM: number;
+  speedMps: number;
+  mode: string;
+}
+
+export interface SpeedProfileResponse {
+  profiles: Record<string, SpeedProfilePoint[]>;
   source: string;
 }
 
 export function fetchSimState(): Promise<SimStateResponse> {
   return getJson<SimStateResponse>('/api/sim/state');
+}
+
+export function fetchSpeedProfile(): Promise<SpeedProfileResponse> {
+  return getJson<SpeedProfileResponse>('/api/sim/speed-profile');
 }
 
 export function simStart(): Promise<unknown> {

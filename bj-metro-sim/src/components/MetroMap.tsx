@@ -17,6 +17,7 @@ const styleConfig: string | maplibregl.StyleSpecification = hasMapTilerKey
 const registeredClickLayers = new Set<string>();
 let popupRef: maplibregl.Popup | null = null;
 const lineMarkers: Map<string, maplibregl.Marker> = new Map();
+const powerMarkers: Map<string, maplibregl.Marker> = new Map();
 
 export default function MetroMap() {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -29,6 +30,7 @@ export default function MetroMap() {
   const linesError = useSimStore((s) => s.linesError);
   const trainPositions = useSimStore((s) => s.trainPositions);
   const isRunning = useSimStore((s) => s.isRunning);
+  const simPowerNetwork = useSimStore((s) => s.simPowerNetwork);
 
   // ── 初始化地图 ──
   useEffect(() => {
@@ -308,6 +310,68 @@ export default function MetroMap() {
     });
   }, [trainPositions, isRunning, metroLines]);
 
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoaded.current) return;
+
+    const line9 = metroLines.find((line) => line.id === '9');
+    const substations = simPowerNetwork?.substations ?? [];
+    if (!line9 || hiddenLines.has('9') || substations.length === 0) {
+      powerMarkers.forEach((marker) => marker.remove());
+      powerMarkers.clear();
+      return;
+    }
+
+    const activeIds = new Set(substations.map((item) => item.substationId));
+    powerMarkers.forEach((marker, id) => {
+      if (!activeIds.has(id)) {
+        marker.remove();
+        powerMarkers.delete(id);
+      }
+    });
+
+    for (const substation of substations) {
+      const point = interpolateLinePointByMileage(line9, substation.mileageM);
+      if (!point) continue;
+      const lngLat: [number, number] = [point.lng, point.lat];
+      const existing = powerMarkers.get(substation.substationId);
+      if (existing) {
+        existing.setLngLat(lngLat);
+        continue;
+      }
+
+      const warning = substation.status !== 'NORMAL' || substation.loadRatio >= 0.85;
+      const color = warning ? '#ffb454' : '#58a6ff';
+      const el = document.createElement('div');
+      el.className = 'power-marker';
+      el.innerHTML = `
+        <div title="${substation.name}" style="
+          width: 15px; height: 15px;
+          transform: rotate(45deg);
+          background: ${warning ? 'rgba(255,180,84,0.35)' : 'rgba(88,166,255,0.35)'};
+          border: 1.5px solid ${color};
+          box-shadow: 0 0 12px ${color}80;
+        "></div>
+        <div style="
+          margin-top: 5px;
+          padding: 1px 4px;
+          background: rgba(4,8,16,0.82);
+          border: 1px solid rgba(255,255,255,0.08);
+          color: ${color};
+          font-size: 9px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          white-space: nowrap;
+          transform: translateX(-35%);
+        ">${substation.substationId.replace('TS-', '')}</div>
+      `;
+
+      const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+        .setLngLat(lngLat)
+        .addTo(map);
+      powerMarkers.set(substation.substationId, marker);
+    }
+  }, [simPowerNetwork, metroLines, hiddenLines]);
+
   return (
     <div className="relative w-full h-full">
       {linesLoading && (
@@ -328,6 +392,39 @@ export default function MetroMap() {
 }
 
 // ── 渲染/更新地铁线路 ──
+function interpolateLinePointByMileage(
+  line: MetroLineData,
+  mileageM: number,
+): { lat: number; lng: number } | null {
+  const stations = [...line.stations]
+    .filter((station) => Number.isFinite(station.mileageM) && Number.isFinite(station.lat) && Number.isFinite(station.lng))
+    .sort((a, b) => (a.mileageM ?? 0) - (b.mileageM ?? 0));
+  if (stations.length === 0) return null;
+  if (mileageM <= (stations[0].mileageM ?? 0)) {
+    return { lat: stations[0].lat, lng: stations[0].lng };
+  }
+  const last = stations[stations.length - 1];
+  if (mileageM >= (last.mileageM ?? 0)) {
+    return { lat: last.lat, lng: last.lng };
+  }
+
+  for (let index = 0; index < stations.length - 1; index++) {
+    const left = stations[index];
+    const right = stations[index + 1];
+    const leftMileage = left.mileageM ?? 0;
+    const rightMileage = right.mileageM ?? leftMileage;
+    if (mileageM < leftMileage || mileageM > rightMileage) continue;
+    const ratio = rightMileage > leftMileage
+      ? (mileageM - leftMileage) / (rightMileage - leftMileage)
+      : 0;
+    return {
+      lat: left.lat + (right.lat - left.lat) * ratio,
+      lng: left.lng + (right.lng - left.lng) * ratio,
+    };
+  }
+  return null;
+}
+
 function renderMetroLines(
   map: maplibregl.Map,
   lines: MetroLineData[],

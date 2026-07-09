@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from app.core.engine import SimulationEngine
 from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.operations.member_c_demo import MemberCDemoRunner
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
 from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
@@ -36,6 +37,7 @@ WORKSPACE_STATIONS = (
 )
 DEFAULT_STATIONS = REPO_STATIONS if REPO_STATIONS.exists() else WORKSPACE_STATIONS
 DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_single.json"
+DEFAULT_POWER_TOPOLOGY = ROOT / "data" / "scenarios" / "line9_power_topology.json"
 
 LINE9_COLOR = "#8FC31F"
 LINE9_COORDS: dict[str, tuple[float, float]] = {
@@ -70,6 +72,7 @@ class Line9DataService:
         self._line_map: JsonDict | None = None
         self._stations: list[JsonDict] | None = None
         self._sim_runner: MemberCDemoRunner | None = None
+        self._power_topology: JsonDict | None = None
 
     @property
     def line_map(self) -> JsonDict:
@@ -232,6 +235,11 @@ class Line9DataService:
                 ["id", "startSegmentId", "startOffsetM", "endSegmentId", "endOffsetM", "slopePermille"],
             ),
         }
+
+    def power_topology(self) -> JsonDict:
+        if self._power_topology is None:
+            self._power_topology = load_line9_power_network(DEFAULT_POWER_TOPOLOGY).topology_dict()
+        return self._power_topology
 
     def segment_context(self, seg_id: int) -> JsonDict:
         service = TrackQueryService(self.line_map)
@@ -401,8 +409,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"lineId": "9", "stations": self.service.station_mappings()})
             elif path == "/api/lines/9/track-map":
                 self._send_json(self.service.track_map())
+            elif path == "/api/lines/9/power-topology":
+                self._send_json(self.service.power_topology())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
+            elif path == "/api/sim/power/state":
+                self._send_json(self._sim_power_state())
+            elif path == "/api/sim/speed-profile":
+                self._send_json(self._speed_profile())
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
@@ -441,7 +455,12 @@ class ApiHandler(BaseHTTPRequestHandler):
 
             if path == "/api/sim/start":
                 self.engine.start()
-                self._send_json({"ok": True, "action": "start", "simTimeMs": int(self.engine.clock.sim_time_seconds * 1000)})
+                snap = self.engine.snapshot()
+                self._send_json({
+                    "ok": True,
+                    "action": "start",
+                    "simTimeMs": snap.sim_time_ms if snap else int(self.engine.clock.sim_time_seconds * 1000),
+                })
             elif path == "/api/sim/pause":
                 self.engine.pause()
                 self._send_json({"ok": True, "action": "pause"})
@@ -451,6 +470,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/power/faults":
+                payload = self._read_json_body()
+                self._send_json(self._apply_power_fault(payload))
+            elif match := re.fullmatch(r"/api/sim/power/switches/([^/]+)/operate", path):
+                payload = self._read_json_body()
+                self._send_json(self._operate_power_switch(match.group(1), payload))
             else:
                 self._send_json({"error": "not found", "path": path}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -496,9 +521,89 @@ class ApiHandler(BaseHTTPRequestHandler):
             },
             "trains": snap.trains,
             "stations": snap.stations,
+            "power": snap.power,
+            "powerNetwork": snap.power_network,
+            "dispatchDecisions": snap.dispatch_decisions,
             "kpi": snap.kpi,
             "source": "simulation-engine",
         }
+
+    def _sim_power_state(self) -> JsonDict:
+        if self.engine is None:
+            return {
+                "simTimeMs": 0,
+                "substations": [],
+                "feeders": [],
+                "trainVoltages": [],
+                "regen": {"generatedKw": 0, "absorbedKw": 0, "feedbackKw": 0, "wastedKw": 0},
+                "lossesKw": 0,
+                "alerts": [],
+                "source": "static",
+            }
+        snap = self.engine.snapshot()
+        if snap is None or not snap.power_network:
+            return {
+                "simTimeMs": 0,
+                "substations": [],
+                "feeders": [],
+                "trainVoltages": [],
+                "regen": {"generatedKw": 0, "absorbedKw": 0, "feedbackKw": 0, "wastedKw": 0},
+                "lossesKw": 0,
+                "alerts": [],
+                "source": "simulation-engine",
+            }
+        return snap.power_network
+
+    def _apply_power_fault(self, payload: JsonDict) -> JsonDict:
+        if self.engine is None or self.engine.power_service.network is None:
+            return {"ok": False, "error": "POWER_NETWORK_NOT_INITIALIZED"}
+        fault_type = str(payload.get("faultType", "SUBSTATION_OUTAGE"))
+        target_id = str(payload.get("targetId", ""))
+        if fault_type != "SUBSTATION_OUTAGE" or not target_id:
+            return {"ok": False, "error": "UNSUPPORTED_POWER_FAULT"}
+        result = self.engine.power_service.network.apply_substation_outage(
+            target_id,
+            big_bilateral=str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
+        )
+        self.engine._last_power_states = self.engine._empty_power_states()
+        return {"ok": True, "data": {"faultId": f"PF-{target_id}", **result}}
+
+    def _operate_power_switch(self, switch_id: str, payload: JsonDict) -> JsonDict:
+        if self.engine is None or self.engine.power_service.network is None:
+            return {"ok": False, "error": "POWER_NETWORK_NOT_INITIALIZED"}
+        state = str(payload.get("state", "")).upper()
+        if state not in {"OPEN", "CLOSED"}:
+            return {"ok": False, "error": "INVALID_SWITCH_STATE"}
+        switch = self.engine.power_service.network.operate_switch(switch_id, state)
+        self.engine._last_power_states = self.engine._empty_power_states()
+        return {
+            "ok": True,
+            "data": {
+                "switchId": switch.switch_id,
+                "switchType": switch.switch_type,
+                "mileageM": switch.mileage_m,
+                "fromNodeId": switch.from_node_id,
+                "toNodeId": switch.to_node_id,
+                "normalState": switch.normal_state,
+                "currentState": switch.current_state,
+                "remoteControllable": switch.remote_controllable,
+            },
+        }
+
+    def _read_json_body(self) -> JsonDict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        return json.loads(raw.decode("utf-8"))
+
+    def _speed_profile(self) -> JsonDict:
+        if self.engine is None:
+            return {"profiles": {}, "source": "unavailable"}
+        profiles: dict[str, Any] = {}
+        for train in self.engine.trains:
+            profiles[train.train_id] = self.engine.export_speed_profile(train.train_id)
+        return {"profiles": profiles, "source": "simulation-engine"}
 
     def _send_json(self, payload: JsonDict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

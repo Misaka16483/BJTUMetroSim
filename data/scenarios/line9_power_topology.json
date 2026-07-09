@@ -1,0 +1,121 @@
+{
+  "lineId": "9",
+  "nominalVoltageV": 750,
+  "quality": "ENGINEERING_ESTIMATE",
+  "substations": [
+    {
+      "substationId": "TS-0901",
+      "name": "Guogongzhuang traction mixed substation",
+      "mileageM": 313.0,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 1000,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0902",
+      "name": "Fengtai Science Park traction substation V0",
+      "mileageM": 1660.52,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0903",
+      "name": "Fengtai South Road traction substation V0",
+      "mileageM": 3429.32,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0904",
+      "name": "Fengtai East Street traction substation V0",
+      "mileageM": 5014.46,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0905",
+      "name": "Qilizhuang traction substation V0",
+      "mileageM": 6339.9,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0906",
+      "name": "Liuliqiao traction substation V0",
+      "mileageM": 8118.83,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0907",
+      "name": "Beijing West Railway Station traction substation V0",
+      "mileageM": 10598.74,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0908",
+      "name": "Military Museum traction substation V0",
+      "mileageM": 11996.97,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0909",
+      "name": "Baiduizi traction substation V0",
+      "mileageM": 13906.77,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 0,
+      "status": "IN_SERVICE"
+    },
+    {
+      "substationId": "TS-0910",
+      "name": "National Library traction substation V0",
+      "mileageM": 16048.92,
+      "noLoadVoltageV": 825,
+      "internalResistanceOhm": 0.015,
+      "ratedCurrentA": 5300,
+      "overloadCurrentA": 8000,
+      "efsCapacityKw": 1000,
+      "status": "IN_SERVICE"
+    }
+  ],
+  "feeders": [],
+  "contactRailSections": [],
+  "returnRailSections": [],
+  "switches": []
+}

@@ -1783,3 +1783,115 @@ GET  /api/experiments/{experimentId}/trials
 3. 使用 FastAPI WebSocket 支持 `state.*` 推送。
 4. 保留现有 URL，避免前端返工。
 5. API 响应模型先兼容现有 Phase 0 字段，再逐步切换到统一包裹格式。
+## 供电网络接口补充
+
+本节对应 9号线牵引供电准静态仿真 V0，数据来源为自研工程近似模型：
+
+```text
+source = SELF_SIM
+quality = ENGINEERING_ESTIMATE
+```
+
+### GET /api/lines/9/power-topology
+
+返回 9号线 DC750V 接触轨牵引供电 V0 静态拓扑。
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| lineId | string | 线路 ID |
+| nominalVoltageV | number | 标称直流电压，V0 为 750V |
+| quality | string | 数据质量 |
+| substations | array | 牵引变电所列表 |
+| feeders | array | 馈电臂列表 |
+| contactRailSections | array | 接触轨分段 |
+| returnRailSections | array | 回流轨分段 |
+| switches | array | 联络/隔离/断路器开关 |
+
+### GET /api/sim/power/state
+
+返回当前仿真 tick 的牵引供电潮流状态。该接口与 `/api/sim/state.powerNetwork` 内容一致，便于前端或实验脚本单独轮询供电状态。
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| simTimeMs | integer | 仿真绝对时刻 |
+| substations | array | 各牵引所电压、电流、功率、负载率 |
+| feeders | array | 馈电臂电流、功率、负载率 |
+| trainVoltages | array | 每列车受电电压、电流、限功率系数，包含 `mileageM` 用于前端定位 |
+| regen | object | 再生能量产生、吸收、回馈、浪费功率 |
+| lossesKw | number | 线路损耗 |
+| alerts | array | 欠压、过载、过压、再生浪费等告警 |
+
+### POST /api/sim/power/faults
+
+注入供电故障。当前 V0 支持单座牵引所退出，并按大双边越区供电逻辑闭合相关联络开关。
+
+请求示例：
+
+```json
+{
+  "faultType": "SUBSTATION_OUTAGE",
+  "targetId": "TS-0905",
+  "mode": "N_MINUS_1_BIG_BILATERAL"
+}
+```
+
+响应示例：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "faultId": "PF-TS-0905",
+    "affectedSubstationId": "TS-0905",
+    "supplyMode": "BIG_BILATERAL",
+    "openedSwitches": ["FD-0905-UP-LEFT"],
+    "closedSwitches": ["SW-TIE-0905"]
+  }
+}
+```
+
+### POST /api/sim/power/switches/{switchId}/operate
+
+远程操作供电网络开关。当前 V0 用于联络开关分合闸实验、牵引所 N-1 越区供电恢复过程展示。
+
+请求示例：
+```json
+{
+  "state": "CLOSED"
+}
+```
+
+响应示例：
+```json
+{
+  "ok": true,
+  "data": {
+    "switchId": "SW-TIE-0905",
+    "switchType": "TIE",
+    "mileageM": 6339.9,
+    "fromNodeId": "TS-0905",
+    "toNodeId": "TS-0904",
+    "normalState": "OPEN",
+    "currentState": "CLOSED",
+    "remoteControllable": true
+  }
+}
+```
+
+### /api/sim/state 扩展字段
+
+`GET /api/sim/state` 新增：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| power | array | 兼容旧前端的上/下行聚合供电状态 |
+| powerNetwork | object | 牵引供电网络潮流快照 |
+| dispatchDecisions | array | 当前 tick 调度决策 |
+| kpi.minTrainVoltageV | number | 当前最低列车受电电压 |
+| kpi.totalAbsorbedRegenKw | number | 当前再生吸收功率 |
+| kpi.totalWastedRegenKw | number | 当前再生浪费功率 |
+| kpi.powerLossesKw | number | 当前线路损耗 |
