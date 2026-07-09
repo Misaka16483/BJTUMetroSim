@@ -116,6 +116,8 @@ export interface SimTrainState {
   stationIndex: number;
   direction: 'UP' | 'DOWN';
   phase: string;
+  currentStationCode: string;
+  nextStationCode: string;
   speedMps: number;
   permittedSpeedMps: number;
   distanceToNextM: number;
@@ -127,11 +129,45 @@ export interface SimTrainState {
   currentStation: string;
   nextStation: string;
   segmentProgress: number;
+  lastDispatchAction: string;
+  lastDispatchReason: string;
 }
 
 export interface SimStationInfo {
   name: string;
   code: string;
+  waitingPax?: number;
+  leftBehindPax?: number;
+  arrivalsLastTick?: number;
+  platformDensity?: number;
+  crowdingLevel?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | string;
+  direction?: string;
+}
+
+export interface SimPowerState {
+  powerSectionId: string;
+  requestedPowerKw: number;
+  availablePowerKw: number;
+  tractionLimitRatio: number;
+  voltageLevel: string;
+  energyKwh: number;
+  regenEnergyKwh: number;
+  absorbedRegenKw: number;
+  wastedRegenKw: number;
+  source: string;
+  quality: string;
+}
+
+export interface SimDispatchDecision {
+  decisionId: string;
+  simTimeMs: number;
+  trainId: string | null;
+  stationId: string | null;
+  action: string;
+  durationSec: number;
+  reason: string;
+  applied: boolean;
+  expectedImpact: Record<string, number | string | boolean>;
 }
 
 export interface SimKpi {
@@ -139,6 +175,11 @@ export interface SimKpi {
   totalTrains: number;
   avgSpeed: number;
   totalOnboardPax: number;
+  totalWaitingPax?: number;
+  maxPlatformDensity?: number;
+  totalTractionEnergyKwh?: number;
+  minTractionLimitRatio?: number;
+  lastDispatchAction?: string;
 }
 
 export interface SimClock {
@@ -152,6 +193,8 @@ export interface SimStateResponse {
   clock: SimClock;
   trains: SimTrainState[];
   stations: SimStationInfo[];
+  power?: SimPowerState[];
+  dispatchDecisions?: SimDispatchDecision[];
   kpi: SimKpi;
   source: string;
 }

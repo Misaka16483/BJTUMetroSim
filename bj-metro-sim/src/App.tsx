@@ -5,6 +5,7 @@ import LinesPanel from './components/LinesPanel';
 import DriverConsole from './components/DriverConsole';
 import MicroTrackView from './components/MicroTrackView';
 import StationInterlockingView from './components/StationInterlockingView';
+import OperationalLoopPanel from './components/OperationalLoopPanel';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -301,6 +302,10 @@ export default function App() {
               {/* kpi */}
               <div className="shrink-0" style={{ height: 240 }}>
                 <KPIPanel />
+              </div>
+              {/* member D closed-loop */}
+              <div className="shrink-0" style={{ height: 360 }}>
+                <OperationalLoopPanel />
               </div>
               {/* lines */}
               <div className="shrink-0" style={{ minHeight: 280 }}>

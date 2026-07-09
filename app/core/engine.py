@@ -44,6 +44,8 @@ class SimTrainState:
     line_id: str
     station_index: int           # 当前所在站序号 (0-based)
     direction: str               # "UP" or "DOWN"
+    current_station_code: str = ""
+    next_station_code: str = ""
     phase: str = IDLE
     speed_mps: float = 0.0
     permitted_speed_mps: float = 22.22
@@ -56,6 +58,9 @@ class SimTrainState:
     current_station_name: str = ""
     next_station_name: str = ""
     segment_progress: float = 0.0  # 0→1 between current and next station
+    last_dispatch_action: str = "FOLLOW_TIMETABLE"
+    last_dispatch_reason: str = "NO_ADJUSTMENT_NEEDED"
+    dispatch_hold_applied_station_index: int | None = None
 
     def to_dict(self) -> JsonDict:
         return {
@@ -64,6 +69,8 @@ class SimTrainState:
             "stationIndex": self.station_index,
             "direction": self.direction,
             "phase": self.phase,
+            "currentStationCode": self.current_station_code,
+            "nextStationCode": self.next_station_code,
             "speedMps": round(self.speed_mps, 2),
             "permittedSpeedMps": round(self.permitted_speed_mps, 2),
             "distanceToNextM": round(self.distance_to_next_m, 1),
@@ -75,6 +82,8 @@ class SimTrainState:
             "currentStation": self.current_station_name,
             "nextStation": self.next_station_name,
             "segmentProgress": round(self.segment_progress, 3),
+            "lastDispatchAction": self.last_dispatch_action,
+            "lastDispatchReason": self.last_dispatch_reason,
         }
 
 
@@ -127,8 +136,11 @@ class SimulationEngine:
 
         # ── 域服务 ──
         self.station_service = self._build_station_service()
-        self.power_service: PowerService = PowerService([], traction_efficiency=0.88)
+        self.power_service: PowerService = self._build_power_service()
         self.dispatch_service = RuleBasedDispatchService()
+        self._last_arrivals_by_platform: dict[tuple[str, str], int] = {}
+        self._last_power_states: dict[str, Any] = {}
+        self._last_dispatch_decisions: list[DispatchDecision] = []
 
         # ── 线程安全 ──
         self._lock = threading.Lock()
@@ -143,6 +155,9 @@ class SimulationEngine:
     def load(self) -> None:
         """加载场景，初始化列车状态."""
         self.clock.load()
+        self._last_arrivals_by_platform = {}
+        self._last_power_states = self._empty_power_states()
+        self._last_dispatch_decisions = []
         self.trains = [self._create_train(cfg) for cfg in self.scenario.trains]
         self._snapshot = self._build_snapshot()
 
@@ -211,20 +226,25 @@ class SimulationEngine:
         """单步仿真."""
         self.clock.step()
         tick = self.clock.current_tick
-        sim_time_ms = int(self.clock.sim_time_seconds * 1000)
+        sim_time_ms = self._absolute_sim_time_ms()
 
         # 1) 更新列车位置与速度
         for train in self.trains:
             self._advance_train(train, sim_time_ms)
 
         # 2) 客流到达（每 tick 累积）
-        self.station_service.update_arrivals(sim_time_ms, dt_sec=self.clock.tick_seconds)
+        self._last_arrivals_by_platform = self.station_service.update_arrivals(
+            sim_time_ms,
+            dt_sec=self.clock.tick_seconds,
+        )
 
         # 3) 供电更新
         power_states = self._update_power(sim_time_ms)
+        self._last_power_states = power_states
 
         # 4) 调度决策
         decisions = self._make_dispatch_decisions(sim_time_ms, power_states)
+        self._last_dispatch_decisions = decisions
 
         # 5) 发布事件
         for train in self.trains:
@@ -257,6 +277,23 @@ class SimulationEngine:
                     reason=decision.reason,
                     expected_impact=decision.expected_impact,
                     applied=decision.applied,
+                    detail={"tick": tick},
+                )
+            for state in power_states.values():
+                self.recorder.record_power(
+                    self._run_id,
+                    sim_time_ms=sim_time_ms,
+                    power_section_id=state.power_section_id,
+                    requested_power_kw=state.requested_power_kw,
+                    available_power_kw=state.available_power_kw,
+                    traction_limit_ratio=state.traction_limit_ratio,
+                    voltage_level=state.voltage_level,
+                    energy_kwh=state.energy_kwh,
+                    regen_energy_kwh=state.regen_energy_kwh,
+                    absorbed_regen_kw=state.absorbed_regen_kw,
+                    wasted_regen_kw=state.wasted_regen_kw,
+                    source=state.source,
+                    quality=state.quality,
                     detail={"tick": tick},
                 )
 
@@ -306,39 +343,48 @@ class SimulationEngine:
         # ── 速度曲线 ──
         brake_distance = (train.speed_mps ** 2) / (2 * self.BRAKE_MPS2)
         remaining = train.distance_to_next_m
+        traction_limit_ratio = self._traction_limit_for_train(train)
+        effective_accel_mps2 = self.ACCEL_MPS2 * traction_limit_ratio
+        effective_cruise_mps = self.CRUISE_SPEED_MPS * max(0.55, traction_limit_ratio)
+        train.permitted_speed_mps = effective_cruise_mps
 
         if train.phase == DEPARTING:
-            train.speed_mps += self.ACCEL_MPS2 * dt
-            if train.speed_mps >= self.CRUISE_SPEED_MPS:
-                train.speed_mps = self.CRUISE_SPEED_MPS
+            train.speed_mps += effective_accel_mps2 * dt
+            if train.speed_mps >= effective_cruise_mps:
+                train.speed_mps = effective_cruise_mps
                 train.phase = CRUISING
         elif train.phase == CRUISING:
+            train.speed_mps = min(train.speed_mps, effective_cruise_mps)
             if remaining <= brake_distance + 30:
                 train.phase = APPROACHING
         elif train.phase == APPROACHING:
-            target = max(0.5, min(self.CRUISE_SPEED_MPS, remaining / 30 * self.CRUISE_SPEED_MPS))
+            target = max(0.5, min(effective_cruise_mps, remaining / 30 * effective_cruise_mps))
             diff = target - train.speed_mps
             if diff < 0:
                 train.speed_mps = max(target, train.speed_mps - self.BRAKE_MPS2 * dt)
             else:
-                train.speed_mps = min(target, train.speed_mps + self.ACCEL_MPS2 * dt)
+                train.speed_mps = min(target, train.speed_mps + effective_accel_mps2 * dt)
             if remaining < 5 and train.speed_mps < 1.0:
                 train.speed_mps = 0
                 train.segment_progress = 0
                 train.station_index = next_idx
+                train.current_station_code = str(next_stn.get("code", ""))
                 train.current_station_name = next_stn.get("name", "")
                 train.phase = DWELLING
+                train.dispatch_hold_applied_station_index = None
 
                 # ── 计算下一区间站间距和下一站名 ──
                 new_next_idx = next_idx + 1 if train.direction == "UP" else next_idx - 1
                 if 0 <= new_next_idx < n:
                     new_next_stn = stations[new_next_idx]
+                    train.next_station_code = str(new_next_stn.get("code", ""))
                     train.next_station_name = new_next_stn.get("name", "")
                     train.target_distance_m = abs(
                         self._station_distances[new_next_idx] - self._station_distances[next_idx]
                     )
                     train.distance_to_next_m = train.target_distance_m
                 else:
+                    train.next_station_code = ""
                     train.next_station_name = ""
                     train.target_distance_m = 0
                     train.distance_to_next_m = 0
@@ -348,7 +394,7 @@ class SimulationEngine:
                 return
 
         # ── 推进距离 ──
-        train.speed_mps = min(train.speed_mps, self.CRUISE_SPEED_MPS)
+        train.speed_mps = min(train.speed_mps, effective_cruise_mps)
         advance = train.speed_mps * dt
         train.distance_to_next_m = max(0, remaining - advance)
         train.segment_progress = 1 - (train.distance_to_next_m / dist) if dist > 0 else 1.0
@@ -362,7 +408,7 @@ class SimulationEngine:
         try:
             result, dwell_plan = self.station_service.process_train_stop(
                 sim_time_ms=sim_time_ms,
-                station_id=train.current_station_name,
+                station_id=train.current_station_code,
                 direction=train.direction,
                 train_load=TrainLoadState(
                     train_id=train.train_id,
@@ -421,15 +467,25 @@ class SimulationEngine:
         """更新供电状态."""
         if not self.power_service.sections:
             return {}
-        requests = [
-            TrainPowerRequest(
-                train_id=train.train_id,
-                power_section_id="PWR-0901",
-                speed_mps=train.speed_mps,
-                traction_force_n=70000 if train.phase in (DEPARTING, CRUISING) else 0,
+        requests: list[TrainPowerRequest] = []
+        for train in self.trains:
+            traction_force_n = 0.0
+            brake_force_n = 0.0
+            if train.phase == DEPARTING:
+                traction_force_n = 95_000.0
+            elif train.phase == CRUISING:
+                traction_force_n = 35_000.0
+            elif train.phase == APPROACHING:
+                brake_force_n = 45_000.0
+            requests.append(
+                TrainPowerRequest(
+                    train_id=train.train_id,
+                    power_section_id=self._power_section_for_train(train),
+                    speed_mps=train.speed_mps,
+                    traction_force_n=traction_force_n,
+                    brake_force_n=brake_force_n,
+                )
             )
-            for train in self.trains
-        ]
         return self.power_service.update(requests, dt_sec=self.clock.tick_seconds)
 
     def _make_dispatch_decisions(
@@ -440,16 +496,30 @@ class SimulationEngine:
         for train in self.trains:
             if train.phase != DWELLING:
                 continue
-            ps = power_states.get("PWR-0901")
+            platform = self.station_service.ensure_platform(train.current_station_code, train.direction)
+            ps = power_states.get(self._power_section_for_train(train))
             limit_ratio = ps.traction_limit_ratio if ps and hasattr(ps, "traction_limit_ratio") else 1.0
             context = DispatchContext(
                 sim_time_ms=sim_time_ms,
                 train_id=train.train_id,
-                station_id=train.current_station_name,
+                station_id=train.current_station_code,
+                platform_crowding_level=platform.crowding_level,
                 load_factor=train.load_factor,
+                left_behind_pax=platform.left_behind_pax,
                 power_traction_limit_ratio=limit_ratio,
             )
-            decisions.append(self.dispatch_service.decide(context))
+            decision = self.dispatch_service.decide(context)
+            train.last_dispatch_action = decision.action
+            train.last_dispatch_reason = decision.reason
+            if (
+                decision.applied
+                and decision.duration_sec > 0
+                and decision.action in {"HOLD", "STAGGER_DEPARTURE", "DWELL_EXTEND"}
+                and train.dispatch_hold_applied_station_index != train.station_index
+            ):
+                train.dwell_remaining_sec += decision.duration_sec
+                train.dispatch_hold_applied_station_index = train.station_index
+            decisions.append(decision)
         return decisions
 
     # ═══════════════════════════════════════════════════════════
@@ -457,7 +527,7 @@ class SimulationEngine:
     # ═══════════════════════════════════════════════════════════
 
     def _build_snapshot(self) -> TickSnapshot:
-        total_sec = int(self.clock.sim_time_seconds)
+        total_sec = self._absolute_sim_time_ms() // 1000
         h = (total_sec // 3600) % 24
         m = (total_sec % 3600) // 60
         s = total_sec % 60
@@ -466,14 +536,16 @@ class SimulationEngine:
         active = [t for t in self.trains if t.phase != IDLE]
         return TickSnapshot(
             tick=self.clock.current_tick,
-            sim_time_ms=int(self.clock.sim_time_seconds * 1000),
+            sim_time_ms=self._absolute_sim_time_ms(),
             sim_time_str=time_str,
             clock_state=self.clock.state.value,
             trains=[t.to_dict() for t in self.trains],
             stations=[
-                {"name": stn.get("name", ""), "code": stn.get("code", "")}
+                self._station_snapshot(stn)
                 for stn in self._station_list
             ],
+            power=[self._power_snapshot(state) for state in self._last_power_states.values()],
+            dispatch_decisions=[self._dispatch_snapshot(item) for item in self._last_dispatch_decisions],
             kpi={
                 "activeTrains": len(active),
                 "totalTrains": len(self.trains),
@@ -481,6 +553,21 @@ class SimulationEngine:
                     round(sum(t.speed_mps for t in active) / len(active), 2) if active else 0
                 ),
                 "totalOnboardPax": sum(t.onboard_pax for t in self.trains),
+                "totalWaitingPax": sum(p.waiting_pax for p in self.station_service.platforms.values()),
+                "maxPlatformDensity": round(
+                    max((p.platform_density_pax_per_m2 for p in self.station_service.platforms.values()), default=0.0),
+                    3,
+                ),
+                "totalTractionEnergyKwh": round(
+                    sum(state.energy_kwh for state in self._last_power_states.values()),
+                    3,
+                ),
+                "minTractionLimitRatio": round(
+                    min((state.traction_limit_ratio for state in self._last_power_states.values()), default=1.0),
+                    3,
+                ),
+                "lastDispatchAction": self._last_dispatch_decisions[-1].action
+                if self._last_dispatch_decisions else "FOLLOW_TIMETABLE",
             },
         )
 
@@ -516,6 +603,8 @@ class SimulationEngine:
             line_id=cfg.line_id,
             station_index=idx,
             direction=cfg.direction,
+            current_station_code=str(stn.get("code", "")),
+            next_station_code=str(next_stn.get("code", "")),
             phase=DWELLING,
             speed_mps=0.0,
             target_distance_m=dist,
@@ -549,6 +638,89 @@ class SimulationEngine:
             ),
             DwellTimeConfig(base_dwell_sec=30.0, door_capacity_pax_per_sec=3.0),
         )
+
+    def _build_power_service(self) -> PowerService:
+        return PowerService(
+            [
+                PowerSection(
+                    power_section_id="PWR-09-UP",
+                    name="Line 9 Up traction section",
+                    max_traction_power_kw=900.0,
+                    warning_power_kw=650.0,
+                    regen_absorb_limit_kw=180.0,
+                ),
+                PowerSection(
+                    power_section_id="PWR-09-DOWN",
+                    name="Line 9 Down traction section",
+                    max_traction_power_kw=900.0,
+                    warning_power_kw=650.0,
+                    regen_absorb_limit_kw=180.0,
+                ),
+            ],
+            traction_efficiency=0.88,
+            regen_efficiency=0.65,
+        )
+
+    def _empty_power_states(self) -> dict[str, Any]:
+        return self.power_service.update([], dt_sec=0.0)
+
+    def _power_section_for_train(self, train: SimTrainState) -> str:
+        return "PWR-09-UP" if train.direction == "UP" else "PWR-09-DOWN"
+
+    def _traction_limit_for_train(self, train: SimTrainState) -> float:
+        state = self._last_power_states.get(self._power_section_for_train(train))
+        if state is None:
+            return 1.0
+        return max(0.0, min(1.0, float(state.traction_limit_ratio)))
+
+    def _absolute_sim_time_ms(self) -> int:
+        return self.scenario.start_time_ms + int(self.clock.sim_time_seconds * 1000)
+
+    def _station_snapshot(self, station: JsonDict) -> JsonDict:
+        code = str(station.get("code", ""))
+        direction = "UP"
+        platform = self.station_service.ensure_platform(code, direction)
+        arrivals = self._last_arrivals_by_platform.get((code, direction), 0)
+        return {
+            "name": station.get("name", ""),
+            "code": code,
+            "waitingPax": platform.waiting_pax,
+            "leftBehindPax": platform.left_behind_pax,
+            "arrivalsLastTick": arrivals,
+            "platformDensity": round(platform.platform_density_pax_per_m2, 3),
+            "crowdingLevel": platform.crowding_level,
+            "direction": direction,
+        }
+
+    @staticmethod
+    def _power_snapshot(state: Any) -> JsonDict:
+        return {
+            "powerSectionId": state.power_section_id,
+            "requestedPowerKw": round(state.requested_power_kw, 3),
+            "availablePowerKw": round(state.available_power_kw, 3),
+            "tractionLimitRatio": round(state.traction_limit_ratio, 3),
+            "voltageLevel": state.voltage_level,
+            "energyKwh": round(state.energy_kwh, 4),
+            "regenEnergyKwh": round(state.regen_energy_kwh, 4),
+            "absorbedRegenKw": round(state.absorbed_regen_kw, 3),
+            "wastedRegenKw": round(state.wasted_regen_kw, 3),
+            "source": state.source,
+            "quality": state.quality,
+        }
+
+    @staticmethod
+    def _dispatch_snapshot(decision: DispatchDecision) -> JsonDict:
+        return {
+            "decisionId": decision.decision_id,
+            "simTimeMs": decision.sim_time_ms,
+            "trainId": decision.train_id,
+            "stationId": decision.station_id,
+            "action": decision.action,
+            "durationSec": decision.duration_sec,
+            "reason": decision.reason,
+            "applied": decision.applied,
+            "expectedImpact": decision.expected_impact or {},
+        }
 
     @classmethod
     def load_from_files(

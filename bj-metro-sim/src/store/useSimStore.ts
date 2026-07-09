@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
-import type { TrackMapData, SimStateResponse } from '../data/backendApi';
+import type {
+  SimDispatchDecision,
+  SimPowerState,
+  SimStateResponse,
+  SimStationInfo,
+  TrackMapData,
+} from '../data/backendApi';
 import { simStart, simPause, simResume, simStop } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'driver';
@@ -34,6 +40,14 @@ interface SimState {
   avgLoadRate: number;
   totalPassengers: number;
   totalBoarded: number;
+  totalWaitingPax: number;
+  maxPlatformDensity: number;
+  totalTractionEnergyKwh: number;
+  minTractionLimitRatio: number;
+  lastDispatchAction: string;
+  simStations: SimStationInfo[];
+  simPower: SimPowerState[];
+  dispatchDecisions: SimDispatchDecision[];
 
   // 选中的列车ID
   selectedTrainId: string | null;
@@ -219,6 +233,14 @@ export const useSimStore = create<SimState>((set, get) => ({
   avgLoadRate: 68,
   totalPassengers: 0,
   totalBoarded: 0,
+  totalWaitingPax: 0,
+  maxPlatformDensity: 0,
+  totalTractionEnergyKwh: 0,
+  minTractionLimitRatio: 1,
+  lastDispatchAction: 'FOLLOW_TIMETABLE',
+  simStations: [],
+  simPower: [],
+  dispatchDecisions: [],
   selectedTrainId: null,
   selectedStationCode: null,
 
@@ -422,13 +444,25 @@ export const useSimStore = create<SimState>((set, get) => ({
   // ═══════════════════════════════════════════════════
 
   updateFromBackend: (data: SimStateResponse) => {
-    const { clock, trains, kpi } = data;
+    const { clock, trains, kpi, stations, power, dispatchDecisions } = data;
     const t0 = trains[0];
-    if (!t0) return;
 
     const state = get();
     const isEngineRunning = clock.state === 'RUNNING';
-    set({ engineClockState: clock.state, isRunning: isEngineRunning });
+    set({
+      engineClockState: clock.state,
+      isRunning: isEngineRunning,
+      simStations: stations ?? [],
+      simPower: power ?? [],
+      dispatchDecisions: dispatchDecisions ?? [],
+      totalWaitingPax: kpi.totalWaitingPax ?? 0,
+      maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
+      totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
+      minTractionLimitRatio: kpi.minTractionLimitRatio ?? 1,
+      lastDispatchAction: kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
+    });
+
+    if (!t0) return;
 
     if (!isEngineRunning && clock.state !== 'PAUSED') return;
 
@@ -471,7 +505,12 @@ export const useSimStore = create<SimState>((set, get) => ({
       avgLoadRate: Math.round(t0.loadFactor * 100),
       totalPassengers: t0.onboardPax,
       totalBoarded: kpi.totalOnboardPax,
-      avgWaitTime: kpi.activeTrains > 0 ? 100 + Math.floor(Math.random() * 80) : 0,
+      avgWaitTime: kpi.totalWaitingPax ?? 0,
+      totalWaitingPax: kpi.totalWaitingPax ?? 0,
+      maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
+      totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
+      minTractionLimitRatio: kpi.minTractionLimitRatio ?? 1,
+      lastDispatchAction: t0.lastDispatchAction ?? kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
     });
   },
 

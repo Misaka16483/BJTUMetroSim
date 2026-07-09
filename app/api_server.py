@@ -441,7 +441,12 @@ class ApiHandler(BaseHTTPRequestHandler):
 
             if path == "/api/sim/start":
                 self.engine.start()
-                self._send_json({"ok": True, "action": "start", "simTimeMs": int(self.engine.clock.sim_time_seconds * 1000)})
+                snap = self.engine.snapshot()
+                self._send_json({
+                    "ok": True,
+                    "action": "start",
+                    "simTimeMs": snap.sim_time_ms if snap else int(self.engine.clock.sim_time_seconds * 1000),
+                })
             elif path == "/api/sim/pause":
                 self.engine.pause()
                 self._send_json({"ok": True, "action": "pause"})
