@@ -1,11 +1,130 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import heapq
 import json
 from pathlib import Path
 from typing import Any
 
 
 JsonDict = dict[str, Any]
+DEFAULT_SPEED_LIMIT_MPS = 22.22
+
+
+@dataclass(frozen=True)
+class PathSegmentConstraint:
+    segment_id: int
+    start_offset_m: float
+    end_offset_m: float
+    path_start_m: float
+    path_end_m: float
+    speed_limit_mps: float
+    grade_ratio: float
+    gradient_raw: float | None = None
+    speed_restriction_id: int | None = None
+    gradient_id: int | None = None
+    direction: str = "forward"
+
+    @property
+    def length_m(self) -> float:
+        return self.path_end_m - self.path_start_m
+
+    @property
+    def midpoint_m(self) -> float:
+        return (self.path_start_m + self.path_end_m) / 2.0
+
+
+@dataclass(frozen=True)
+class PathPlan:
+    origin_platform_id: int
+    destination_platform_id: int
+    direction: str
+    segment_ids: tuple[int, ...]
+    constraints: tuple[PathSegmentConstraint, ...]
+    total_length_m: float
+    start_segment_id: int
+    start_offset_m: float
+    end_segment_id: int
+    end_offset_m: float
+
+    @property
+    def target_position_m(self) -> float:
+        return self.total_length_m
+
+    def constraint_at(self, position_m: float) -> PathSegmentConstraint | None:
+        if not self.constraints:
+            return None
+        bounded = min(max(0.0, position_m), self.total_length_m)
+        for constraint in self.constraints:
+            if constraint.path_start_m <= bounded <= constraint.path_end_m + 1e-9:
+                return constraint
+        return self.constraints[-1]
+
+    def speed_limit_at(self, position_m: float, default_mps: float = DEFAULT_SPEED_LIMIT_MPS) -> float:
+        constraint = self.constraint_at(position_m)
+        if constraint is None:
+            return default_mps
+        return min(default_mps, constraint.speed_limit_mps)
+
+    def grade_ratio_at(self, position_m: float) -> float:
+        constraint = self.constraint_at(position_m)
+        return 0.0 if constraint is None else constraint.grade_ratio
+
+    def cache_key(self) -> tuple[object, ...]:
+        return (
+            self.origin_platform_id,
+            self.destination_platform_id,
+            self.direction,
+            round(self.total_length_m, 3),
+            self.segment_ids,
+            tuple(
+                (
+                    constraint.segment_id,
+                    round(constraint.path_start_m, 3),
+                    round(constraint.path_end_m, 3),
+                    round(constraint.speed_limit_mps, 3),
+                    round(constraint.grade_ratio, 7),
+                )
+                for constraint in self.constraints
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class _PathPortion:
+    segment_id: int
+    start_offset_m: float
+    end_offset_m: float
+    path_start_m: float
+    path_end_m: float
+    direction: str
+
+    @property
+    def length_m(self) -> float:
+        return self.path_end_m - self.path_start_m
+
+    def contains_offset(self, offset_m: float) -> bool:
+        low, high = sorted((self.start_offset_m, self.end_offset_m))
+        return low - 1e-9 <= offset_m <= high + 1e-9
+
+    def offset_at(self, path_position_m: float) -> float:
+        if self.length_m <= 1e-9:
+            return self.end_offset_m
+        ratio = (path_position_m - self.path_start_m) / self.length_m
+        return self.start_offset_m + (self.end_offset_m - self.start_offset_m) * ratio
+
+    def position_at_offset(self, offset_m: float) -> float:
+        distance_from_start_m = abs(offset_m - self.start_offset_m)
+        return self.path_start_m + distance_from_start_m
+
+
+@dataclass(frozen=True)
+class _GradientRange:
+    path_start_m: float
+    path_end_m: float
+    grade_ratio: float
+    gradient_raw: float | None
+    gradient_id: int | None
 
 
 class LineMapRepository:
@@ -132,3 +251,297 @@ class TrackQueryService:
         low, high = sorted([float(start), float(end)])
         return low <= offset <= high
 
+
+class PathPlanner:
+    def __init__(self, line_map: JsonDict, default_speed_limit_mps: float = DEFAULT_SPEED_LIMIT_MPS) -> None:
+        self.line_map = line_map
+        self.default_speed_limit_mps = default_speed_limit_mps
+        self.track = TrackQueryService(line_map)
+        self.platforms = {
+            int(item["id"]): item for item in line_map.get("platforms", []) if item.get("id") is not None
+        }
+
+    def plan_between_platforms(
+        self,
+        origin_platform_id: int,
+        destination_platform_id: int,
+        direction: str | None = None,
+    ) -> PathPlan:
+        if direction is not None:
+            return self._plan_between_platforms(origin_platform_id, destination_platform_id, direction)
+
+        plans: list[PathPlan] = []
+        for candidate_direction in ("forward", "backward"):
+            try:
+                plans.append(self._plan_between_platforms(origin_platform_id, destination_platform_id, candidate_direction))
+            except ValueError:
+                continue
+        if not plans:
+            raise ValueError(f"no segment path from platform {origin_platform_id} to {destination_platform_id}")
+        return min(plans, key=lambda item: item.total_length_m)
+
+    def _plan_between_platforms(
+        self,
+        origin_platform_id: int,
+        destination_platform_id: int,
+        direction: str,
+    ) -> PathPlan:
+        if direction not in {"forward", "backward"}:
+            raise ValueError("direction must be 'forward' or 'backward'")
+
+        origin = self._platform(origin_platform_id)
+        destination = self._platform(destination_platform_id)
+        start_segment_id = int(origin["segmentId"])
+        end_segment_id = int(destination["segmentId"])
+        start_offset_m = float(origin.get("offsetM") or 0.0)
+        end_offset_m = float(destination.get("offsetM") or 0.0)
+
+        segment_ids = self._find_segment_path(start_segment_id, end_segment_id, direction)
+        portions = self._build_path_portions(segment_ids, start_offset_m, end_offset_m, direction)
+        total_length_m = portions[-1].path_end_m if portions else 0.0
+        if total_length_m <= 0:
+            raise ValueError(f"platform path {origin_platform_id}->{destination_platform_id} has no travel distance")
+
+        constraints = self._build_constraints(portions, direction)
+        return PathPlan(
+            origin_platform_id=origin_platform_id,
+            destination_platform_id=destination_platform_id,
+            direction=direction,
+            segment_ids=tuple(segment_ids),
+            constraints=constraints,
+            total_length_m=round(total_length_m, 6),
+            start_segment_id=start_segment_id,
+            start_offset_m=start_offset_m,
+            end_segment_id=end_segment_id,
+            end_offset_m=end_offset_m,
+        )
+
+    def _platform(self, platform_id: int) -> JsonDict:
+        platform = self.platforms.get(int(platform_id))
+        if platform is None:
+            raise ValueError(f"unknown platform id {platform_id}")
+        if platform.get("segmentId") is None:
+            raise ValueError(f"platform {platform_id} has no segment id")
+        return platform
+
+    def _find_segment_path(self, start_segment_id: int, end_segment_id: int, direction: str) -> list[int]:
+        if start_segment_id == end_segment_id:
+            return [start_segment_id]
+        queue: list[tuple[float, int, tuple[int, ...]]] = [(0.0, start_segment_id, (start_segment_id,))]
+        best_cost: dict[int, float] = {start_segment_id: 0.0}
+        while queue:
+            cost, segment_id, path = heapq.heappop(queue)
+            if segment_id == end_segment_id:
+                return list(path)
+            if cost > best_cost.get(segment_id, float("inf")) + 1e-9:
+                continue
+            for next_segment in self.track.get_next_segments(segment_id, direction):
+                next_segment_id = int(next_segment["id"])
+                if next_segment_id in path:
+                    continue
+                edge_cost = self._segment_length_m(segment_id)
+                next_cost = cost + edge_cost
+                if next_cost >= best_cost.get(next_segment_id, float("inf")):
+                    continue
+                best_cost[next_segment_id] = next_cost
+                heapq.heappush(queue, (next_cost, next_segment_id, path + (next_segment_id,)))
+        raise ValueError(f"no {direction} segment path from {start_segment_id} to {end_segment_id}")
+
+    def _build_path_portions(
+        self,
+        segment_ids: list[int],
+        start_offset_m: float,
+        end_offset_m: float,
+        direction: str,
+    ) -> tuple[_PathPortion, ...]:
+        portions: list[_PathPortion] = []
+        path_position_m = 0.0
+        for index, segment_id in enumerate(segment_ids):
+            segment_length_m = self._segment_length_m(segment_id)
+            if len(segment_ids) == 1:
+                segment_start_offset_m = start_offset_m
+                segment_end_offset_m = end_offset_m
+            elif index == 0:
+                segment_start_offset_m = start_offset_m
+                segment_end_offset_m = segment_length_m if direction == "forward" else 0.0
+            elif index == len(segment_ids) - 1:
+                segment_start_offset_m = 0.0 if direction == "forward" else segment_length_m
+                segment_end_offset_m = end_offset_m
+            else:
+                segment_start_offset_m = 0.0 if direction == "forward" else segment_length_m
+                segment_end_offset_m = segment_length_m if direction == "forward" else 0.0
+
+            travel_length_m = abs(segment_end_offset_m - segment_start_offset_m)
+            if len(segment_ids) == 1 and travel_length_m <= 1e-9:
+                raise ValueError("origin and destination offsets are the same")
+            if direction == "forward" and segment_end_offset_m + 1e-9 < segment_start_offset_m:
+                raise ValueError("destination is behind origin for forward path")
+            if direction == "backward" and segment_end_offset_m > segment_start_offset_m + 1e-9:
+                raise ValueError("destination is behind origin for backward path")
+
+            portion = _PathPortion(
+                segment_id=segment_id,
+                start_offset_m=segment_start_offset_m,
+                end_offset_m=segment_end_offset_m,
+                path_start_m=path_position_m,
+                path_end_m=path_position_m + travel_length_m,
+                direction=direction,
+            )
+            portions.append(portion)
+            path_position_m += travel_length_m
+        return tuple(portions)
+
+    def _build_constraints(
+        self,
+        portions: tuple[_PathPortion, ...],
+        direction: str,
+    ) -> tuple[PathSegmentConstraint, ...]:
+        gradient_ranges = self._gradient_ranges_for_path(portions, direction)
+        constraints: list[PathSegmentConstraint] = []
+        for portion in portions:
+            if portion.length_m <= 1e-9:
+                continue
+            breakpoints = {portion.path_start_m, portion.path_end_m}
+            for offset_m in self._speed_break_offsets(portion.segment_id, portion.start_offset_m, portion.end_offset_m):
+                breakpoints.add(portion.position_at_offset(offset_m))
+            for gradient_range in gradient_ranges:
+                if portion.path_start_m < gradient_range.path_start_m < portion.path_end_m:
+                    breakpoints.add(gradient_range.path_start_m)
+                if portion.path_start_m < gradient_range.path_end_m < portion.path_end_m:
+                    breakpoints.add(gradient_range.path_end_m)
+
+            ordered = sorted(breakpoints)
+            for start_m, end_m in zip(ordered, ordered[1:]):
+                if end_m - start_m <= 1e-9:
+                    continue
+                midpoint_m = (start_m + end_m) / 2.0
+                start_offset_m = portion.offset_at(start_m)
+                end_offset_m = portion.offset_at(end_m)
+                speed_limit, speed_id = self._speed_limit_for_offset(portion.segment_id, portion.offset_at(midpoint_m))
+                gradient = self._gradient_for_path_position(midpoint_m, gradient_ranges)
+                constraints.append(
+                    PathSegmentConstraint(
+                        segment_id=portion.segment_id,
+                        start_offset_m=round(start_offset_m, 6),
+                        end_offset_m=round(end_offset_m, 6),
+                        path_start_m=round(start_m, 6),
+                        path_end_m=round(end_m, 6),
+                        speed_limit_mps=round(speed_limit, 6),
+                        grade_ratio=round(gradient.grade_ratio, 8),
+                        gradient_raw=gradient.gradient_raw,
+                        speed_restriction_id=speed_id,
+                        gradient_id=gradient.gradient_id,
+                        direction=direction,
+                    )
+                )
+        return tuple(constraints)
+
+    def _segment_length_m(self, segment_id: int) -> float:
+        segment = self.track.get_segment(segment_id)
+        if segment is None:
+            raise ValueError(f"unknown segment id {segment_id}")
+        return float(segment.get("lengthM") or 0.0)
+
+    def _speed_break_offsets(self, segment_id: int, start_offset_m: float, end_offset_m: float) -> list[float]:
+        low, high = sorted((start_offset_m, end_offset_m))
+        breakpoints: set[float] = set()
+        for restriction in self.track.speed_by_seg.get(int(segment_id), []):
+            for key in ("startOffsetM", "endOffsetM"):
+                value = restriction.get(key)
+                if value is None:
+                    continue
+                offset_m = float(value)
+                if low < offset_m < high:
+                    breakpoints.add(offset_m)
+        return sorted(breakpoints)
+
+    def _speed_limit_for_offset(self, segment_id: int, offset_m: float) -> tuple[float, int | None]:
+        restriction = self.track.get_speed_limit(segment_id, offset_m)
+        if restriction is None or restriction.get("speedLimitMps") is None:
+            return self.default_speed_limit_mps, None
+        return float(restriction["speedLimitMps"]), restriction.get("id")
+
+    def _gradient_ranges_for_path(
+        self,
+        portions: tuple[_PathPortion, ...],
+        direction: str,
+    ) -> tuple[_GradientRange, ...]:
+        if not portions:
+            return ()
+        total_length_m = portions[-1].path_end_m
+        ranges: list[_GradientRange] = []
+        for gradient in self.track.gradients:
+            start_segment_id = gradient.get("startSegmentId")
+            end_segment_id = gradient.get("endSegmentId")
+            if start_segment_id is None or end_segment_id is None:
+                continue
+            start_position_m = self._path_position_for_offset(
+                portions,
+                int(start_segment_id),
+                float(gradient.get("startOffsetM") or 0.0),
+                clamp=True,
+            )
+            end_position_m = self._path_position_for_offset(
+                portions,
+                int(end_segment_id),
+                float(gradient.get("endOffsetM") or 0.0),
+                clamp=True,
+            )
+            if start_position_m is None or end_position_m is None:
+                continue
+            low = max(0.0, min(start_position_m, end_position_m))
+            high = min(total_length_m, max(start_position_m, end_position_m))
+            if high - low <= 1e-9:
+                continue
+            ranges.append(
+                _GradientRange(
+                    path_start_m=low,
+                    path_end_m=high,
+                    grade_ratio=self._signed_grade_ratio(gradient, direction),
+                    gradient_raw=float(gradient["slopePermille"]) if gradient.get("slopePermille") is not None else None,
+                    gradient_id=gradient.get("id"),
+                )
+            )
+        return tuple(sorted(ranges, key=lambda item: item.path_start_m))
+
+    def _path_position_for_offset(
+        self,
+        portions: tuple[_PathPortion, ...],
+        segment_id: int,
+        offset_m: float,
+        clamp: bool = False,
+    ) -> float | None:
+        matching = [portion for portion in portions if portion.segment_id == segment_id]
+        if not matching:
+            return None
+        for portion in matching:
+            if portion.contains_offset(offset_m):
+                return portion.position_at_offset(offset_m)
+        if not clamp:
+            return None
+        portion = matching[0]
+        low, high = sorted((portion.start_offset_m, portion.end_offset_m))
+        clamped_offset_m = min(max(offset_m, low), high)
+        return portion.position_at_offset(clamped_offset_m)
+
+    def _gradient_for_path_position(
+        self,
+        path_position_m: float,
+        gradient_ranges: tuple[_GradientRange, ...],
+    ) -> _GradientRange:
+        for gradient_range in gradient_ranges:
+            if gradient_range.path_start_m <= path_position_m <= gradient_range.path_end_m + 1e-9:
+                return gradient_range
+        return _GradientRange(0.0, 0.0, 0.0, None, None)
+
+    @staticmethod
+    def _signed_grade_ratio(gradient: JsonDict, path_direction: str) -> float:
+        raw = gradient.get("slopePermille")
+        if raw is None:
+            return 0.0
+        magnitude = abs(float(raw)) / 10000.0
+        direction_code = str(gradient.get("direction") or "").lower()
+        sign = 1.0 if direction_code == "0xaa" else -1.0
+        if path_direction == "backward":
+            sign *= -1.0
+        return sign * magnitude

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import TYPE_CHECKING
 
 from app.domain.vehicle.models import CommandSource, ControlCommand, TrainState, VehicleConfig
 from app.domain.vehicle.services import SimpleVehicleModel
+
+if TYPE_CHECKING:
+    from app.domain.line.services import PathPlan
 
 
 @dataclass(frozen=True)
@@ -99,10 +103,13 @@ def optimize_speed_profile_dcdp(
     speed_step_mps: float = 0.5,
     terminal_tolerance_m: float = 1.0,
     max_states_per_stage: int = 1800,
+    path_plan: PathPlan | None = None,
 ) -> OptimizedSpeedProfile:
     """Simplified discrete-continuous DP speed profile optimizer."""
 
-    if target_position_m <= 0:
+    effective_target_position_m = path_plan.total_length_m if path_plan is not None else target_position_m
+
+    if effective_target_position_m <= 0:
         raise ValueError("target_position_m must be positive")
     if permitted_speed_mps <= 0:
         raise ValueError("permitted_speed_mps must be positive")
@@ -133,14 +140,16 @@ def optimize_speed_profile_dcdp(
         remaining_stages = stages - stage
         for node in states.values():
             for mode, command in _candidate_commands(config.train_id, node.state.speed_mps, config):
-                next_state = vehicle.step(node.state, command, dt_s=dt_s)
-                if next_state.speed_mps > permitted_speed_mps + 1e-6:
+                gradient_force_n = _gradient_force_n(node.state.position_m, path_plan, config)
+                next_state = vehicle.step(node.state, command, dt_s=dt_s, gradient_force_n=gradient_force_n)
+                local_speed_limit_mps = _speed_limit_at_position(next_state.position_m, permitted_speed_mps, path_plan)
+                if next_state.speed_mps > local_speed_limit_mps + 1e-6:
                     continue
-                if next_state.position_m > target_position_m + terminal_tolerance_m:
+                if next_state.position_m > effective_target_position_m + terminal_tolerance_m:
                     continue
                 if (
                     next_state.speed_mps <= config.stop_speed_threshold_mps
-                    and next_state.position_m < target_position_m - position_step_m
+                    and next_state.position_m < effective_target_position_m - position_step_m
                     and remaining_stages > 1
                 ):
                     continue
@@ -161,9 +170,9 @@ def optimize_speed_profile_dcdp(
                     path=node.path + (point,),
                 )
                 current = next_states.get(key)
-                if current is None or _state_score(candidate, target_position_m, stages, stage + 1) < _state_score(
+                if current is None or _state_score(candidate, effective_target_position_m, stages, stage + 1) < _state_score(
                     current,
-                    target_position_m,
+                    effective_target_position_m,
                     stages,
                     stage + 1,
                 ):
@@ -171,16 +180,19 @@ def optimize_speed_profile_dcdp(
 
         if not next_states:
             break
-        states = _prune_states(next_states, target_position_m, stages, stage + 1, max_states_per_stage)
+        states = _prune_states(next_states, effective_target_position_m, stages, stage + 1, max_states_per_stage)
 
     if not states:
-        return _fallback_profile(target_position_m, permitted_speed_mps, scheduled_run_time_s)
+        return _fallback_profile(effective_target_position_m, permitted_speed_mps, scheduled_run_time_s, path_plan)
 
-    best = min(states.values(), key=lambda node: _terminal_score(node, target_position_m, config.stop_speed_threshold_mps))
-    terminal_score = _terminal_score(best, target_position_m, config.stop_speed_threshold_mps)
+    best = min(
+        states.values(),
+        key=lambda node: _terminal_score(node, effective_target_position_m, config.stop_speed_threshold_mps),
+    )
+    terminal_score = _terminal_score(best, effective_target_position_m, config.stop_speed_threshold_mps)
     return OptimizedSpeedProfile(
-        points=_with_terminal_point(best.path, target_position_m, scheduled_run_time_s),
-        target_position_m=target_position_m,
+        points=_with_terminal_point(best.path, effective_target_position_m, scheduled_run_time_s),
+        target_position_m=effective_target_position_m,
         permitted_speed_mps=permitted_speed_mps,
         scheduled_run_time_s=scheduled_run_time_s,
         terminal_score=round(terminal_score, 9),
@@ -266,6 +278,26 @@ def _prune_states(
     return dict(ordered[:max_states])
 
 
+def _speed_limit_at_position(
+    position_m: float,
+    permitted_speed_mps: float,
+    path_plan: PathPlan | None,
+) -> float:
+    if path_plan is None:
+        return permitted_speed_mps
+    return min(permitted_speed_mps, path_plan.speed_limit_at(position_m, permitted_speed_mps))
+
+
+def _gradient_force_n(
+    position_m: float,
+    path_plan: PathPlan | None,
+    config: VehicleConfig,
+) -> float:
+    if path_plan is None:
+        return 0.0
+    return config.mass_kg * 9.80665 * path_plan.grade_ratio_at(position_m)
+
+
 def _with_terminal_point(
     points: tuple[SpeedProfilePoint, ...],
     target_position_m: float,
@@ -292,18 +324,39 @@ def _fallback_profile(
     target_position_m: float,
     permitted_speed_mps: float,
     scheduled_run_time_s: float,
+    path_plan: PathPlan | None = None,
 ) -> OptimizedSpeedProfile:
-    points = (
-        SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0),
-        SpeedProfilePoint(
-            scheduled_run_time_s / 2.0,
-            target_position_m / 2.0,
-            permitted_speed_mps,
-            "CRUISE",
-            0.0,
-            0.0,
-            0.0,
-        ),
-        SpeedProfilePoint(scheduled_run_time_s, target_position_m, 0.0, "STOP", 0.0, 0.0, 0.0),
-    )
+    if path_plan is None or not path_plan.constraints:
+        points = (
+            SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0),
+            SpeedProfilePoint(
+                scheduled_run_time_s / 2.0,
+                target_position_m / 2.0,
+                permitted_speed_mps,
+                "CRUISE",
+                0.0,
+                0.0,
+                0.0,
+            ),
+            SpeedProfilePoint(scheduled_run_time_s, target_position_m, 0.0, "STOP", 0.0, 0.0, 0.0),
+        )
+        return OptimizedSpeedProfile(points, target_position_m, permitted_speed_mps, scheduled_run_time_s, terminal_score=math.inf)
+
+    fallback_points = [SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0)]
+    for constraint in path_plan.constraints:
+        if constraint.path_end_m >= target_position_m - 1e-9:
+            continue
+        fallback_points.append(
+            SpeedProfilePoint(
+                sim_time_s=round(scheduled_run_time_s * constraint.path_end_m / target_position_m, 6),
+                position_m=round(constraint.path_end_m, 6),
+                speed_mps=round(min(permitted_speed_mps, constraint.speed_limit_mps), 6),
+                mode="CRUISE",
+                traction_percent=0.0,
+                brake_percent=0.0,
+                energy_kwh=0.0,
+            )
+        )
+    fallback_points.append(SpeedProfilePoint(scheduled_run_time_s, target_position_m, 0.0, "STOP", 0.0, 0.0, 0.0))
+    points = tuple(fallback_points)
     return OptimizedSpeedProfile(points, target_position_m, permitted_speed_mps, scheduled_run_time_s, terminal_score=math.inf)

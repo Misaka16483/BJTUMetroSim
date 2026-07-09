@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from app.domain.vehicle.models import CommandSource
+
+if TYPE_CHECKING:
+    from app.domain.line.services import PathPlan
 
 
 class OperationMode(str, Enum):
@@ -76,6 +80,7 @@ class AtoConfig:
     profile_position_step_m: float = 5.0
     profile_speed_step_mps: float = 0.5
     profile_lookahead_m: float = 5.0
+    profile_min_approach_speed_mps: float = 1.0
     profile_max_states_per_stage: int = 1800
 
     def __post_init__(self) -> None:
@@ -120,6 +125,8 @@ class AtoConfig:
             raise ValueError("profile_speed_step_mps must be positive")
         if self.profile_lookahead_m < 0:
             raise ValueError("profile_lookahead_m must be non-negative")
+        if self.profile_min_approach_speed_mps <= 0:
+            raise ValueError("profile_min_approach_speed_mps must be positive")
         if self.profile_max_states_per_stage <= 0:
             raise ValueError("profile_max_states_per_stage must be positive")
 
@@ -129,6 +136,7 @@ class AtoTarget:
     target_position_m: float
     permitted_speed_mps: float
     emergency_brake_required: bool = False
+    path_plan: PathPlan | None = None
 
     def __post_init__(self) -> None:
         if self.target_position_m < 0:

@@ -34,7 +34,8 @@ class ATOController:
             self.reset()
             return ControlCommand(state.train_id, emergency_brake=True, source=CommandSource.ATO)
 
-        distance_to_target_m = max(0.0, target.target_position_m - state.position_m)
+        target_position_m = self._target_position_m(target)
+        distance_to_target_m = max(0.0, target_position_m - state.position_m)
         if distance_to_target_m <= self.config.stop_tolerance_m:
             self.reset()
             self.last_target_speed_mps = 0.0
@@ -54,7 +55,10 @@ class ATOController:
 
         target_speed_mps = self.target_speed_mps(state, target)
         brake_distance_m = state.speed_mps * state.speed_mps / (2.0 * self.config.expected_deceleration_mps2)
-        if state.speed_mps > 0 and distance_to_target_m <= brake_distance_m + self.config.brake_margin_m:
+        if (
+            state.speed_mps > target_speed_mps + self.config.pid_deadband_mps
+            and distance_to_target_m <= brake_distance_m + self.config.brake_margin_m
+        ):
             brake_percent = self._brake_percent(state.speed_mps, distance_to_target_m)
             self.last_target_speed_mps = target_speed_mps
             self.last_speed_error_mps = target_speed_mps - state.speed_mps
@@ -91,25 +95,50 @@ class ATOController:
 
     def target_speed_mps(self, state: TrainState, target: AtoTarget) -> float:
         profile = self._profile_for(state, target)
+        target_position_m = self._target_position_m(target)
         if profile is not None:
             lookup_position_m = self._profile_lookup_position_m(state, target)
             self.last_profile_mode = profile.mode_at_position(lookup_position_m)
-            return min(target.permitted_speed_mps, self.config.target_cruise_speed_mps, profile.speed_at_position_mps(lookup_position_m))
+            profile_speed_mps = profile.speed_at_position_mps(lookup_position_m)
+            braking_curve_speed_mps = self._braking_curve_target_speed_mps(state, target, approach_margin_m=0.0)
+            if (
+                target_position_m - state.position_m > self.config.stop_tolerance_m
+                and profile_speed_mps < self.config.profile_min_approach_speed_mps
+            ):
+                profile_speed_mps = min(
+                    braking_curve_speed_mps,
+                    max(profile_speed_mps, self.config.profile_min_approach_speed_mps),
+                )
+            return min(
+                self._permitted_speed_mps_at(target, lookup_position_m),
+                self.config.target_cruise_speed_mps,
+                profile_speed_mps,
+            )
         self.last_profile_mode = "BRAKING_CURVE"
+        return self._braking_curve_target_speed_mps(state, target)
+
+    def _braking_curve_target_speed_mps(
+        self,
+        state: TrainState,
+        target: AtoTarget,
+        approach_margin_m: float | None = None,
+    ) -> float:
+        lookup_position_m = self._profile_lookup_position_m(state, target)
         return stopping_target_speed_mps(
             position_m=state.position_m,
-            target_position_m=target.target_position_m,
-            permitted_speed_mps=target.permitted_speed_mps,
+            target_position_m=self._target_position_m(target),
+            permitted_speed_mps=self._permitted_speed_mps_at(target, lookup_position_m),
             cruise_speed_mps=self.config.target_cruise_speed_mps,
             expected_deceleration_mps2=self.config.expected_deceleration_mps2,
             stop_tolerance_m=self.config.stop_tolerance_m,
-            approach_margin_m=self.config.brake_margin_m,
+            approach_margin_m=self.config.brake_margin_m if approach_margin_m is None else approach_margin_m,
         )
 
     def _profile_for(self, state: TrainState, target: AtoTarget) -> OptimizedSpeedProfile | None:
         if not self.config.use_dynamic_programming_profile:
             return None
-        if target.target_position_m <= 0:
+        target_position_m = self._target_position_m(target)
+        if target_position_m <= 0:
             return None
 
         vehicle_config = VehicleConfig(train_id=state.train_id)
@@ -118,7 +147,7 @@ class ATOController:
             (vehicle_config.max_traction_force_n - vehicle_config.basic_resistance_n) / vehicle_config.mass_kg,
         )
         scheduled_run_time_s = self.config.profile_run_time_s or estimate_scheduled_run_time_s(
-            target_position_m=target.target_position_m,
+            target_position_m=target_position_m,
             permitted_speed_mps=min(target.permitted_speed_mps, self.config.target_cruise_speed_mps),
             acceleration_mps2=acceleration_mps2,
             deceleration_mps2=self.config.expected_deceleration_mps2,
@@ -126,7 +155,7 @@ class ATOController:
         )
         cache_key = (
             state.train_id,
-            round(target.target_position_m, 3),
+            round(target_position_m, 3),
             round(target.permitted_speed_mps, 3),
             round(self.config.target_cruise_speed_mps, 3),
             round(scheduled_run_time_s, 3),
@@ -134,12 +163,13 @@ class ATOController:
             round(self.config.profile_position_step_m, 3),
             round(self.config.profile_speed_step_mps, 3),
             self.config.profile_max_states_per_stage,
+            target.path_plan.cache_key() if target.path_plan is not None else None,
         )
         if self._profile_cache_key == cache_key and self._profile_cache is not None:
             return self._profile_cache
 
         self._profile_cache = optimize_speed_profile_dcdp(
-            target_position_m=target.target_position_m,
+            target_position_m=target_position_m,
             permitted_speed_mps=min(target.permitted_speed_mps, self.config.target_cruise_speed_mps),
             scheduled_run_time_s=scheduled_run_time_s,
             vehicle_config=vehicle_config,
@@ -148,14 +178,16 @@ class ATOController:
             speed_step_mps=self.config.profile_speed_step_mps,
             terminal_tolerance_m=self.config.stop_tolerance_m,
             max_states_per_stage=self.config.profile_max_states_per_stage,
+            path_plan=target.path_plan,
         )
         self._profile_cache_key = cache_key
         return self._profile_cache
 
     def _profile_lookup_position_m(self, state: TrainState, target: AtoTarget) -> float:
-        remaining_distance_m = max(0.0, target.target_position_m - state.position_m)
+        target_position_m = self._target_position_m(target)
+        remaining_distance_m = max(0.0, target_position_m - state.position_m)
         lookahead_m = min(self.config.profile_lookahead_m, remaining_distance_m * 0.35)
-        return min(target.target_position_m, state.position_m + lookahead_m)
+        return min(target_position_m, state.position_m + lookahead_m)
 
     def _apply_profile_feedforward(
         self,
@@ -206,6 +238,10 @@ class ATOController:
                 -self.config.max_brake_percent,
                 self.config.max_traction_percent,
             )
+            if speed_error_mps > 0:
+                pid_output_percent = max(0.0, pid_output_percent)
+            elif speed_error_mps < 0:
+                pid_output_percent = min(0.0, pid_output_percent)
         self._last_train_id = state.train_id
         self._last_sim_time_s = state.sim_time_s
         self._last_error_mps = speed_error_mps
@@ -231,6 +267,18 @@ class ATOController:
         speed_gap = max(0.0, target_speed_mps - speed_mps)
         ratio = _clamp(speed_gap / target_speed_mps, 0.25, 1.0)
         return _clamp(ratio * self.config.max_traction_percent, 1.0, self.config.max_traction_percent)
+
+    @staticmethod
+    def _target_position_m(target: AtoTarget) -> float:
+        if target.path_plan is not None:
+            return target.path_plan.total_length_m
+        return target.target_position_m
+
+    @staticmethod
+    def _permitted_speed_mps_at(target: AtoTarget, position_m: float) -> float:
+        if target.path_plan is None:
+            return target.permitted_speed_mps
+        return target.path_plan.speed_limit_at(position_m, target.permitted_speed_mps)
 
 
 class CabControlService:

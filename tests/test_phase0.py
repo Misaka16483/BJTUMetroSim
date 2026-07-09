@@ -6,14 +6,14 @@ from pathlib import Path
 
 from app.core.clock import ClockState, SimulationClock
 from app.core.message_bus import MessageBus
-from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.line.services import LineMapRepository, PathPlanner, TrackQueryService
 from app.infra.excel_importer import cm_to_m, cmps_to_mps, parse_k_mileage, to_int, validate_line_map
 from app.infra.recorder import RunRecorder
 
 
 def tiny_line_map() -> dict:
     return {
-        "counts": {"Seg表": 2, "信号机表": 1, "站台表": 1, "进路表": 1},
+        "counts": {"Seg表": 2, "信号机表": 1, "站台表": 2, "进路表": 1},
         "points": [{"id": 1}, {"id": 2}, {"id": 3}],
         "switches": [],
         "segments": [
@@ -39,13 +39,25 @@ def tiny_line_map() -> dict:
             },
         ],
         "signals": [{"id": 10, "segmentId": 1, "offsetM": 50.0}],
-        "platforms": [{"id": 20, "segmentId": 1, "offsetM": 70.0, "triggerAxleSectionIds": [30]}],
+        "platforms": [
+            {"id": 20, "segmentId": 1, "offsetM": 70.0, "triggerAxleSectionIds": [30]},
+            {"id": 21, "segmentId": 2, "offsetM": 40.0, "triggerAxleSectionIds": [30]},
+        ],
         "balises": [],
         "gradients": [
-            {"id": 40, "startSegmentId": 1, "startOffsetM": 0.0, "endSegmentId": 1, "endOffsetM": 100.0}
+            {
+                "id": 40,
+                "startSegmentId": 1,
+                "startOffsetM": 70.0,
+                "endSegmentId": 2,
+                "endOffsetM": 40.0,
+                "slopePermille": 50,
+                "direction": "0xaa",
+            }
         ],
         "speedRestrictions": [
-            {"id": 50, "segmentId": 1, "startOffsetM": 0.0, "endOffsetM": 100.0, "speedLimitMps": 13.33}
+            {"id": 50, "segmentId": 1, "startOffsetM": 0.0, "endOffsetM": 100.0, "speedLimitMps": 13.33},
+            {"id": 51, "segmentId": 2, "startOffsetM": 0.0, "endOffsetM": 80.0, "speedLimitMps": 6.0},
         ],
         "axleSections": [{"id": 30, "segmentIds": [1]}],
         "logicalSections": [{"id": 60, "startSegmentId": 1, "endSegmentId": 1}],
@@ -87,6 +99,28 @@ class Phase0UnitTests(unittest.TestCase):
         self.assertEqual(service.get_speed_limit(1, 10.0)["speedLimitMps"], 13.33)
         self.assertEqual(service.get_next_signal(1, 10.0)["id"], 10)
         self.assertEqual(service.get_nearest_platform(1, 20.0)["id"], 20)
+
+    def test_path_planner_builds_station_to_station_constraints(self) -> None:
+        planner = PathPlanner(tiny_line_map())
+
+        plan = planner.plan_between_platforms(20, 21, direction="forward")
+
+        self.assertEqual(plan.segment_ids, (1, 2))
+        self.assertAlmostEqual(plan.total_length_m, 70.0)
+        self.assertEqual(plan.start_segment_id, 1)
+        self.assertEqual(plan.end_segment_id, 2)
+        self.assertAlmostEqual(plan.speed_limit_at(10.0), 13.33)
+        self.assertAlmostEqual(plan.speed_limit_at(50.0), 6.0)
+        self.assertAlmostEqual(plan.grade_ratio_at(10.0), 0.005)
+        self.assertAlmostEqual(plan.grade_ratio_at(50.0), 0.005)
+        self.assertEqual(plan.constraints[0].segment_id, 1)
+        self.assertEqual(plan.constraints[-1].segment_id, 2)
+
+        reverse_plan = planner.plan_between_platforms(21, 20, direction="backward")
+        self.assertEqual(reverse_plan.segment_ids, (2, 1))
+        self.assertAlmostEqual(reverse_plan.total_length_m, 70.0)
+        self.assertAlmostEqual(reverse_plan.speed_limit_at(10.0), 6.0)
+        self.assertAlmostEqual(reverse_plan.grade_ratio_at(10.0), -0.005)
 
     def test_repository_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,4 +168,3 @@ class Phase0UnitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
