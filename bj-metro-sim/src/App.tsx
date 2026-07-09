@@ -10,7 +10,7 @@ import PowerNetworkPanel from './components/PowerNetworkPanel';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
-import { fetchBackendBundle, fetchSimState } from './data/backendApi';
+import { fetchBackendBundle, fetchSimState, fetchSpeedProfile } from './data/backendApi';
 
 let globalFetching = false;
 const PANEL_W = 320;
@@ -29,6 +29,8 @@ export default function App() {
   const metroLines = useSimStore((s) => s.metroLines);
   const linesLoading = useSimStore((s) => s.linesLoading);
   const updateFromBackend = useSimStore((s) => s.updateFromBackend);
+  const speedProfile = useSimStore((s) => s.speedProfile);
+  const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
   const [collapsed, setCollapsed] = useState(false);
   const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : viewMode === 'interlocking' ? 2 : 3;
@@ -112,6 +114,28 @@ export default function App() {
     poll();
     return () => { active = false; };
   }, [backendStatus, updateFromBackend]);
+
+  // 引擎启动后 / 到站清空后 —— 轮询拉取规划曲线
+  useEffect(() => {
+    if (!isRunning || speedProfile.length > 0) return;
+    let active = true;
+    const tryFetch = () => {
+      if (!active) return;
+      fetchSpeedProfile()
+        .then((res) => {
+          if (!active) return;
+          const points = res.profiles?.['T0901'] ?? [];
+          if (points.length > 0) {
+            useSimStore.setState({ speedProfile: points });
+          } else {
+            setTimeout(tryFetch, 250);
+          }
+        })
+        .catch(() => { if (active) setTimeout(tryFetch, 500); });
+    };
+    const t = setTimeout(tryFetch, 300);
+    return () => { active = false; clearTimeout(t); };
+  }, [isRunning, speedProfile.length]);
 
   return (
     <div

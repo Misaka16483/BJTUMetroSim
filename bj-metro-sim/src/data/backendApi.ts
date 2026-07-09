@@ -131,6 +131,11 @@ export interface SimTrainState {
   segmentProgress: number;
   lastDispatchAction: string;
   lastDispatchReason: string;
+  tractionPercent?: number;
+  brakePercent?: number;
+  energyKwh?: number;
+  targetSpeedMps?: number;
+  estimatedRunTimeS?: number;
 }
 
 export interface SimStationInfo {
@@ -266,8 +271,24 @@ export interface SimStateResponse {
   source: string;
 }
 
+// ── 速度规划曲线 ──
+export interface SpeedProfilePoint {
+  positionM: number;
+  speedMps: number;
+  mode: string;
+}
+
+export interface SpeedProfileResponse {
+  profiles: Record<string, SpeedProfilePoint[]>;
+  source: string;
+}
+
 export function fetchSimState(): Promise<SimStateResponse> {
   return getJson<SimStateResponse>('/api/sim/state');
+}
+
+export function fetchSpeedProfile(): Promise<SpeedProfileResponse> {
+  return getJson<SpeedProfileResponse>('/api/sim/speed-profile');
 }
 
 export function simStart(): Promise<unknown> {

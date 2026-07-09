@@ -415,6 +415,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self._sim_state())
             elif path == "/api/sim/power/state":
                 self._send_json(self._sim_power_state())
+            elif path == "/api/sim/speed-profile":
+                self._send_json(self._speed_profile())
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
@@ -594,6 +596,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
+
+    def _speed_profile(self) -> JsonDict:
+        if self.engine is None:
+            return {"profiles": {}, "source": "unavailable"}
+        profiles: dict[str, Any] = {}
+        for train in self.engine.trains:
+            profiles[train.train_id] = self.engine.export_speed_profile(train.train_id)
+        return {"profiles": profiles, "source": "simulation-engine"}
 
     def _send_json(self, payload: JsonDict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

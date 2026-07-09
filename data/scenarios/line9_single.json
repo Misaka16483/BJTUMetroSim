@@ -2,7 +2,7 @@
   "lineId": "9",
   "name": "9号线单车早高峰演示",
   "startTimeMs": 28800000,
-  "tickSeconds": 1.0,
+  "tickSeconds": 0.25,
   "trains": [
     {
       "trainId": "T0901",
