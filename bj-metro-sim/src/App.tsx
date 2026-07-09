@@ -5,7 +5,6 @@ import LinesPanel from './components/LinesPanel';
 import DriverConsole from './components/DriverConsole';
 import MicroTrackView from './components/MicroTrackView';
 import StationInterlockingView from './components/StationInterlockingView';
-import { getInterlockingData } from './data/stationInterlockingData';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -29,9 +28,7 @@ export default function App() {
   const linesLoading = useSimStore((s) => s.linesLoading);
   const updateFromBackend = useSimStore((s) => s.updateFromBackend);
   const engineClockState = useSimStore((s) => s.engineClockState);
-  const selectedStationCode = useSimStore((s) => s.selectedStationCode);
   const [collapsed, setCollapsed] = useState(false);
-  const interlockingData = getInterlockingData(selectedStationCode ?? 'BWR');
   const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : viewMode === 'interlocking' ? 2 : 3;
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
@@ -260,7 +257,7 @@ export default function App() {
             {viewMode === 'driver'
               ? <DriverConsole fullPage />
               : viewMode === 'interlocking'
-                ? <StationInterlockingView data={interlockingData} />
+                ? <StationInterlockingView />
                 : viewMode === 'micro'
                   ? <MicroTrackView />
                   : null}
