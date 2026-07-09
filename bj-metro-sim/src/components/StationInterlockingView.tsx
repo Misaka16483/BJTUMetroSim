@@ -51,12 +51,27 @@ function InterlockingDiagram({ data }: { data: StationInterlockingData }) {
     for (const sw of switches) {
       ctx.strokeStyle = '#d29922';
       ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(sw.x - 40, sw.y1); ctx.lineTo(sw.x - 20, sw.y1); ctx.lineTo(sw.x + 10, sw.y2); ctx.lineTo(sw.x + 30, sw.y2); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(sw.x - 40, sw.y2); ctx.lineTo(sw.x - 20, sw.y2); ctx.lineTo(sw.x + 10, sw.y1); ctx.lineTo(sw.x + 30, sw.y1); ctx.stroke();
-      ctx.fillStyle = '#d29922';
-      ctx.font = '12px monospace';
-      ctx.fillText('\u25B3', sw.x - 36, sw.y1 - 5);
-      ctx.fillText('\u25B3', sw.x - 36, sw.y2 + 16);
+      if (sw.type === 'crossover') {
+        // \u4EA4\u53C9\u6E21\u7EBF\uFF1A\u53CC\u5411 X \u5F62\u8FDE\u63A5\u4E0A\u4E0B\u884C\u8F68\u9053
+        ctx.beginPath(); ctx.moveTo(sw.x - 40, sw.y1); ctx.lineTo(sw.x - 20, sw.y1); ctx.lineTo(sw.x + 15, sw.y2); ctx.lineTo(sw.x + 35, sw.y2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sw.x - 40, sw.y2); ctx.lineTo(sw.x - 20, sw.y2); ctx.lineTo(sw.x + 15, sw.y1); ctx.lineTo(sw.x + 35, sw.y1); ctx.stroke();
+        ctx.fillStyle = '#d29922';
+        ctx.font = '12px monospace';
+        ctx.fillText('\u25B3', sw.x - 36, sw.y1 - 5);
+        ctx.fillText('\u25B3', sw.x - 36, sw.y2 + 16);
+      } else if (sw.type === 'turnout') {
+        // 单开道岔：比例斜直线，span=round(|Δy|*0.3) 保证所有道岔斜率统一
+        const dy = Math.abs(sw.y2 - sw.y1);
+        const span = Math.max(20, Math.round(dy * 0.3));
+        ctx.beginPath();
+        ctx.moveTo(sw.x - span, sw.y1);
+        ctx.lineTo(sw.x + span, sw.y2);
+        ctx.stroke();
+        // 辙叉三角，标在分岔点
+        ctx.fillStyle = '#d29922';
+        ctx.font = '12px monospace';
+        ctx.fillText('\u25B3', sw.x - span + 4, sw.y1 - 5);
+      }
     }
 
     for (const p of platforms) {

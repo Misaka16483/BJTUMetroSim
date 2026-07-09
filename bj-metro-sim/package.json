@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.2",
+    "@anthropic-ai/sdk": "^0.110.0",
     "antd": "^6.5.0",
     "konva": "^10.3.0",
     "maplibre-gl": "^5.24.0",
