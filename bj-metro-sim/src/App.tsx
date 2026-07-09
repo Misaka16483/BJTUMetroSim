@@ -5,6 +5,7 @@ import LinesPanel from './components/LinesPanel';
 import DriverConsole from './components/DriverConsole';
 import MicroTrackView from './components/MicroTrackView';
 import StationInterlockingView from './components/StationInterlockingView';
+import FullLineInterlockingView from './components/FullLineInterlockingView';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -29,7 +30,7 @@ export default function App() {
   const updateFromBackend = useSimStore((s) => s.updateFromBackend);
   const engineClockState = useSimStore((s) => s.engineClockState);
   const [collapsed, setCollapsed] = useState(false);
-  const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : viewMode === 'interlocking' ? 2 : 3;
+  const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : viewMode === 'interlocking' ? 2 : viewMode === 'fullLine' ? 3 : 4;
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
@@ -140,76 +141,89 @@ export default function App() {
             LINE 9
           </span>
 
-          {/* ─── 宏观 / 轨道级 / 联锁图 切换 ─── */}
+          {/* ─── 视图切换 ─── */}
+        <div
+          className="flex items-center relative rounded-full select-none"
+          style={{
+            border: '1px solid rgba(255,255,255,0.10)',
+            background: 'rgba(255,255,255,0.03)',
+          }}
+        >
+          {/* sliding pill indicator */}
           <div
-            className="flex items-center relative rounded-full select-none"
+            className="absolute top-0 rounded-full"
             style={{
-              border: '1px solid rgba(255,255,255,0.10)',
-              background: 'rgba(255,255,255,0.03)',
+              left: `${modeIndex * 20}%`,
+              width: '20%',
+              bottom: 0,
+              background: viewMode === 'macro'
+                ? 'rgba(74,158,255,0.35)'
+                : viewMode === 'micro'
+                  ? 'rgba(143,195,31,0.38)'
+                  : viewMode === 'interlocking'
+                    ? 'rgba(255,69,58,0.32)'
+                    : viewMode === 'fullLine'
+                      ? 'rgba(255,152,0,0.35)'
+                      : 'rgba(168,214,74,0.38)',
+              transition: 'left 280ms cubic-bezier(0.33,1,0.68,1), background 280ms ease',
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setViewMode('macro')}
+            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
+            style={{
+              color: viewMode === 'macro' ? '#fff' : 'var(--text-muted)',
+              transition: 'color 250ms ease',
             }}
           >
-            {/* sliding pill indicator */}
-            <div
-              className="absolute top-0 rounded-full"
-              style={{
-                left: `${modeIndex * 25}%`,
-                width: '25%',
-                bottom: 0,
-                background: viewMode === 'macro'
-                  ? 'rgba(74,158,255,0.35)'
-                  : viewMode === 'micro'
-                    ? 'rgba(143,195,31,0.38)'
-                    : viewMode === 'interlocking'
-                      ? 'rgba(255,69,58,0.32)'
-                      : 'rgba(168,214,74,0.38)',
-                transition: 'left 280ms cubic-bezier(0.33, 1, 0.68, 1), background 280ms ease',
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => setViewMode('macro')}
-              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-              style={{
-                color: viewMode === 'macro' ? '#fff' : 'var(--text-muted)',
-                transition: 'color 250ms ease',
-              }}
-            >
-              宏观
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('micro')}
-              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-              style={{
-                color: viewMode === 'micro' ? '#fff' : 'var(--text-muted)',
-                transition: 'color 250ms ease',
-              }}
-            >
-              轨道
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('interlocking')}
-              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-              style={{
-                color: viewMode === 'interlocking' ? '#fff' : 'var(--text-muted)',
-                transition: 'color 250ms ease',
-              }}
-            >
-              联锁
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('driver')}
-              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-              style={{
-                color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)',
-                transition: 'color 250ms ease',
-              }}
-            >
-              驾驶
-            </button>
-          </div>
+            宏观
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('micro')}
+            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
+            style={{
+              color: viewMode === 'micro' ? '#fff' : 'var(--text-muted)',
+              transition: 'color 250ms ease',
+            }}
+          >
+            轨道
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('interlocking')}
+            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
+            style={{
+              color: viewMode === 'interlocking' ? '#fff' : 'var(--text-muted)',
+              transition: 'color 250ms ease',
+            }}
+          >
+            联锁
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('fullLine')}
+            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
+            style={{
+              color: viewMode === 'fullLine' ? '#fff' : 'var(--text-muted)',
+              transition: 'color 250ms ease',
+            }}
+          >
+            全线
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('driver')}
+            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
+            style={{
+              color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)',
+              transition: 'color 250ms ease',
+            }}
+          >
+            驾驶
+          </button>
+        </div>
         </div>
 
         <div className="flex items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
@@ -258,9 +272,11 @@ export default function App() {
               ? <DriverConsole fullPage />
               : viewMode === 'interlocking'
                 ? <StationInterlockingView />
-                : viewMode === 'micro'
-                  ? <MicroTrackView />
-                  : null}
+                : viewMode === 'fullLine'
+                  ? <FullLineInterlockingView />
+                  : viewMode === 'micro'
+                    ? <MicroTrackView />
+                    : null}
           </div>
 
           {/* ─── right panel toggle ─── */}

@@ -3,7 +3,7 @@ import type { MetroLineData } from '../data/amapMetroApi';
 import type { TrackMapData, SimStateResponse } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop } from '../data/backendApi';
 
-type ViewMode = 'macro' | 'micro' | 'interlocking' | 'driver';
+type ViewMode = 'macro' | 'micro' | 'interlocking' | 'driver' | 'fullLine';
 
 /** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {
