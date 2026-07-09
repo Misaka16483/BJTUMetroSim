@@ -38,6 +38,7 @@ python -m app.api_server --host 127.0.0.1 --port 8000
 - `docs/设计文档/API设计文档.md`
 - `docs/设计文档/数据库设计文档.md`
 - `docs/设计文档/前端接入与双层界面设计.md`
+- `docs/设计文档/成员B车辆动力学与ATO说明.md`
 - `docs/项目管理/五人分工与执行规范.md`
 
 ## 技术栈
