@@ -5,6 +5,8 @@ import ControlPanel from './components/ControlPanel';
 import KPIPanel from './components/KPIPanel';
 import SignalScreenPanel from './components/SignalScreenPanel';
 import MicroTrackView from './components/MicroTrackView';
+import StationInterlockingView from './components/StationInterlockingView';
+import { getInterlockingData } from './data/stationInterlockingData';
 import { useSimStore } from './store/useSimStore';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
 import { fetchBackendBundle, fetchSimState } from './data/backendApi';
@@ -27,10 +29,12 @@ export default function App() {
   const linesLoading = useSimStore((s) => s.linesLoading);
   const updateFromBackend = useSimStore((s) => s.updateFromBackend);
   const engineClockState = useSimStore((s) => s.engineClockState);
-  const isRunning = useSimStore((s) => s.isRunning);
+  const selectedStationCode = useSimStore((s) => s.selectedStationCode);
   const [collapsed, setCollapsed] = useState(false);
+  const interlockingData = getInterlockingData(selectedStationCode ?? 'BWR');
+  const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : 2;
 
-  function loadAmapData(reason: string) {
+  function loadAmapData(_reason: string) {
     if (globalFetching) return;
     globalFetching = true;
     setLinesLoading(true);
@@ -153,7 +157,7 @@ export default function App() {
             LINE 9
           </span>
 
-          {/* ─── 宏观 / 轨道级 切换 ─── */}
+          {/* ─── 宏观 / 轨道级 / 联锁图 切换 ─── */}
           <div
             className="flex items-center relative rounded-full select-none"
             style={{
@@ -165,12 +169,14 @@ export default function App() {
             <div
               className="absolute top-0 rounded-full"
               style={{
-                left: viewMode === 'macro' ? 0 : '50%',
-                width: '50%',
+                left: `${modeIndex * 33.333}%`,
+                width: '33.333%',
                 bottom: 0,
                 background: viewMode === 'macro'
                   ? 'rgba(74,158,255,0.35)'
-                  : 'rgba(143,195,31,0.38)',
+                  : viewMode === 'micro'
+                    ? 'rgba(143,195,31,0.38)'
+                    : 'rgba(255,69,58,0.32)',
                 transition: 'left 280ms cubic-bezier(0.33, 1, 0.68, 1), background 280ms ease',
               }}
             />
@@ -195,6 +201,17 @@ export default function App() {
               }}
             >
               轨道
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('interlocking')}
+              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
+              style={{
+                color: viewMode === 'interlocking' ? '#fff' : 'var(--text-muted)',
+                transition: 'color 250ms ease',
+              }}
+            >
+              联锁
             </button>
           </div>
         </div>
@@ -229,7 +246,11 @@ export default function App() {
       <div className="flex-1 flex min-h-0 relative" style={{ gap: 8 }}>
         {/* map */}
         <div className="flex-1 overflow-hidden relative min-w-0 map-frame">
-          {viewMode === 'macro' ? <MetroMap /> : <MicroTrackView />}
+          {viewMode === 'macro'
+            ? <MetroMap />
+            : viewMode === 'interlocking'
+              ? <StationInterlockingView data={interlockingData} />
+              : <MicroTrackView />}
         </div>
 
         {/* collapse toggle — only in macro */}

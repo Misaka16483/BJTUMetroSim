@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
 import type { TrackMapData, SimStateResponse } from '../data/backendApi';
-import { fetchSimState, simStart, simPause, simResume, simStop } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop } from '../data/backendApi';
 
-type ViewMode = 'macro' | 'micro';
+type ViewMode = 'macro' | 'micro' | 'interlocking';
 
 /** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {
@@ -25,6 +25,8 @@ interface SimState {
   backendStatus: 'idle' | 'connected' | 'fallback' | 'error';
   hiddenLines: Set<string>;
   line9Stations: string[];
+  trackMap: TrackMapData | null;
+  viewMode: ViewMode;
 
   // KPI
   punctuality: number;
@@ -35,6 +37,9 @@ interface SimState {
 
   // 选中的列车ID
   selectedTrainId: string | null;
+
+  // 选中的车站代码 (用于轨道级→联锁图跳转)
+  selectedStationCode: string | null;
 
   // 信号屏 / MMI 字段
   driveMode: string;
@@ -61,6 +66,7 @@ interface SimState {
   setSpeed: (speed: number) => void;
   setDayType: (dayType: 'weekday' | 'friday' | 'saturday' | 'sunday') => void;
   selectTrain: (id: string | null) => void;
+  setSelectedStationCode: (code: string | null) => void;
   tick: () => void;
 
   // 后端仿真引擎
@@ -215,6 +221,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   totalPassengers: 0,
   totalBoarded: 0,
   selectedTrainId: null,
+  selectedStationCode: null,
 
   // 信号屏默认值
   driveMode: 'AM',
@@ -247,6 +254,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   setSpeed: (speed: number) => set({ speed }),
   setDayType: (dayType) => set({ dayType }),
   selectTrain: (id: string | null) => set({ selectedTrainId: id }),
+  setSelectedStationCode: (code: string | null) => set({ selectedStationCode: code }),
 
   setMetroLines: (lines) => {
     const line9 = lines.find((l) => l.id === '9');
