@@ -15,6 +15,11 @@ from app.domain.control import CabControlService, DriverInput, VehicleInteractiv
 from app.domain.vehicle import ControlCommand
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
+from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
+from app.domain.operations.phase1_member_d_demo import Phase1MemberDDemoRunner
+from app.domain.operations.phase2_member_d_full_demo import Phase2MemberDFullDemoRunner
+from app.domain.signal.models import ControlCommand as SignalControlCommand, TrainState
+from app.domain.signal.services import SafetyGuard, TrainControlService, collect_safety_events
 from app.infra.excel_importer import LineDataImporter, validate_line_map
 from app.infra.recorder import RunRecorder
 
@@ -361,6 +366,146 @@ def _format_plc_cab_line(payload: dict[str, Any]) -> str:
 def _print_frame_summary(name: str, frame: bytes) -> None:
     preview = frame[:32].hex(" ")
     print(f"{name} bytes={len(frame)} head={preview}")
+def phase0_member_d_demo(args: argparse.Namespace) -> None:
+    runner = Phase0MemberDDemoRunner(Path(args.output_dir) / "phase0_member_d_demo.sqlite")
+    _print_json(runner.run())
+
+
+def phase1_member_d_demo(args: argparse.Namespace) -> None:
+    runner = Phase1MemberDDemoRunner(Path(args.output_dir) / "phase1_member_d_demo.sqlite")
+    _print_json(runner.run())
+
+
+def phase2_member_d_full_demo(args: argparse.Namespace) -> None:
+    runner = Phase2MemberDFullDemoRunner(Path(args.output_dir) / "phase2_member_d_full_demo.sqlite")
+    _print_json(runner.run())
+
+
+def signal_demo(args: argparse.Namespace) -> None:
+    """Phase 1 signal / ATP / safety-guard demo using real line data."""
+    line_map = LineMapRepository(args.cache).load()
+    track = TrackQueryService(line_map)
+    tcs = TrainControlService(
+        track,
+        scenario_max_speed_mps=args.scenario_max_speed,
+        overspeed_tolerance_mps=args.overspeed_tolerance,
+        yellow_speed_mps=args.yellow_speed,
+    )
+    guard = SafetyGuard()
+
+    # Build a handful of representative train states
+    scenarios: list[dict[str, Any]] = [
+        {
+            "label": "normal-cruise",
+            "train": TrainState(
+                train_id="T001", sim_time_ms=60_000, seg_id=13, offset_m=30.0,
+                position_m=400.0, speed_mps=12.0, target_stop_point_m=1660.0,
+                distance_to_target_m=1260.0,
+            ),
+            "command": ControlCommand(
+                train_id="T001", sim_time_ms=60_000, source="ATO",
+                traction_level=2.0,
+            ),
+        },
+        {
+            "label": "approaching-station-braking",
+            "train": TrainState(
+                train_id="T001", sim_time_ms=120_000, seg_id=13, offset_m=100.0,
+                position_m=1550.0, speed_mps=6.0, target_stop_point_m=1660.0,
+                distance_to_target_m=110.0,
+            ),
+            "command": ControlCommand(
+                train_id="T001", sim_time_ms=120_000, source="ATO",
+                brake_level=3.0, reason="Approaching target stop point",
+            ),
+        },
+        {
+            "label": "overspeed-violation",
+            "train": TrainState(
+                train_id="T001", sim_time_ms=90_000, seg_id=13, offset_m=60.0,
+                position_m=800.0, speed_mps=18.0, target_stop_point_m=1660.0,
+                distance_to_target_m=860.0,
+            ),
+            "command": ControlCommand(
+                train_id="T001", sim_time_ms=90_000, source="ATO",
+                traction_level=2.0,
+            ),
+        },
+        {
+            "label": "ma-overrun",
+            "train": TrainState(
+                train_id="T001", sim_time_ms=150_000, seg_id=13, offset_m=120.0,
+                position_m=1670.0, speed_mps=1.0, target_stop_point_m=1660.0,
+                distance_to_target_m=-10.0,
+            ),
+            "command": ControlCommand(
+                train_id="T001", sim_time_ms=150_000, source="ATO",
+                brake_level=1.0,
+            ),
+        },
+        {
+            "label": "red-signal-ahead",
+            "train": TrainState(
+                train_id="T001", sim_time_ms=70_000, seg_id=13, offset_m=50.0,
+                position_m=600.0, speed_mps=14.0, target_stop_point_m=1660.0,
+                distance_to_target_m=1060.0,
+            ),
+            "command": ControlCommand(
+                train_id="T001", sim_time_ms=70_000, source="ATO",
+                traction_level=3.0,
+            ),
+        },
+    ]
+
+    results: list[dict[str, Any]] = []
+    for scenario in scenarios:
+        train: TrainState = scenario["train"]
+        command: ControlCommand = scenario["command"]
+
+        forced_aspect = "RED" if scenario["label"] == "red-signal-ahead" else None
+        signal_state = tcs.compute_signal_state(train, forced_signal_aspect=forced_aspect)
+        safe_command = guard.filter_command(command, train, signal_state)
+        events = collect_safety_events(signal_state, safe_command)
+
+        results.append({
+            "label": scenario["label"],
+            "input": {
+                "positionM": train.position_m,
+                "speedMps": train.speed_mps,
+                "targetStopPointM": train.target_stop_point_m,
+                "commandSource": command.source,
+                "tractionLevel": command.traction_level,
+                "brakeLevel": command.brake_level,
+            },
+            "signalState": {
+                "aspect": signal_state.signal_aspect,
+                "permittedSpeedMps": signal_state.permitted_speed_mps,
+                "maEndM": signal_state.movement_authority_end_m,
+                "targetDistanceM": signal_state.target_distance_m,
+                "emergencyBrakeRequired": signal_state.emergency_brake_required,
+                "reason": signal_state.reason,
+            },
+            "safeCommand": {
+                "source": safe_command.source,
+                "tractionLevel": safe_command.traction_level,
+                "brakeLevel": safe_command.brake_level,
+                "emergencyBrake": safe_command.emergency_brake,
+                "reason": safe_command.reason,
+            },
+            "safetyEvents": [
+                {"type": e.event_type, "severity": e.severity, "action": e.action_taken}
+                for e in events
+            ],
+        })
+
+    _print_json({
+        "phase": 1,
+        "module": "signal-control",
+        "member": "C",
+        "cache": str(Path(args.cache).resolve()),
+        "scenarios": results,
+    })
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -496,6 +641,46 @@ def build_parser() -> argparse.ArgumentParser:
     console_parser.add_argument("--stop-tolerance", type=float, default=1.0, help="Acceptable stop error in meters")
     console_parser.add_argument("--json-lines", action="store_true", help="Print JSON payloads")
     console_parser.set_defaults(func=vehicle_console)
+    phase0_member_d_parser = subparsers.add_parser(
+        "phase0-member-d-demo",
+        help="Phase 0: output default station/power states and metric structure for member D",
+    )
+    phase0_member_d_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
+    phase0_member_d_parser.set_defaults(func=phase0_member_d_demo)
+
+    phase1_member_d_parser = subparsers.add_parser(
+        "phase1-member-d-demo",
+        help="Phase 1: energy estimation and station stop judgment for member D",
+    )
+    phase1_member_d_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
+    phase1_member_d_parser.set_defaults(func=phase1_member_d_demo)
+
+    phase2_full_parser = subparsers.add_parser(
+        "phase2-member-d-full-demo",
+        help="Phase 2: passenger-dispatch-power demo across all 13 stations on Line 9",
+    )
+    phase2_full_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
+    phase2_full_parser.set_defaults(func=phase2_member_d_full_demo)
+
+    signal_parser = subparsers.add_parser(
+        "signal-demo",
+        help="Run Phase 1 member C signal, ATP and safety guard demo",
+    )
+    signal_parser.add_argument("--cache", default="data/cache/line_map.json", help="Path to line_map.json")
+    signal_parser.add_argument(
+        "--scenario-max-speed", type=float, default=22.22,
+        help="Scenario maximum speed in m/s (default: 22.22 = 80 km/h)",
+    )
+    signal_parser.add_argument(
+        "--overspeed-tolerance", type=float, default=0.3,
+        help="Overspeed tolerance in m/s (default: 0.3)",
+    )
+    signal_parser.add_argument(
+        "--yellow-speed", type=float, default=8.0,
+        help="Yellow aspect speed limit in m/s (default: 8.0)",
+    )
+    signal_parser.set_defaults(func=signal_demo)
+
     return parser
 
 
