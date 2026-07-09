@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from app.domain.interlocking.section_occupation import SectionOccupationService
 from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.operations.member_c_demo import MemberCDemoRunner
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
 
 
@@ -56,6 +58,7 @@ class Line9DataService:
         self.run_dir = run_dir
         self._line_map: JsonDict | None = None
         self._stations: list[JsonDict] | None = None
+        self._sim_runner: MemberCDemoRunner | None = None
 
     @property
     def line_map(self) -> JsonDict:
@@ -255,6 +258,23 @@ class Line9DataService:
             "summary": summary,
         }
 
+    @property
+    def sim_runner(self) -> MemberCDemoRunner:
+        if self._sim_runner is None:
+            self._sim_runner = MemberCDemoRunner(self.cache_path)
+        return self._sim_runner
+
+    def member_c_state(self) -> JsonDict:
+        return self.sim_runner.state_snapshot()
+
+    def member_c_step(self) -> JsonDict:
+        self.sim_runner.step()
+        return self.sim_runner.state_snapshot()
+
+    def member_c_reset(self) -> JsonDict:
+        self._sim_runner = MemberCDemoRunner(self.cache_path)
+        return self.sim_runner.state_snapshot()
+
     def _load_station_catalog(self) -> list[JsonDict]:
         with self.stations_path.open("r", encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
@@ -306,6 +326,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.sim_state())
             elif path == "/api/phase2/member-d/demo":
                 self._send_json(self.service.member_d_demo())
+            elif path == "/api/phase2/member-c/demo":
+                self._serve_html_file(ROOT / "member-c-demo.html")
+            elif path == "/api/phase2/member-c/state":
+                self._send_json(self.service.member_c_state())
+            elif path == "/api/phase2/member-c/step":
+                self._send_json(self.service.member_c_step())
+            elif path == "/api/phase2/member-c/reset":
+                self._send_json(self.service.member_c_reset())
             elif match := re.fullmatch(r"/api/track/segments/(\d+)/context", path):
                 self._send_json(self.service.segment_context(int(match.group(1))))
             else:
@@ -335,6 +363,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+    def _serve_html_file(self, file_path: Path) -> None:
+        body = file_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
 
 def build_server(host: str, port: int, service: Line9DataService) -> ThreadingHTTPServer:
     class BoundApiHandler(ApiHandler):
@@ -361,3 +398,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

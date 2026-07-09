@@ -1,7 +1,7 @@
 {
   "schemaVersion": "phase0.line-map.v1",
-  "source": "D:\\轨道交通仿真系统\\docs\\线路数据(1).xls",
-  "generatedAt": "2026-07-08T01:51:38.534271+00:00",
+  "source": "C:\\Users\\35141\\PycharmProjects\\小学期\\docs\\资料\\线路数据(1).xls",
+  "generatedAt": "2026-07-08T12:27:33.564417+00:00",
   "counts": {
     "长短链表": 0,
     "点表": 0,
@@ -15037,6 +15037,10 @@
     {
       "id": 1,
       "name": 1,
+      "type": 2,
+      "normalSegId": 5,
+      "reverseSegId": 4,
+      "frogSegId": 6,
       "raw": {
         "索引编号": 1,
         "名称": 1,
@@ -15052,6 +15056,10 @@
     {
       "id": 2,
       "name": 2,
+      "type": 1,
+      "normalSegId": 238,
+      "reverseSegId": 30,
+      "frogSegId": 29,
       "raw": {
         "索引编号": 2,
         "名称": 2,
@@ -15067,6 +15075,10 @@
     {
       "id": 3,
       "name": 4,
+      "type": 2,
+      "normalSegId": 31,
+      "reverseSegId": 33,
+      "frogSegId": 32,
       "raw": {
         "索引编号": 3,
         "名称": 4,
@@ -15082,6 +15094,10 @@
     {
       "id": 4,
       "name": 3,
+      "type": 1,
+      "normalSegId": 8,
+      "reverseSegId": 9,
+      "frogSegId": 7,
       "raw": {
         "索引编号": 4,
         "名称": 3,
@@ -15097,6 +15113,10 @@
     {
       "id": 5,
       "name": 5,
+      "type": 2,
+      "normalSegId": 10,
+      "reverseSegId": 12,
+      "frogSegId": 11,
       "raw": {
         "索引编号": 5,
         "名称": 5,
@@ -15112,6 +15132,10 @@
     {
       "id": 6,
       "name": 6,
+      "type": 1,
+      "normalSegId": 35,
+      "reverseSegId": 36,
+      "frogSegId": 34,
       "raw": {
         "索引编号": 6,
         "名称": 6,
@@ -15127,6 +15151,10 @@
     {
       "id": 7,
       "name": 8,
+      "type": 2,
+      "normalSegId": 35,
+      "reverseSegId": 38,
+      "frogSegId": 37,
       "raw": {
         "索引编号": 7,
         "名称": 8,
@@ -15142,6 +15170,10 @@
     {
       "id": 8,
       "name": 7,
+      "type": 1,
+      "normalSegId": 15,
+      "reverseSegId": 17,
+      "frogSegId": 14,
       "raw": {
         "索引编号": 8,
         "名称": 7,
@@ -15157,6 +15189,10 @@
     {
       "id": 9,
       "name": 9,
+      "type": 2,
+      "normalSegId": 15,
+      "reverseSegId": 18,
+      "frogSegId": 16,
       "raw": {
         "索引编号": 9,
         "名称": 9,
@@ -15172,6 +15208,10 @@
     {
       "id": 10,
       "name": 10,
+      "type": 1,
+      "normalSegId": 41,
+      "reverseSegId": 42,
+      "frogSegId": 40,
       "raw": {
         "索引编号": 10,
         "名称": 10,
@@ -15187,6 +15227,10 @@
     {
       "id": 11,
       "name": 12,
+      "type": 2,
+      "normalSegId": 41,
+      "reverseSegId": 44,
+      "frogSegId": 43,
       "raw": {
         "索引编号": 11,
         "名称": 12,
@@ -15202,6 +15246,10 @@
     {
       "id": 12,
       "name": 11,
+      "type": 2,
+      "normalSegId": 19,
+      "reverseSegId": 21,
+      "frogSegId": 20,
       "raw": {
         "索引编号": 12,
         "名称": 11,
@@ -15217,6 +15265,10 @@
     {
       "id": 13,
       "name": 14,
+      "type": 2,
+      "normalSegId": 45,
+      "reverseSegId": 47,
+      "frogSegId": 46,
       "raw": {
         "索引编号": 13,
         "名称": 14,
@@ -15232,6 +15284,10 @@
     {
       "id": 14,
       "name": 1,
+      "type": 2,
+      "normalSegId": 63,
+      "reverseSegId": 65,
+      "frogSegId": 64,
       "raw": {
         "索引编号": 14,
         "名称": 1,
@@ -15247,6 +15303,10 @@
     {
       "id": 15,
       "name": 2,
+      "type": 1,
+      "normalSegId": 79,
+      "reverseSegId": 80,
+      "frogSegId": 78,
       "raw": {
         "索引编号": 15,
         "名称": 2,
@@ -15262,6 +15322,10 @@
     {
       "id": 16,
       "name": 1,
+      "type": 1,
+      "normalSegId": 90,
+      "reverseSegId": 91,
+      "frogSegId": 89,
       "raw": {
         "索引编号": 16,
         "名称": 1,
@@ -15277,6 +15341,10 @@
     {
       "id": 17,
       "name": 3,
+      "type": 2,
+      "normalSegId": 93,
+      "reverseSegId": 95,
+      "frogSegId": 94,
       "raw": {
         "索引编号": 17,
         "名称": 3,
@@ -15292,6 +15360,10 @@
     {
       "id": 18,
       "name": 4,
+      "type": 2,
+      "normalSegId": 119,
+      "reverseSegId": 117,
+      "frogSegId": 118,
       "raw": {
         "索引编号": 18,
         "名称": 4,
@@ -15307,6 +15379,10 @@
     {
       "id": 19,
       "name": 10,
+      "type": 1,
+      "normalSegId": 237,
+      "reverseSegId": 124,
+      "frogSegId": 122,
       "raw": {
         "索引编号": 19,
         "名称": 10,
@@ -15322,6 +15398,10 @@
     {
       "id": 20,
       "name": 8,
+      "type": 1,
+      "normalSegId": 122,
+      "reverseSegId": 123,
+      "frogSegId": 121,
       "raw": {
         "索引编号": 20,
         "名称": 8,
@@ -15337,6 +15417,10 @@
     {
       "id": 21,
       "name": 2,
+      "type": 1,
+      "normalSegId": 106,
+      "reverseSegId": 107,
+      "frogSegId": 105,
       "raw": {
         "索引编号": 21,
         "名称": 2,
@@ -15352,6 +15436,10 @@
     {
       "id": 22,
       "name": 6,
+      "type": 2,
+      "normalSegId": 108,
+      "reverseSegId": 110,
+      "frogSegId": 109,
       "raw": {
         "索引编号": 22,
         "名称": 6,
@@ -15367,6 +15455,10 @@
     {
       "id": 23,
       "name": 12,
+      "type": 2,
+      "normalSegId": 112,
+      "reverseSegId": 114,
+      "frogSegId": 113,
       "raw": {
         "索引编号": 23,
         "名称": 12,
@@ -15382,6 +15474,10 @@
     {
       "id": 24,
       "name": 1,
+      "type": 2,
+      "normalSegId": 130,
+      "reverseSegId": 132,
+      "frogSegId": 131,
       "raw": {
         "索引编号": 24,
         "名称": 1,
@@ -15397,6 +15493,10 @@
     {
       "id": 25,
       "name": "7-6",
+      "type": 1,
+      "normalSegId": 150,
+      "reverseSegId": 151,
+      "frogSegId": 149,
       "raw": {
         "索引编号": 25,
         "名称": "7-6",
@@ -15412,6 +15512,10 @@
     {
       "id": 26,
       "name": "7-4",
+      "type": 1,
+      "normalSegId": 153,
+      "reverseSegId": 154,
+      "frogSegId": 152,
       "raw": {
         "索引编号": 26,
         "名称": "7-4",
@@ -15427,6 +15531,10 @@
     {
       "id": 27,
       "name": "7-2",
+      "type": 2,
+      "normalSegId": 153,
+      "reverseSegId": 156,
+      "frogSegId": 155,
       "raw": {
         "索引编号": 27,
         "名称": "7-2",
@@ -15442,6 +15550,10 @@
     {
       "id": 28,
       "name": "7-3",
+      "type": 1,
+      "normalSegId": 164,
+      "reverseSegId": 165,
+      "frogSegId": 163,
       "raw": {
         "索引编号": 28,
         "名称": "7-3",
@@ -15457,6 +15569,10 @@
     {
       "id": 29,
       "name": "7-1",
+      "type": 2,
+      "normalSegId": 164,
+      "reverseSegId": 167,
+      "frogSegId": 166,
       "raw": {
         "索引编号": 29,
         "名称": "7-1",
@@ -15472,6 +15588,10 @@
     {
       "id": 30,
       "name": "7-5",
+      "type": 1,
+      "normalSegId": 161,
+      "reverseSegId": 162,
+      "frogSegId": 160,
       "raw": {
         "索引编号": 30,
         "名称": "7-5",
@@ -15487,6 +15607,10 @@
     {
       "id": 31,
       "name": 2,
+      "type": 2,
+      "normalSegId": 141,
+      "reverseSegId": 143,
+      "frogSegId": 142,
       "raw": {
         "索引编号": 31,
         "名称": 2,
@@ -15502,6 +15626,10 @@
     {
       "id": 32,
       "name": 1,
+      "type": 1,
+      "normalSegId": 176,
+      "reverseSegId": 177,
+      "frogSegId": 175,
       "raw": {
         "索引编号": 32,
         "名称": 1,
@@ -15517,6 +15645,10 @@
     {
       "id": 33,
       "name": 4,
+      "type": 2,
+      "normalSegId": 198,
+      "reverseSegId": 196,
+      "frogSegId": 197,
       "raw": {
         "索引编号": 33,
         "名称": 4,
@@ -15532,6 +15664,10 @@
     {
       "id": 34,
       "name": 6,
+      "type": 1,
+      "normalSegId": 201,
+      "reverseSegId": 202,
+      "frogSegId": 200,
       "raw": {
         "索引编号": 34,
         "名称": 6,
@@ -15547,6 +15683,10 @@
     {
       "id": 35,
       "name": 2,
+      "type": 1,
+      "normalSegId": 188,
+      "reverseSegId": 189,
+      "frogSegId": 187,
       "raw": {
         "索引编号": 35,
         "名称": 2,
@@ -15562,6 +15702,10 @@
     {
       "id": 36,
       "name": 8,
+      "type": 2,
+      "normalSegId": 191,
+      "reverseSegId": 193,
+      "frogSegId": 192,
       "raw": {
         "索引编号": 36,
         "名称": 8,
@@ -15577,6 +15721,10 @@
     {
       "id": 37,
       "name": 1,
+      "type": 1,
+      "normalSegId": 209,
+      "reverseSegId": 210,
+      "frogSegId": 208,
       "raw": {
         "索引编号": 37,
         "名称": 1,
@@ -15592,6 +15740,10 @@
     {
       "id": 38,
       "name": 3,
+      "type": 2,
+      "normalSegId": 209,
+      "reverseSegId": 212,
+      "frogSegId": 211,
       "raw": {
         "索引编号": 38,
         "名称": 3,
@@ -15607,6 +15759,10 @@
     {
       "id": 39,
       "name": 2,
+      "type": 1,
+      "normalSegId": 223,
+      "reverseSegId": 224,
+      "frogSegId": 222,
       "raw": {
         "索引编号": 39,
         "名称": 2,
@@ -15622,6 +15778,10 @@
     {
       "id": 40,
       "name": 4,
+      "type": 2,
+      "normalSegId": 223,
+      "reverseSegId": 226,
+      "frogSegId": 225,
       "raw": {
         "索引编号": 40,
         "名称": 4,
@@ -15637,6 +15797,10 @@
     {
       "id": 41,
       "name": 5,
+      "type": 1,
+      "normalSegId": 215,
+      "reverseSegId": 216,
+      "frogSegId": 214,
       "raw": {
         "索引编号": 41,
         "名称": 5,
@@ -15652,6 +15816,10 @@
     {
       "id": 42,
       "name": 6,
+      "type": 1,
+      "normalSegId": 229,
+      "reverseSegId": 230,
+      "frogSegId": 228,
       "raw": {
         "索引编号": 42,
         "名称": 6,
@@ -15667,6 +15835,10 @@
     {
       "id": 43,
       "name": 43,
+      "type": 1,
+      "normalSegId": 239,
+      "reverseSegId": 241,
+      "frogSegId": 240,
       "raw": {
         "索引编号": 43,
         "名称": 43,
@@ -15682,6 +15854,10 @@
     {
       "id": 44,
       "name": 44,
+      "type": 2,
+      "normalSegId": 243,
+      "reverseSegId": 242,
+      "frogSegId": 244,
       "raw": {
         "索引编号": 44,
         "名称": 44,
@@ -15697,6 +15873,10 @@
     {
       "id": 45,
       "name": 45,
+      "type": 2,
+      "normalSegId": 248,
+      "reverseSegId": 247,
+      "frogSegId": 246,
       "raw": {
         "索引编号": 45,
         "名称": 45,
@@ -15712,6 +15892,10 @@
     {
       "id": 46,
       "name": 46,
+      "type": 1,
+      "normalSegId": 250,
+      "reverseSegId": 249,
+      "frogSegId": 251,
       "raw": {
         "索引编号": 46,
         "名称": 46,
@@ -15727,6 +15911,10 @@
     {
       "id": 47,
       "name": 47,
+      "type": 2,
+      "normalSegId": 254,
+      "reverseSegId": 255,
+      "frogSegId": 253,
       "raw": {
         "索引编号": 47,
         "名称": 47,
@@ -15742,6 +15930,10 @@
     {
       "id": 48,
       "name": 48,
+      "type": 1,
+      "normalSegId": 260,
+      "reverseSegId": 259,
+      "frogSegId": 263,
       "raw": {
         "索引编号": 48,
         "名称": 48,
@@ -15757,6 +15949,10 @@
     {
       "id": 49,
       "name": 49,
+      "type": 2,
+      "normalSegId": 260,
+      "reverseSegId": 258,
+      "frogSegId": 261,
       "raw": {
         "索引编号": 49,
         "名称": 49,
@@ -15772,6 +15968,10 @@
     {
       "id": 50,
       "name": 50,
+      "type": 1,
+      "normalSegId": 254,
+      "reverseSegId": 256,
+      "frogSegId": 257,
       "raw": {
         "索引编号": 50,
         "名称": 50,
@@ -15787,6 +15987,10 @@
     {
       "id": 51,
       "name": 51,
+      "type": 2,
+      "normalSegId": 267,
+      "reverseSegId": 266,
+      "frogSegId": 265,
       "raw": {
         "索引编号": 51,
         "名称": 51,
@@ -15802,6 +16006,10 @@
     {
       "id": 52,
       "name": 52,
+      "type": 1,
+      "normalSegId": 269,
+      "reverseSegId": 268,
+      "frogSegId": 270,
       "raw": {
         "索引编号": 52,
         "名称": 52,
@@ -15817,6 +16025,10 @@
     {
       "id": 53,
       "name": 53,
+      "type": 2,
+      "normalSegId": 273,
+      "reverseSegId": 272,
+      "frogSegId": 271,
       "raw": {
         "索引编号": 53,
         "名称": 53,
@@ -15832,6 +16044,10 @@
     {
       "id": 54,
       "name": 54,
+      "type": 2,
+      "normalSegId": 282,
+      "reverseSegId": 275,
+      "frogSegId": 273,
       "raw": {
         "索引编号": 54,
         "名称": 54,
@@ -15847,6 +16063,10 @@
     {
       "id": 55,
       "name": 55,
+      "type": 1,
+      "normalSegId": 277,
+      "reverseSegId": 276,
+      "frogSegId": 278,
       "raw": {
         "索引编号": 55,
         "名称": 55,
@@ -15862,6 +16082,10 @@
     {
       "id": 56,
       "name": 56,
+      "type": 2,
+      "normalSegId": 284,
+      "reverseSegId": 283,
+      "frogSegId": 274,
       "raw": {
         "索引编号": 56,
         "名称": 56,
@@ -15877,6 +16101,10 @@
     {
       "id": 57,
       "name": 57,
+      "type": 2,
+      "normalSegId": 286,
+      "reverseSegId": 290,
+      "frogSegId": 285,
       "raw": {
         "索引编号": 57,
         "名称": 57,
@@ -15892,6 +16120,10 @@
     {
       "id": 58,
       "name": 58,
+      "type": 2,
+      "normalSegId": 288,
+      "reverseSegId": 289,
+      "frogSegId": 287,
       "raw": {
         "索引编号": 58,
         "名称": 58,
@@ -15907,6 +16139,10 @@
     {
       "id": 59,
       "name": 59,
+      "type": 2,
+      "normalSegId": 304,
+      "reverseSegId": 306,
+      "frogSegId": 303,
       "raw": {
         "索引编号": 59,
         "名称": 59,
@@ -15922,6 +16158,10 @@
     {
       "id": 60,
       "name": 60,
+      "type": 1,
+      "normalSegId": 311,
+      "reverseSegId": 308,
+      "frogSegId": 309,
       "raw": {
         "索引编号": 60,
         "名称": 60,

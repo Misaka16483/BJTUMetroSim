@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Member C Phase 2 — Section Occupation Demo</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#eee;overflow:hidden;height:100vh;display:flex;flex-direction:column}
+#bar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:#16213e;border-bottom:1px solid #0f3460;flex-shrink:0}
+#bar button{padding:5px 14px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600}
+#bar button:hover{opacity:.85}
+#stats{margin-left:auto;font-size:13px;display:flex;gap:16px}
+.g{color:#2ecc71;font-weight:700}
+.r{color:#e74c3c;font-weight:700}
+#wrap{flex:1;overflow:auto;padding:10px}
+canvas{display:block;background:#0d1117;border-radius:6px}
+#info{position:fixed;bottom:10px;right:10px;background:#16213ecc;padding:8px 12px;border-radius:6px;font-size:11px;max-width:280px;border:1px solid #0f3460}
+</style>
+</head>
+<body>
+<div id="bar">
+<button onclick="P()" style="background:#2ecc71;color:#000">Play</button>
+<button onclick="S()" style="background:#f39c12;color:#000">Pause</button>
+<button onclick="Tk()" style="background:#3498db;color:#fff">Step</button>
+<button onclick="R()" style="background:#e74c3c;color:#fff">Reset</button>
+<button onclick="C(-2)" style="background:#9b59b6;color:#fff">Slower</button>
+<button onclick="C(2)" style="background:#9b59b6;color:#fff">Faster</button>
+<span style="color:#aaa;font-size:13px" id="sl">5 tick/s</span>
+<div id="stats">
+<span>Tick: <span class="g" id="st">0</span></span>
+<span>Occ: <span class="r" id="so">0</span>/<span class="g" id="sa">259</span></span>
+</div>
+</div>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="info"><b>Trains</b><div id="ti"></div>
+<div style="margin-top:6px;font-size:10px;color:#888">Seg color = occupying train</div></div>
+<script>
+var A="http://127.0.0.1:8000",S=null,I=null,V=5;
+var c=document.getElementById("c"),x=c.getContext("2d");
+function F(u){fetch(A+u).then(function(r){return r.json()}).then(function(s){S=s;D()}).catch(function(e){console.error(e)})}
+function Tk(){F("/api/phase2/member-c/step")}
+function R(){F("/api/phase2/member-c/reset")}
+function P(){if(I)return;I=setInterval(function(){Tk()},1000/V)}
+function Ss(){clearInterval(I);I=null}
+function C(d){V=Math.max(1,Math.min(30,V+d));document.getElementById("sl").textContent=V+" tick/s";if(I){Ss();P()}}
+
+var segMap={},chain=[];
+function D(){
+if(!S||!S.segments)return;
+var gs=S.segments,n=gs.length;
+var tc=S.segTrainColors||{};
+
+// layout: horizontal line wrapping across rows
+var TOTAL_W=1100,LEFT=40,RIGHT=40,TOP=30,ROW_H=60;
+// compute total length in metres
+var totalM=0,cap=3000; // cap max visible width
+for(var i=0;i<n;i++)totalM+=Math.min(gs[i].lengthM||40,cap);
+var ppm=(TOTAL_W-LEFT-RIGHT)/Math.max(totalM,1);
+
+// first pass: compute seg x positions
+var accum=LEFT,segs=[];
+for(var i=0;i<n;i++){
+  var g=gs[i];
+  var w=Math.max((Math.min(g.lengthM||40,cap))*ppm,3);
+  segs.push({id:g.id,w:w,x:accum,len:g.lengthM||40,stn:g.stationName,sw:g.hasSwitch,prev:g.prevSegId,next:g.nextSegId});
+  accum+=w+2;
+}
+var totalW=accum+20;
+var rows=Math.ceil(totalW/(TOTAL_W+40));
+var rowW=(TOTAL_W-LEFT-RIGHT)+40;
+var canvasH=TOP+rows*ROW_H+40;
+
+// re-layout with row wrapping
+segs=[];
+accum=LEFT;
+var r=0;
+for(var i=0;i<n;i++){
+  var g=gs[i];
+  var w=Math.max((Math.min(g.lengthM||40,cap))*ppm,3);
+  if(accum+w>LEFT+rowW){r++;accum=LEFT;}
+  segs.push({id:g.id,w:w,x:accum,y:TOP+r*ROW_H,len:g.lengthM||40,stn:g.stationName,sw:g.hasSwitch,prev:g.prevSegId,next:g.nextSegId,row:r});
+  segMap[g.id]={x:accum,w:w,y:TOP+r*ROW_H,len:g.lengthM||40};
+  accum+=w+2;
+}
+canvasH=TOP+(r+1)*ROW_H+60;
+c.width=Math.max(totalW+20,LEFT+rowW+60);c.height=canvasH;
+x.clearRect(0,0,c.width,c.height);
+
+// draw row labels
+for(var ri=0;ri<=r;ri++){
+  x.fillStyle="#555";x.font="10px monospace";
+  var fs=segs.filter(function(s){return s.row===ri})[0];
+  if(fs)x.fillText("Seg"+fs.id,4,TOP+ri*ROW_H+14);
+}
+
+// draw connection lines between adjacent segs
+x.strokeStyle="#333";x.lineWidth=1;
+for(var i=0;i<segs.length;i++){
+  var s=segs[i];
+  if(s.next!=null&&segMap[s.next]){
+    var nx=segMap[s.next].x,ny=segMap[s.next].y;
+    if(s.y===ny){
+      // same row: horizontal line
+      x.beginPath();x.moveTo(s.x+s.w,s.y+12);x.lineTo(nx,ny+12);x.stroke();
+    }else{
+      // row break: diagonal
+      x.beginPath();x.moveTo(s.x+s.w,s.y+12);x.lineTo(nx,ny+12);x.stroke();
+    }
+  }
+}
+
+// draw segments
+segs.forEach(function(s){
+  var cl=tc[s.id]||null;
+  x.fillStyle=cl||"#444";
+  x.fillRect(s.x,s.y+4,s.w,16);
+  // switch marker
+  if(s.sw){
+    x.fillStyle="#f39c12";x.beginPath();
+    x.arc(s.x+s.w/2,s.y+28,3,0,Math.PI*2);x.fill();
+  }
+  // station label
+  if(s.stn){
+    x.fillStyle="#f1c40f";x.font="9px sans-serif";
+    x.fillText(s.stn,s.x-2,s.y-2);
+  }
+});
+
+// draw trains
+(S.trains||[]).forEach(function(t){
+  var p=segMap[t.segId];if(!p)return;
+  var frac=t.offsetM/p.len,hX=p.x+frac*p.w;
+  var bW=Math.max((t.lengthM/p.len)*p.w,12),ty=p.y+14;
+  // body
+  x.fillStyle=t.color;x.fillRect(hX-bW,ty,bW,16);
+  // head triangle
+  x.fillStyle="#fff";
+  if(t.direction==="FORWARD"){
+    x.beginPath();x.moveTo(hX+4,ty+8);x.lineTo(hX-4,ty+2);x.lineTo(hX-4,ty+14);x.fill();
+  }else{
+    x.beginPath();x.moveTo(hX-bW-4,ty+8);x.lineTo(hX-bW+4,ty+2);x.lineTo(hX-bW+4,ty+14);x.fill();
+  }
+  // label
+  x.fillStyle="#fff";x.font="bold 9px monospace";
+  x.fillText(t.id,hX-bW+2,ty-4);
+});
+
+// stats
+document.getElementById("st").textContent=S.tick;
+document.getElementById("so").textContent=S.occupiedCount;
+document.getElementById("sa").textContent=S.totalAxleSections;
+document.getElementById("ti").innerHTML=(S.trains||[]).map(function(t){
+  return '<div style="margin:2px 0"><span style="display:inline-block;width:8px;height:8px;background:'+t.color+';margin-right:4px"></span><b>'+t.id+'</b> Seg'+t.segId+' '+t.direction[0]+t.speedMps.toFixed(0)+'m/s</div>';
+}).join("");
+}
+F("/api/phase2/member-c/state");
+</script>
+</body>
+</html>
