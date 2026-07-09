@@ -385,7 +385,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.track_map())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
-                self._send_json(self.service.sim_state())
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
