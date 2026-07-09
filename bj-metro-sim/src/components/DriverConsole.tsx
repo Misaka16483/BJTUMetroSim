@@ -214,20 +214,17 @@ function StationRouteCard({ current, next, distanceKm, eta, direction }: {
 }
 
 /* ═══ 速度仪表盘（圆形） ═══ */
-function CabGauge({ speedKmh, color }: { speedKmh: number; color: string }) {
+function CabGauge({ speedKmh, color: _color }: { speedKmh: number; color: string }) {
   const CX = 170, CY = 140, R = 108;
-  const MAX = 90, START = 145, SWEEP = 250;
+  const MAX = 80, START = 180, SWEEP = 180;
   const toRad = (d: number) => d * Math.PI / 180;
   const ap = (d: number, r: number) => ({ x: CX + r * Math.cos(toRad(d)), y: CY + r * Math.sin(toRad(d)) });
 
   const clamped = Math.min(speedKmh, MAX);
   const needleAngle = START + (clamped / MAX) * SWEEP;
-  const ratio = clamped / MAX;
-  const arcC = ratio > 0.88 ? '#ef4444' : ratio > 0.65 ? '#f59e0b' : color;
-
   const arcPath = (a: number, b: number, r: number) => {
     const s = ap(a, r), e = ap(b, r);
-    return `M${s.x} ${s.y} A${r} ${r} 0 ${((b-a)%360+360)%360>180?1:0} 1 ${e.x} ${e.y}`;
+    return `M${s.x} ${s.y} A${r} ${r} 0 0 1 ${e.x} ${e.y}`;
   };
 
   return (
@@ -237,34 +234,28 @@ function CabGauge({ speedKmh, color }: { speedKmh: number; color: string }) {
       </defs>
 
       {/* 背景弧 */}
-      <path d={arcPath(START, START + SWEEP, R)} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="12" strokeLinecap="round" />
+      <path d={arcPath(START, START + SWEEP, R)} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="12" strokeLinecap="round" />
 
-      {/* 动态弧 */}
-      {clamped > 0 && (
-        <path d={arcPath(START, needleAngle, R)} fill="none" stroke={arcC} strokeWidth="12" strokeLinecap="round"
-          filter="url(#gaugeGlow)" style={{ opacity: 0.7, transition: 'all 0.3s ease-out' }} />
-      )}
-
-      {/* 刻度 */}
-      {[...Array(19)].map((_, i) => {
+      {/* 刻度 — 统一颜色，不随速度变色 */}
+      {[...Array(17)].map((_, i) => {
         const v = i * 5, a = START + (v / MAX) * SWEEP;
         const major = v % 10 === 0;
         const inn = ap(a, major ? R - 24 : R - 14), out = ap(a, R - 2);
         return <line key={`t-${i}`} x1={inn.x} y1={inn.y} x2={out.x} y2={out.y}
-          stroke={v <= clamped ? arcC : 'rgba(255,255,255,0.10)'} strokeWidth={major ? 1.4 : 0.6} />;
+          stroke="rgba(255,255,255,0.14)" strokeWidth={major ? 1.4 : 0.6} />;
       })}
 
-      {/* 数字标签 */}
+      {/* 数字标签 — 0 和 80 水平对齐 */}
       {[0, 20, 40, 60, 80].map(v => {
         const a = START + (v / MAX) * SWEEP, p = ap(a, R - 46);
         return <text key={`n-${v}`} x={p.x} y={p.y} textAnchor="middle" dominantBaseline="middle"
-          fontSize="11" fontWeight="500" fill="rgba(255,255,255,0.18)" fontFamily="'JetBrains Mono','SF Mono'">{v}</text>;
+          fontSize="11" fontWeight="500" fill="rgba(255,255,255,0.22)" fontFamily="'JetBrains Mono','SF Mono'">{v}</text>;
       })}
 
-      {/* 指针 */}
+      {/* 指针 — 只有它随速度动 */}
       <g transform={`rotate(${needleAngle},${CX},${CY})`}>
         <polygon points={`${CX+3},${CY-2.5} ${CX+3},${CY+2.5} ${CX+R-20},${CY+1} ${CX+R-20},${CY-1}`}
-          fill="#ef4444" filter="url(#gaugeGlow)" style={{ transition: 'all 0.3s ease-out' }} />
+          fill="#ef4444" filter="url(#gaugeGlow)" style={{ transition: 'all 320ms cubic-bezier(0.22, 1, 0.36, 1)' }} />
         <polygon points={`${CX-3},${CY-3.5} ${CX-3},${CY+3.5} ${CX-20},${CY+1.5} ${CX-20},${CY-1.5}`}
           fill="rgba(255,255,255,0.08)" opacity="0.25" />
       </g>
