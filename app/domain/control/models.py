@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from app.domain.vehicle.models import CommandSource
+
+if TYPE_CHECKING:
+    from app.domain.line.services import PathPlan
 
 
 class OperationMode(str, Enum):
@@ -129,6 +133,7 @@ class AtoTarget:
     target_position_m: float
     permitted_speed_mps: float
     emergency_brake_required: bool = False
+    path_plan: PathPlan | None = None
 
     def __post_init__(self) -> None:
         if self.target_position_m < 0:

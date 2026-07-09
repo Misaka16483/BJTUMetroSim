@@ -8,6 +8,7 @@ import type {
   SimStationInfo,
   TrackMapData,
   SpeedProfilePoint,
+  SpeedProfileMeta,
 } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop } from '../data/backendApi';
 
@@ -76,10 +77,25 @@ interface SimState {
   brakePercent: number;
   energyKwh: number;
   estimatedRunTimeS: number;
+  pathPositionM: number;
+  pathTotalLengthM: number;
+  currentSegmentId: number | null;
+  localSpeedLimitMps: number;
+  gradeRatio: number;
+  pathSegmentCount: number;
+  pathConstraintCount: number;
   runDirection: 'UP' | 'DOWN';
   // ── 速度曲线 ──
   speedProfile: SpeedProfilePoint[];
-  speedHistory: Array<{ positionM: number; speedMps: number }>;
+  speedProfileMeta: SpeedProfileMeta | null;
+  speedHistory: Array<{
+    positionM: number;
+    speedMps: number;
+    targetSpeedMps?: number;
+    localSpeedLimitMps?: number;
+    gradeRatio?: number;
+    segmentId?: number | null;
+  }>;
   speedTimeHistory: Array<{ elapsedS: number; speedMps: number }>;
   stationIndex: number;
 
@@ -278,8 +294,16 @@ export const useSimStore = create<SimState>((set, get) => ({
   brakePercent: 0,
   energyKwh: 0,
   estimatedRunTimeS: 0,
+  pathPositionM: 0,
+  pathTotalLengthM: 0,
+  currentSegmentId: null,
+  localSpeedLimitMps: 22.22,
+  gradeRatio: 0,
+  pathSegmentCount: 0,
+  pathConstraintCount: 0,
   runDirection: 'DOWN',
   speedProfile: [],
+  speedProfileMeta: null,
   speedHistory: [],
   speedTimeHistory: [],
   stationIndex: 0,
@@ -503,8 +527,16 @@ export const useSimStore = create<SimState>((set, get) => ({
 
     // 信号屏字段
     // 站台变化时重置速度曲线
-    if (t0.currentStation !== state.currentStation && state.currentStation !== '') {
-      set({ speedHistory: [], speedProfile: [], speedTimeHistory: [] });
+    const currentPathLengthM = t0.pathTotalLengthM ?? t0.targetDistanceM ?? 0;
+    const intervalChanged = (
+      t0.currentStation !== state.currentStation
+      || t0.nextStation !== state.nextStation
+      || Math.abs(currentPathLengthM - state.pathTotalLengthM) > 0.5
+    );
+    const baseSpeedHistory = intervalChanged ? [] : state.speedHistory;
+    const baseSpeedTimeHistory = intervalChanged ? [] : state.speedTimeHistory;
+    if (intervalChanged) {
+      set({ speedHistory: [], speedProfile: [], speedProfileMeta: null, speedTimeHistory: [] });
     }
     set({
       currentStation: t0.currentStation,
@@ -522,6 +554,13 @@ export const useSimStore = create<SimState>((set, get) => ({
       energyKwh: t0.energyKwh ?? 0,
       estimatedRunTimeS: t0.estimatedRunTimeS ?? 0,
       targetSpeedMps: t0.targetSpeedMps ?? 22.22,
+      pathPositionM: t0.pathPositionM ?? 0,
+      pathTotalLengthM: t0.pathTotalLengthM ?? 0,
+      currentSegmentId: t0.currentSegmentId ?? null,
+      localSpeedLimitMps: t0.localSpeedLimitMps ?? t0.permittedSpeedMps,
+      gradeRatio: t0.gradeRatio ?? 0,
+      pathSegmentCount: t0.pathSegmentCount ?? 0,
+      pathConstraintCount: t0.pathConstraintCount ?? 0,
     });
 
     // 列车地图位置 — polyline 插值 (支持多线路)
@@ -559,26 +598,53 @@ export const useSimStore = create<SimState>((set, get) => ({
     });
 
     // 速度历史曲线 — 记录 (位置, 速度) 对
-    const tm = state.trackMap;
-    if (tm?.stations?.length) {
+    const hasPathPosition = typeof t0.pathPositionM === 'number' && (t0.pathTotalLengthM ?? 0) > 0;
+    if (hasPathPosition) {
+      const newHistory = [
+        ...baseSpeedHistory,
+        {
+          positionM: t0.pathPositionM ?? 0,
+          speedMps: t0.speedMps,
+          targetSpeedMps: t0.targetSpeedMps ?? 0,
+          localSpeedLimitMps: t0.localSpeedLimitMps,
+          gradeRatio: t0.gradeRatio,
+          segmentId: t0.currentSegmentId,
+        },
+      ];
+      if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
+      set({ speedHistory: newHistory });
+    } else {
+      const tm = state.trackMap;
+      if (tm?.stations?.length) {
       const stIdx = t0.stationIndex;
       const nextIdx = t0.direction === 'UP' ? stIdx + 1 : stIdx - 1;
       if (nextIdx >= 0 && nextIdx < tm.stations.length) {
         const curM = tm.stations[stIdx]?.mileageM ?? 0;
         const nextM = tm.stations[nextIdx]?.mileageM ?? curM + 1347;
         const positionM = curM + t0.segmentProgress * Math.abs(nextM - curM);
-        const newHistory = [...state.speedHistory, { positionM, speedMps: t0.speedMps }];
+        const newHistory = [
+          ...baseSpeedHistory,
+          {
+            positionM,
+            speedMps: t0.speedMps,
+            targetSpeedMps: t0.targetSpeedMps ?? 0,
+            localSpeedLimitMps: t0.localSpeedLimitMps,
+            gradeRatio: t0.gradeRatio,
+            segmentId: t0.currentSegmentId,
+          },
+        ];
         if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
         set({ speedHistory: newHistory });
+      }
       }
     }
 
     // 速度-时间曲线 — 记录 (发车后秒数, 速度) 对
     if (t0.phase !== 'DWELLING' && t0.phase !== 'IDLE') {
-      const elapsedS = state.speedTimeHistory.length > 0
-        ? state.speedTimeHistory[state.speedTimeHistory.length - 1].elapsedS + 0.25
+      const elapsedS = baseSpeedTimeHistory.length > 0
+        ? baseSpeedTimeHistory[baseSpeedTimeHistory.length - 1].elapsedS + 0.25
         : 0.25;
-      const newTimeHistory = [...state.speedTimeHistory, { elapsedS, speedMps: t0.speedMps }];
+      const newTimeHistory = [...baseSpeedTimeHistory, { elapsedS, speedMps: t0.speedMps }];
       if (newTimeHistory.length > 500) newTimeHistory.splice(0, newTimeHistory.length - 500);
       set({ speedTimeHistory: newTimeHistory });
     }
@@ -601,6 +667,14 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   stopBackendSim: async () => {
     await simStop();
-    set({ isRunning: false, engineClockState: 'STOPPED', trainPositions: {} });
+    set({
+      isRunning: false,
+      engineClockState: 'STOPPED',
+      trainPositions: {},
+      speedProfile: [],
+      speedProfileMeta: null,
+      speedHistory: [],
+      speedTimeHistory: [],
+    });
   },
 }));

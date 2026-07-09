@@ -94,8 +94,9 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
     nextStation, distanceToNextStationM, stationIndex, line9Stations,
     runDirection, currentSpeedMps, simTime, avgLoadRate, totalPassengers,
     engineClockState, tractionPercent, brakePercent,
-    energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedHistory,
-    speedTimeHistory, estimatedRunTimeS,
+    energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
+    speedTimeHistory, estimatedRunTimeS, pathPositionM, pathTotalLengthM,
+    currentSegmentId, localSpeedLimitMps, gradeRatio,
     startBackendSim, pauseBackendSim, resumeBackendSim, stopBackendSim,
   } = useSimStore();
   const color = lineColor(line9.id);
@@ -143,6 +144,8 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
             currentPositionM={
               speedHistory.length > 0 ? speedHistory[speedHistory.length - 1].positionM : 0
             }
+            pathTotalLengthM={pathTotalLengthM}
+            profileSource={speedProfileMeta?.source ?? ''}
             startStation={line9Stations[stationIndex] || '--'}
             endStation={nextStation || '--'}
           />
@@ -186,7 +189,11 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
           {/* ── 运行信息 ── */}
           <div className="flex flex-col" style={{ gap: 3 }}>
             <InfoRow label="PERMITTED" value={`${Math.round(permittedSpeedMps * 3.6)} km/h`} color="#00a8ff" />
+            <InfoRow label="LOCAL LIMIT" value={`${Math.round(localSpeedLimitMps * 3.6)} km/h`} color="#f59e0b" />
             <InfoRow label="TARGET" value={`${Math.round(targetSpeedMps * 3.6)} km/h`} color="#8FC31F" />
+            <InfoRow label="PATH" value={`${pathPositionM.toFixed(0)}/${pathTotalLengthM.toFixed(0)} m`} color="#94a3b8" />
+            <InfoRow label="SEG" value={currentSegmentId === null ? '--' : String(currentSegmentId)} color="#cbd5e1" />
+            <InfoRow label="GRADE" value={`${(gradeRatio * 10000).toFixed(1)}/10000`} color="#c084fc" />
           </div>
 
           <div className="flex flex-col" style={{ gap: 6 }}>
@@ -480,19 +487,36 @@ function SpeedCurveChart({
   history,
   currentSpeedMps,
   currentPositionM,
+  pathTotalLengthM,
+  profileSource,
   startStation,
   endStation,
 }: {
-  profile: Array<{ positionM: number; speedMps: number }>;
-  history: Array<{ positionM: number; speedMps: number }>;
+  profile: Array<{ positionM: number; speedMps: number; localSpeedLimitMps?: number }>;
+  history: Array<{ positionM: number; speedMps: number; targetSpeedMps?: number; localSpeedLimitMps?: number }>;
   currentSpeedMps: number;
   currentPositionM: number;
+  pathTotalLengthM: number;
+  profileSource: string;
   startStation: string;
   endStation: string;
 }) {
   const W = 320; const H = 90; const PAD = { t: 8, r: 12, b: 22, l: 32 };
   const iw = W - PAD.l - PAD.r; const ih = H - PAD.t - PAD.b;
-  const maxSpeed = 25; // m/s (~90 km/h)
+  const limitSeries = profile.some(p => p.localSpeedLimitMps !== undefined)
+    ? profile
+        .filter(p => p.localSpeedLimitMps !== undefined)
+        .map(p => ({ positionM: p.positionM, speedMps: p.localSpeedLimitMps ?? 0 }))
+    : history
+        .filter(p => p.localSpeedLimitMps !== undefined)
+        .map(p => ({ positionM: p.positionM, speedMps: p.localSpeedLimitMps ?? 0 }));
+  const allSpeeds = [
+    ...profile.map(p => p.speedMps),
+    ...history.map(p => p.speedMps),
+    ...limitSeries.map(p => p.speedMps),
+    currentSpeedMps,
+  ];
+  const maxSpeed = Math.max(25, Math.ceil(Math.max(...allSpeeds, 0) * 1.1));
 
   const toX = (pos: number, minPos: number, maxPos: number) =>
     PAD.l + ((pos - minPos) / (maxPos - minPos || 1)) * iw;
@@ -500,8 +524,10 @@ function SpeedCurveChart({
 
   // 计算 X 轴范围
   const allPositions = [...profile.map(p => p.positionM), ...history.map(p => p.positionM)];
-  const minPos = allPositions.length ? Math.min(...allPositions) : 0;
-  const maxPos = allPositions.length ? Math.max(...allPositions) : 1500;
+  const profileEndM = profile.length > 0 ? profile[profile.length - 1].positionM : 0;
+  const stableEndM = Math.max(pathTotalLengthM, profileEndM, 1);
+  const minPos = 0;
+  const maxPos = stableEndM > 1 ? stableEndM : (allPositions.length ? Math.max(...allPositions, 1500) : 1500);
 
   const profilePath = profile.length > 1
     ? `M${toX(profile[0].positionM, minPos, maxPos)},${toY(profile[0].speedMps)}` +
@@ -511,6 +537,13 @@ function SpeedCurveChart({
     ? `M${toX(history[0].positionM, minPos, maxPos)},${toY(history[0].speedMps)}` +
       history.slice(1).map(p => `L${toX(p.positionM, minPos, maxPos)},${toY(p.speedMps)}`).join('')
     : '';
+  const limitPath = limitSeries.length > 1
+    ? `M${toX(limitSeries[0].positionM, minPos, maxPos)},${toY(limitSeries[0].speedMps)}` +
+      limitSeries.slice(1).map(p => `L${toX(p.positionM, minPos, maxPos)},${toY(p.speedMps)}`).join('')
+    : '';
+  const planLabel = profileSource === 'DCDP_STRICT'
+    ? 'DCDP'
+    : 'PLAN';
 
   return (
     <div className="select-none" style={{ position: 'relative' }}>
@@ -519,11 +552,15 @@ function SpeedCurveChart({
         <div className="flex items-center gap-2" style={{ fontSize: 7 }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
             <span style={{ width: 8, height: 1, background: '#3b82f6', display: 'inline-block', borderRadius: 1 }} />
-            <span className="text-[#64748b]">PLAN</span>
+            <span className="text-[#64748b]">{planLabel}</span>
           </span>
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
             <span style={{ width: 8, height: 1, background: '#22c55e', display: 'inline-block', borderRadius: 1 }} />
             <span className="text-[#64748b]">ACT</span>
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+            <span style={{ width: 8, height: 1, background: '#f59e0b', display: 'inline-block', borderRadius: 1 }} />
+            <span className="text-[#64748b]">LIMIT</span>
           </span>
         </div>
       </div>
@@ -540,6 +577,8 @@ function SpeedCurveChart({
         {/* X轴标签 — 站名 */}
         <text x={PAD.l} y={H - 3} textAnchor="start" fill="#94a3b8" fontSize={6.5} fontFamily="monospace" fontWeight={600}>{startStation}</text>
         <text x={W - PAD.r} y={H - 3} textAnchor="end" fill="#94a3b8" fontSize={6.5} fontFamily="monospace" fontWeight={600}>{endStation}</text>
+        {/* 局部限速线 */}
+        {limitPath && <path d={limitPath} fill="none" stroke="#f59e0b" strokeWidth={1} opacity={0.45} />}
         {/* 规划曲线 */}
         {profilePath && <path d={profilePath} fill="none" stroke="#3b82f6" strokeWidth={1.2} strokeDasharray="3,2" opacity={0.7} />}
         {/* 实际曲线 */}

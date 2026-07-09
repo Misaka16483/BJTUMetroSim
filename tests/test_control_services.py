@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 
 from app.domain.control import (
@@ -14,7 +15,9 @@ from app.domain.control import (
     run_ato_stop_demo,
     stopping_target_speed_mps,
 )
+from app.domain.line.services import PathPlanner
 from app.domain.vehicle import CommandSource, ControlCommand, SimpleVehicleModel, TrainState
+from tests.test_phase0 import tiny_line_map
 
 
 class ATOControllerTests(unittest.TestCase):
@@ -110,6 +113,26 @@ class ATOControllerTests(unittest.TestCase):
         self.assertEqual(profile.points[-1].speed_mps, 0.0)
         self.assertLess(profile.speed_at_position_mps(5.0), 12.0)
         self.assertLessEqual(max(point.speed_mps for point in profile.points), 12.0)
+
+    def test_dynamic_programming_profile_respects_path_plan_limits(self) -> None:
+        path_plan = PathPlanner(tiny_line_map()).plan_between_platforms(20, 21, direction="forward")
+        profile = optimize_speed_profile_dcdp(
+            target_position_m=path_plan.total_length_m,
+            permitted_speed_mps=12.0,
+            scheduled_run_time_s=35.0,
+            dt_s=1.0,
+            position_step_m=2.0,
+            speed_step_mps=0.5,
+            terminal_tolerance_m=1.0,
+            max_states_per_stage=800,
+            path_plan=path_plan,
+        )
+
+        self.assertTrue(math.isfinite(profile.terminal_score))
+        self.assertEqual(profile.target_position_m, path_plan.total_length_m)
+        for point in profile.points:
+            allowed_speed_mps = path_plan.speed_limit_at(point.position_m, 12.0)
+            self.assertLessEqual(point.speed_mps, allowed_speed_mps + 1e-6)
 
     def test_ato_dynamic_profile_does_not_start_at_full_speed(self) -> None:
         controller = ATOController(AtoConfig(expected_deceleration_mps2=0.6))

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.domain.control.models import AtoConfig, AtoTarget
 from app.domain.control.services import ATOController
 from app.domain.vehicle.models import CommandSource, ControlCommand, TrainState, VehicleConfig
 from app.domain.vehicle.services import SimpleVehicleModel
+
+if TYPE_CHECKING:
+    from app.domain.line.services import PathPlan
 
 
 JsonDict = dict[str, Any]
@@ -60,7 +63,10 @@ def run_ato_stop_demo(
     expected_deceleration_mps2: float = 0.6,
     stop_tolerance_m: float = 1.0,
     train_id: str = "T001",
+    path_plan: PathPlan | None = None,
 ) -> StopDemoResult:
+    if path_plan is not None:
+        target_position_m = path_plan.total_length_m
     if target_position_m <= 0:
         raise ValueError("target_position_m must be positive")
     if permitted_speed_mps <= 0:
@@ -84,7 +90,7 @@ def run_ato_stop_demo(
         acceleration_mps2=0.0,
         sim_time_s=0.0,
     )
-    target = AtoTarget(target_position_m=target_position_m, permitted_speed_mps=permitted_speed_mps)
+    target = AtoTarget(target_position_m=target_position_m, permitted_speed_mps=permitted_speed_mps, path_plan=path_plan)
     history: list[JsonDict] = []
     command_switches = 0
     last_mode: str | None = None
@@ -97,13 +103,22 @@ def run_ato_stop_demo(
             command_switches += 1
         last_mode = mode
 
-        state = vehicle.step(state, command, dt_s=dt_s)
+        grade_ratio = path_plan.grade_ratio_at(state.position_m) if path_plan is not None else 0.0
+        gradient_force_n = vehicle.config.mass_kg * 9.80665 * grade_ratio
+        state = vehicle.step(state, command, dt_s=dt_s, gradient_force_n=gradient_force_n)
         history.append(
             {
                 "simTimeS": round(state.sim_time_s, 3),
                 "positionM": round(state.position_m, 3),
                 "speedMps": round(state.speed_mps, 3),
                 "accelerationMps2": round(state.acceleration_mps2, 3),
+                "localSpeedLimitMps": round(
+                    path_plan.speed_limit_at(state.position_m, permitted_speed_mps)
+                    if path_plan is not None
+                    else permitted_speed_mps,
+                    3,
+                ),
+                "gradeRatio": round(path_plan.grade_ratio_at(state.position_m), 7) if path_plan is not None else 0.0,
                 "targetSpeedMps": round(controller.last_target_speed_mps, 3),
                 "targetProfileMode": controller.last_profile_mode,
                 "speedErrorMps": round(controller.last_speed_error_mps, 3),

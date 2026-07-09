@@ -13,9 +13,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.domain.control import run_ato_stop_demo  # noqa: E402
+from app.domain.line.services import LineMapRepository, PathPlan, PathPlanner  # noqa: E402
 
 
 DEFAULT_OUTPUT = ROOT / "outputs" / "ato_speed_curve.html"
+DEFAULT_LINE_MAP = ROOT / "data" / "cache" / "line_map.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,10 +25,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-position", type=float, default=200.0, help="ATO stopping target position in meters.")
     parser.add_argument("--permitted-speed", type=float, default=12.0, help="Permitted speed in m/s.")
     parser.add_argument("--dt", type=float, default=1.0, help="Simulation step in seconds.")
-    parser.add_argument("--max-ticks", type=int, default=120, help="Maximum simulation ticks.")
+    parser.add_argument("--max-ticks", type=int, default=240, help="Maximum simulation ticks.")
     parser.add_argument("--expected-deceleration", type=float, default=0.6, help="Expected deceleration in m/s^2.")
     parser.add_argument("--stop-tolerance", type=float, default=1.0, help="Allowed stop error in meters.")
     parser.add_argument("--train-id", default="T001", help="Train id used in the report.")
+    parser.add_argument("--from-platform", type=int, help="Origin platform id for line-map path planning.")
+    parser.add_argument("--to-platform", type=int, help="Destination platform id for line-map path planning.")
+    parser.add_argument("--direction", choices=["forward", "backward"], help="Force path planning direction.")
+    parser.add_argument("--line-map", type=Path, default=DEFAULT_LINE_MAP, help="Cached line_map.json path.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output HTML file.")
     return parser.parse_args()
 
@@ -36,26 +42,63 @@ def build_report(payload: dict[str, Any]) -> str:
     return HTML_TEMPLATE.replace("__REPORT_DATA__", data_json)
 
 
+def build_path_plan(args: argparse.Namespace) -> PathPlan | None:
+    if args.from_platform is None and args.to_platform is None:
+        return None
+    if args.from_platform is None or args.to_platform is None:
+        raise ValueError("--from-platform and --to-platform must be used together")
+    line_map_path = args.line_map if args.line_map.is_absolute() else ROOT / args.line_map
+    line_map = LineMapRepository(line_map_path).load()
+    return PathPlanner(line_map).plan_between_platforms(args.from_platform, args.to_platform, args.direction)
+
+
+def path_plan_payload(path_plan: PathPlan | None) -> dict[str, Any] | None:
+    if path_plan is None:
+        return None
+    return {
+        "originPlatformId": path_plan.origin_platform_id,
+        "destinationPlatformId": path_plan.destination_platform_id,
+        "direction": path_plan.direction,
+        "totalLengthM": path_plan.total_length_m,
+        "segmentIds": list(path_plan.segment_ids),
+        "constraints": [
+            {
+                "segmentId": item.segment_id,
+                "pathStartM": item.path_start_m,
+                "pathEndM": item.path_end_m,
+                "speedLimitMps": item.speed_limit_mps,
+                "gradeRatio": item.grade_ratio,
+                "gradientRaw": item.gradient_raw,
+            }
+            for item in path_plan.constraints
+        ],
+    }
+
+
 def main() -> None:
     args = parse_args()
+    path_plan = build_path_plan(args)
+    target_position_m = path_plan.total_length_m if path_plan is not None else args.target_position
     result = run_ato_stop_demo(
-        target_position_m=args.target_position,
+        target_position_m=target_position_m,
         permitted_speed_mps=args.permitted_speed,
         dt_s=args.dt,
         max_ticks=args.max_ticks,
         expected_deceleration_mps2=args.expected_deceleration,
         stop_tolerance_m=args.stop_tolerance,
         train_id=args.train_id,
+        path_plan=path_plan,
     )
     payload = result.to_dict(include_history=True)
     payload["scenario"] = {
-        "targetPositionM": args.target_position,
+        "targetPositionM": target_position_m,
         "permittedSpeedMps": args.permitted_speed,
         "dtS": args.dt,
         "maxTicks": args.max_ticks,
         "expectedDecelerationMps2": args.expected_deceleration,
         "stopToleranceM": args.stop_tolerance,
         "trainId": args.train_id,
+        "pathPlan": path_plan_payload(path_plan),
     }
     payload["generatedAt"] = datetime.now().isoformat(timespec="seconds")
 
@@ -81,6 +124,7 @@ HTML_TEMPLATE = """<!doctype html>
       --axis: #505a55;
       --target: #087f7b;
       --actual: #c2512a;
+      --limit: #56616b;
       --traction: #2f8c57;
       --brake: #c56a20;
       --pid: #6b5fb5;
@@ -244,6 +288,10 @@ HTML_TEMPLATE = """<!doctype html>
       background: var(--actual);
     }
 
+    .swatch.limit {
+      background: var(--limit);
+    }
+
     .swatch.traction {
       background: var(--traction);
     }
@@ -314,6 +362,15 @@ HTML_TEMPLATE = """<!doctype html>
       fill: none;
       stroke: var(--actual);
       stroke-width: 3;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+
+    .limit-path {
+      fill: none;
+      stroke: var(--limit);
+      stroke-width: 2;
+      stroke-dasharray: 9 7;
       stroke-linejoin: round;
       stroke-linecap: round;
     }
@@ -534,6 +591,7 @@ HTML_TEMPLATE = """<!doctype html>
         <div class="legend">
           <span class="legend-item"><span class="swatch target"></span>生成目标速度</span>
           <span class="legend-item"><span class="swatch actual"></span>ATO 实际速度</span>
+          <span class="legend-item"><span class="swatch limit"></span>分段限速</span>
           <span class="legend-item"><span class="swatch traction"></span>牵引百分比</span>
           <span class="legend-item"><span class="swatch brake"></span>制动百分比</span>
         </div>
@@ -560,6 +618,8 @@ HTML_TEMPLATE = """<!doctype html>
           <h2>当前采样点</h2>
           <div class="row"><span>时间</span><span id="curTime"></span></div>
           <div class="row"><span>位置</span><span id="curPos"></span></div>
+          <div class="row"><span>局部限速</span><span id="curLimit"></span></div>
+          <div class="row"><span>坡度</span><span id="curGrade"></span></div>
           <div class="row"><span>目标速度</span><span id="curTarget"></span></div>
           <div class="row"><span>实际速度</span><span id="curActual"></span></div>
           <div class="row"><span>速度误差</span><span id="curError"></span></div>
@@ -589,14 +649,18 @@ HTML_TEMPLATE = """<!doctype html>
     const maxTime = Math.max(1, ...history.map((d) => d.simTimeS || 0));
     const maxPosition = Math.max(scenario.targetPositionM || report.target_position_m || 1, ...history.map((d) => d.positionM || 0));
     const permittedSpeed = scenario.permittedSpeedMps || 0;
-    const maxSpeed = Math.max(1, permittedSpeed, ...history.flatMap((d) => [d.speedMps || 0, d.targetSpeedMps || 0])) * 1.12;
+    const maxSpeed = Math.max(1, permittedSpeed, ...history.flatMap((d) => [d.speedMps || 0, d.targetSpeedMps || 0, d.localSpeedLimitMps || 0])) * 1.12;
     const maxCommand = 100;
 
+    const pathPlan = scenario.pathPlan || null;
+    const pathText = pathPlan
+      ? ` · 站台 ${pathPlan.originPlatformId} → ${pathPlan.destinationPlatformId} · ${pathPlan.segmentIds.length} 个 seg`
+      : "";
     document.getElementById("subtitle").textContent =
-      `${report.train_id || scenario.trainId || "T001"} · 目标 ${fmt.format(report.target_position_m ?? scenario.targetPositionM ?? 0)} m · 许可速度 ${fmt.format(permittedSpeed)} m/s · 生成 ${history.length} 个采样点`;
+      `${report.train_id || scenario.trainId || "T001"} · 目标 ${fmt.format(report.target_position_m ?? scenario.targetPositionM ?? 0)} m · 许可速度 ${fmt.format(permittedSpeed)} m/s${pathText} · 生成 ${history.length} 个采样点`;
     document.getElementById("statusText").textContent = report.status || "UNKNOWN";
     document.getElementById("note").textContent =
-      `页面数据来自当前 Python ATO 仿真历史。目标速度是速度曲线生成器输出，实际速度是车辆动力学模型在 ATO 百分比牵引/制动命令下的响应。生成时间：${report.generatedAt || ""}`;
+      `页面数据来自当前 Python ATO 仿真历史。目标速度是速度曲线生成器输出，实际速度是车辆动力学模型在 ATO 百分比牵引/制动命令下的响应。${pathPlan ? "分段限速与坡度来自 PathPlan。" : ""}生成时间：${report.generatedAt || ""}`;
 
     const scrubber = document.getElementById("scrubber");
     scrubber.max = Math.max(0, history.length - 1);
@@ -718,6 +782,12 @@ HTML_TEMPLATE = """<!doctype html>
         y2: permittedY,
         class: "permitted-line"
       }));
+      if (history.some((d) => d.localSpeedLimitMps !== undefined)) {
+        svg.appendChild(make("path", {
+          d: pathFor(history, (d) => xScale(getXValue(d), xMax, box), (d) => ySpeed(d.localSpeedLimitMps || permittedSpeed || 0, box)),
+          class: "limit-path"
+        }));
+      }
       svg.appendChild(make("path", {
         d: pathFor(history, (d) => xScale(getXValue(d), xMax, box), (d) => ySpeed(d.targetSpeedMps || 0, box)),
         class: "target-path"
@@ -812,6 +882,8 @@ HTML_TEMPLATE = """<!doctype html>
       setText("timeReadout", `t = ${fmt.format(d.simTimeS || 0)} s`);
       setText("curTime", `${fmt.format(d.simTimeS || 0)} s`);
       setText("curPos", `${fmt.format(d.positionM || 0)} m`);
+      setText("curLimit", `${fmt.format(d.localSpeedLimitMps ?? permittedSpeed)} m/s`);
+      setText("curGrade", `${fmt.format((d.gradeRatio || 0) * 10000)} /10000`);
       setText("curTarget", `${fmt.format(d.targetSpeedMps || 0)} m/s`);
       setText("curActual", `${fmt.format(d.speedMps || 0)} m/s`);
       setText("curError", `${fmt.format(d.speedErrorMps || 0)} m/s`);
