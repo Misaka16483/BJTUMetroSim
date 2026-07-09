@@ -31,7 +31,7 @@ export default function App() {
   const engineClockState = useSimStore((s) => s.engineClockState);
   const selectedStationCode = useSimStore((s) => s.selectedStationCode);
   const [collapsed, setCollapsed] = useState(false);
-  const interlockingData = getInterlockingData(selectedStationCode ?? 'BWR');
+  const interlockingData = getInterlockingData(selectedStationCode ?? 'BWR')!;
   const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : 2;
 
   function loadAmapData(_reason: string) {
