@@ -10,6 +10,9 @@ from app.core.clock import SimulationClock
 from app.core.message_bus import MessageBus
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
+from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
+from app.domain.operations.phase1_member_d_demo import Phase1MemberDDemoRunner
+from app.domain.operations.phase2_member_d_full_demo import Phase2MemberDFullDemoRunner
 from app.domain.signal.models import ControlCommand, TrainState
 from app.domain.signal.services import SafetyGuard, TrainControlService, collect_safety_events
 from app.infra.excel_importer import LineDataImporter, validate_line_map
@@ -124,6 +127,21 @@ def bus_demo(args: argparse.Namespace) -> None:
 
 def member_d_demo(args: argparse.Namespace) -> None:
     runner = Phase2MemberDDemoRunner(Path(args.output_dir) / "phase2_member_d_demo.sqlite")
+    _print_json(runner.run())
+
+
+def phase0_member_d_demo(args: argparse.Namespace) -> None:
+    runner = Phase0MemberDDemoRunner(Path(args.output_dir) / "phase0_member_d_demo.sqlite")
+    _print_json(runner.run())
+
+
+def phase1_member_d_demo(args: argparse.Namespace) -> None:
+    runner = Phase1MemberDDemoRunner(Path(args.output_dir) / "phase1_member_d_demo.sqlite")
+    _print_json(runner.run())
+
+
+def phase2_member_d_full_demo(args: argparse.Namespace) -> None:
+    runner = Phase2MemberDFullDemoRunner(Path(args.output_dir) / "phase2_member_d_full_demo.sqlite")
     _print_json(runner.run())
 
 
@@ -293,6 +311,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     member_d_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
     member_d_parser.set_defaults(func=member_d_demo)
+
+    phase0_member_d_parser = subparsers.add_parser(
+        "phase0-member-d-demo",
+        help="Phase 0: output default station/power states and metric structure for member D",
+    )
+    phase0_member_d_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
+    phase0_member_d_parser.set_defaults(func=phase0_member_d_demo)
+
+    phase1_member_d_parser = subparsers.add_parser(
+        "phase1-member-d-demo",
+        help="Phase 1: energy estimation and station stop judgment for member D",
+    )
+    phase1_member_d_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
+    phase1_member_d_parser.set_defaults(func=phase1_member_d_demo)
+
+    phase2_full_parser = subparsers.add_parser(
+        "phase2-member-d-full-demo",
+        help="Phase 2: passenger-dispatch-power demo across all 13 stations on Line 9",
+    )
+    phase2_full_parser.add_argument("--output-dir", default="outputs/runs", help="Recorder output directory")
+    phase2_full_parser.set_defaults(func=phase2_member_d_full_demo)
 
     signal_parser = subparsers.add_parser(
         "signal-demo",

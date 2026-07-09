@@ -13,6 +13,9 @@ from urllib.parse import urlparse
 
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
+from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
+from app.domain.operations.phase1_member_d_demo import Phase1MemberDDemoRunner
+from app.domain.operations.phase2_member_d_full_demo import Phase2MemberDFullDemoRunner
 
 
 JsonDict = dict[str, Any]
@@ -255,6 +258,18 @@ class Line9DataService:
             "summary": summary,
         }
 
+    def member_d_phase0_demo(self) -> JsonDict:
+        db_path = self.run_dir / "phase0_member_d_demo.sqlite"
+        return Phase0MemberDDemoRunner(db_path).run()
+
+    def member_d_phase1_demo(self) -> JsonDict:
+        db_path = self.run_dir / "phase1_member_d_demo.sqlite"
+        return Phase1MemberDDemoRunner(db_path).run()
+
+    def member_d_phase2_full_demo(self) -> JsonDict:
+        db_path = self.run_dir / "phase2_member_d_full_demo.sqlite"
+        return Phase2MemberDFullDemoRunner(db_path).run()
+
     def _load_station_catalog(self) -> list[JsonDict]:
         with self.stations_path.open("r", encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
@@ -304,8 +319,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.track_map())
             elif path == "/api/sim/state":
                 self._send_json(self.service.sim_state())
+            elif path == "/api/phase0/member-d/demo":
+                self._send_json(self.service.member_d_phase0_demo())
+            elif path == "/api/phase1/member-d/demo":
+                self._send_json(self.service.member_d_phase1_demo())
             elif path == "/api/phase2/member-d/demo":
                 self._send_json(self.service.member_d_demo())
+            elif path == "/api/phase2/member-d/full-demo":
+                self._send_json(self.service.member_d_phase2_full_demo())
             elif match := re.fullmatch(r"/api/track/segments/(\d+)/context", path):
                 self._send_json(self.service.segment_context(int(match.group(1))))
             else:
