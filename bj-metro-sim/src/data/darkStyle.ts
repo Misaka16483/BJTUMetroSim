@@ -1,6 +1,6 @@
-// 高德北京底图 + 地铁线路叠加
+// 灰白中性底图降级方案（当 MapTiler 不可用时）
 const darkStyle = {
-  version: 8 as const,
+  version: 8,
   name: 'BJTUMetroSim',
   glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
   sources: {
@@ -21,10 +21,10 @@ const darkStyle = {
       type: 'raster',
       source: 'amap',
       paint: {
-        'raster-opacity': 0.55,
-        'raster-saturation': -0.5,
-        'raster-brightness-min': 0.1,
-        'raster-brightness-max': 0.5,
+        'raster-opacity': 0.45,
+        'raster-saturation': -1,
+        'raster-brightness-min': 0.15,
+        'raster-brightness-max': 0.45,
       },
     },
   ],

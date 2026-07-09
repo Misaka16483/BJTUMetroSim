@@ -16,7 +16,7 @@ const styleConfig: string | maplibregl.StyleSpecification = hasMapTilerKey
 // ── 模块级：防重复注册 & 弹窗引用 ──
 const registeredClickLayers = new Set<string>();
 let popupRef: maplibregl.Popup | null = null;
-let trainMarkerRef: maplibregl.Marker | null = null;
+const lineMarkers: Map<string, maplibregl.Marker> = new Map();
 
 export default function MetroMap() {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -27,8 +27,7 @@ export default function MetroMap() {
   const hiddenLines = useSimStore((s) => s.hiddenLines);
   const linesLoading = useSimStore((s) => s.linesLoading);
   const linesError = useSimStore((s) => s.linesError);
-  const trainLat = useSimStore((s) => s.trainLat);
-  const trainLng = useSimStore((s) => s.trainLng);
+  const trainPositions = useSimStore((s) => s.trainPositions);
   const isRunning = useSimStore((s) => s.isRunning);
 
   // ── 初始化地图 ──
@@ -258,36 +257,56 @@ export default function MetroMap() {
     return set;
   }, [metroLines, hiddenLines]);
 
-  // ── 列车位置标记 ──
+  // ── 多线路列车位置标记（实时更新） ──
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoaded.current) return;
 
-    // 清除旧标记
-    if (trainMarkerRef) {
-      trainMarkerRef.remove();
-      trainMarkerRef = null;
+    // 引擎停止 → 移除所有标记
+    if (!isRunning) {
+      lineMarkers.forEach((m) => m.remove());
+      lineMarkers.clear();
+      return;
     }
 
-    if (!isRunning || trainLat == null || trainLng == null) return;
+    const activeLines = new Set(Object.keys(trainPositions));
 
-    const el = document.createElement('div');
-    el.className = 'train-marker';
-    el.innerHTML = `
-      <div style="
-        width: 18px; height: 18px;
-        background: var(--l9, #8FC31F);
-        border-radius: 50% 50% 50% 0;
-        transform: rotate(-45deg);
-        box-shadow: 0 0 12px rgba(168,214,74,0.5), 0 0 24px rgba(168,214,74,0.2);
-        border: 2px solid rgba(255,255,255,0.5);
-      "></div>
-    `;
+    // 移除已消失线路的标记
+    lineMarkers.forEach((m, lineId) => {
+      if (!activeLines.has(lineId)) { m.remove(); lineMarkers.delete(lineId); }
+    });
 
-    trainMarkerRef = new maplibregl.Marker({ element: el, anchor: 'bottom' })
-      .setLngLat([trainLng, trainLat])
-      .addTo(map);
-  }, [trainLat, trainLng, isRunning]);
+    // 创建 / 更新各路线的标记
+    Object.entries(trainPositions).forEach(([lineId, pos]) => {
+      const lngLat: [number, number] = [pos.lng, pos.lat];
+      const existing = lineMarkers.get(lineId);
+      if (existing) {
+        existing.setLngLat(lngLat);
+        return;
+      }
+
+      const line = metroLines.find((l) => l.id === lineId);
+      const lineColor = line?.color || '#8FC31F';
+
+      const el = document.createElement('div');
+      el.className = 'train-marker';
+      el.innerHTML = `
+        <div style="
+          width: 18px; height: 18px;
+          background: ${lineColor};
+          border-radius: 50% 50% 50% 0;
+          transform: rotate(-45deg);
+          box-shadow: 0 0 12px ${lineColor}80, 0 0 24px ${lineColor}33;
+          border: 2px solid rgba(255,255,255,0.5);
+        "></div>
+      `;
+
+      const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+        .setLngLat(lngLat)
+        .addTo(map);
+      lineMarkers.set(lineId, marker);
+    });
+  }, [trainPositions, isRunning, metroLines]);
 
   return (
     <div className="relative w-full h-full">

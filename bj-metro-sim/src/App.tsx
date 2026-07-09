@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import MetroMap from './components/MetroMap';
-import LinesPanel from './components/LinesPanel';
-import ControlPanel from './components/ControlPanel';
 import KPIPanel from './components/KPIPanel';
-import SignalScreenPanel from './components/SignalScreenPanel';
+import LinesPanel from './components/LinesPanel';
+import DriverConsole from './components/DriverConsole';
 import MicroTrackView from './components/MicroTrackView';
 import StationInterlockingView from './components/StationInterlockingView';
 import { getInterlockingData } from './data/stationInterlockingData';
@@ -32,78 +31,64 @@ export default function App() {
   const selectedStationCode = useSimStore((s) => s.selectedStationCode);
   const [collapsed, setCollapsed] = useState(false);
   const interlockingData = getInterlockingData(selectedStationCode ?? 'BWR');
-  const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : 2;
+  const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : viewMode === 'interlocking' ? 2 : 3;
 
-  function loadAmapData(_reason: string) {
-    if (globalFetching) return;
-    globalFetching = true;
-    setLinesLoading(true);
-
-    // 1) 后端不可用时，优先加载仓库内置静态 JSON
-    fetch('/beijing_metro_lines.json')
-      .then((resp) => {
-        if (!resp.ok) throw new Error('no static file');
-        return resp.json();
-      })
-      .then((lines) => {
-        setMetroLines(lines);
-        setLinesError(null);
-        setLinesLoading(false);
-        globalFetching = false;
-      })
-      .catch(() => {
-        const cached = getCachedAmapData();
-        if (cached && cached.length > 0) {
-          setMetroLines(cached);
-          setLinesError(null);
-          setLinesLoading(false);
-          globalFetching = false;
-          return;
-        }
-        const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
-        if (!amapKey || amapKey === 'your_amap_key_here') {
-          setLinesError('请配置 VITE_AMAP_KEY');
-          setLinesLoading(false);
-          globalFetching = false;
-          return;
-        }
-        fetchAmapBeijingMetro(amapKey)
-          .then((lines) => { cacheAmapData(lines); setMetroLines(lines); setLinesError(null); })
-          .catch((err) => {
-            const fallback = getPartialAmapCache();
-            if (fallback?.length) {
-              setMetroLines(fallback);
-              setLinesError(`API受限, ${fallback.length} 条线路`);
-            } else {
-              setLinesError(err instanceof Error ? err.message : '未知错误');
-            }
-          })
-          .finally(() => { setLinesLoading(false); globalFetching = false; });
-      });
-  }
-
-  // 首次加载: 优先后端 → 失败则 AMAP 兜底
+  // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
     if (globalFetching) return;
     globalFetching = true;
     setLinesLoading(true);
-    fetchBackendBundle()
-      .then(({ line, trackMap: nextTrackMap }) => {
-        setMetroLines([line]);
-        setTrackMap(nextTrackMap);
-        setLinesError(null);
-        setBackendStatus('connected');
-        setLinesLoading(false);
-        globalFetching = false;
-      })
-      .catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn('[App] 后端不可用, AMAP 兜底:', msg);
-        setBackendStatus('fallback');
-        setLinesLoading(false);
-        globalFetching = false;
-        loadAmapData(`后端不可用: ${msg}`);
-      });
+
+    // Step 1 — 始终加载全量路网（保证全览模式有完整地铁图）
+    const loadFullNetwork = (): Promise<void> =>
+      fetch('/beijing_metro_lines.json')
+        .then((resp) => {
+          if (!resp.ok) throw new Error('no static file');
+          return resp.json();
+        })
+        .then((lines: MetroLineData[]) => {
+          setMetroLines(lines);
+          setLinesError(null);
+          setLinesLoading(false);
+        })
+        .catch(() => {
+          const cached = getCachedAmapData();
+          if (cached && cached.length > 0) {
+            setMetroLines(cached);
+            setLinesError(null);
+            setLinesLoading(false);
+            return;
+          }
+          const amapKey = import.meta.env.VITE_AMAP_KEY as string | undefined;
+          if (!amapKey || amapKey === 'your_amap_key_here') {
+            setLinesError('请配置 VITE_AMAP_KEY');
+            setLinesLoading(false);
+            return;
+          }
+          return fetchAmapBeijingMetro(amapKey)
+            .then((lines) => { cacheAmapData(lines); setMetroLines(lines); setLinesError(null); })
+            .catch((err) => {
+              const fallback = getPartialAmapCache();
+              if (fallback?.length) { setMetroLines(fallback); setLinesError(`API受限, ${fallback.length} 条线路`); }
+              else setLinesError(err instanceof Error ? err.message : '未知错误');
+            })
+            .finally(() => { setLinesLoading(false); });
+        });
+
+    // Step 2 — 并行尝试后端（获取 9号线 trackMap, 仿真引擎等富数据）
+    loadFullNetwork().finally(() => {
+      fetchBackendBundle()
+        .then(({ line: _line9, trackMap: nextTrackMap }) => {
+          setTrackMap(nextTrackMap);
+          setBackendStatus('connected');
+        })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn('[App] 后端不可用:', msg);
+          setBackendStatus('fallback');
+        })
+        .finally(() => { globalFetching = false; });
+    });
   }, []);
 
   // 只默认显示9号线
@@ -169,14 +154,16 @@ export default function App() {
             <div
               className="absolute top-0 rounded-full"
               style={{
-                left: `${modeIndex * 33.333}%`,
-                width: '33.333%',
+                left: `${modeIndex * 25}%`,
+                width: '25%',
                 bottom: 0,
                 background: viewMode === 'macro'
                   ? 'rgba(74,158,255,0.35)'
                   : viewMode === 'micro'
                     ? 'rgba(143,195,31,0.38)'
-                    : 'rgba(255,69,58,0.32)',
+                    : viewMode === 'interlocking'
+                      ? 'rgba(255,69,58,0.32)'
+                      : 'rgba(168,214,74,0.38)',
                 transition: 'left 280ms cubic-bezier(0.33, 1, 0.68, 1), background 280ms ease',
               }}
             />
@@ -213,6 +200,17 @@ export default function App() {
             >
               联锁
             </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('driver')}
+              className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
+              style={{
+                color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)',
+                transition: 'color 250ms ease',
+              }}
+            >
+              驾驶
+            </button>
           </div>
         </div>
 
@@ -239,69 +237,81 @@ export default function App() {
         </div>
       </header>
 
-      {/* ═══════════════ control ═══════════════ */}
-      <ControlPanel />
-
       {/* ═══════════════ body ═══════════════ */}
       <div className="flex-1 flex min-h-0 relative" style={{ gap: 8 }}>
-        {/* map */}
+        {/* map — 始终挂载（用 opacity 隐藏，避免地图实例销毁后 marker 丢失） */}
         <div className="flex-1 overflow-hidden relative min-w-0 map-frame">
-          {viewMode === 'macro'
-            ? <MetroMap />
-            : viewMode === 'interlocking'
-              ? <StationInterlockingView data={interlockingData} />
-              : <MicroTrackView />}
-        </div>
+          <div style={{
+            position: 'absolute', inset: 0,
+            opacity: viewMode === 'macro' ? 1 : 0,
+            pointerEvents: viewMode === 'macro' ? 'auto' : 'none',
+            transition: 'opacity 200ms ease-out',
+          }}>
+            <MetroMap />
+            <FloatingLineFilter />
+          </div>
+          <div style={{
+            position: 'absolute', inset: 0,
+            opacity: viewMode !== 'macro' ? 1 : 0,
+            pointerEvents: viewMode !== 'macro' ? 'auto' : 'none',
+            transition: 'opacity 200ms ease-out',
+          }}>
+            {viewMode === 'driver'
+              ? <DriverConsole fullPage />
+              : viewMode === 'interlocking'
+                ? <StationInterlockingView data={interlockingData} />
+                : viewMode === 'micro'
+                  ? <MicroTrackView />
+                  : null}
+          </div>
 
-        {/* collapse toggle — only in macro */}
-        {viewMode === 'macro' && (
-        <button
-          onClick={() => setCollapsed((v) => !v)}
-          className="absolute top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center z-20 cursor-pointer rounded-full"
-          style={{
-            right: collapsed ? 4 : `${PANEL_W + 4}px`,
-            background: 'var(--glass)',
-            backdropFilter: 'blur(28px)',
-            border: '1px solid rgba(255,255,255,0.06)',
-            color: 'var(--text-muted)',
-            transition: 'right 320ms cubic-bezier(0.33, 1, 0.68, 1)',
-          }}
-          title={collapsed ? '展开' : '收起'}
-        >
-          <svg width="6" height="10" viewBox="0 0 6 10" fill="none">
-            {collapsed
-              ? <path d="M5 1L1 5L5 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              : <path d="M1 1L5 5L1 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            }
-          </svg>
-        </button>
-        )}
+          {/* ─── right panel toggle ─── */}
+          {viewMode === 'macro' && (
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            className="absolute z-20 w-8 h-8 flex items-center justify-center cursor-pointer rounded-full"
+            style={{
+              top: '50%',
+              transform: 'translateY(-50%)',
+              right: collapsed ? 4 : `${PANEL_W + 4}px`,
+              background: 'var(--glass)',
+              backdropFilter: 'blur(28px)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              color: 'var(--text-muted)',
+              transition: 'right 320ms cubic-bezier(0.33, 1, 0.68, 1)',
+            }}
+            title={collapsed ? '展开面板' : '收起面板'}
+          >
+            <svg width="6" height="10" viewBox="0 0 6 10" fill="none"
+              style={{ transform: collapsed ? 'rotate(0deg)' : 'rotate(180deg)' }}>
+              <path d="M1 1L5 5L1 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+          )}
 
-        {/* right panels — only in macro */}
-        {viewMode === 'macro' && (
-        <div
-          className="shrink-0 overflow-y-auto"
-          style={{
-            width: collapsed ? '0px' : `${PANEL_W}px`,
-            transition: 'width 320ms cubic-bezier(0.33, 1, 0.68, 1)',
-          }}
-        >
-          <div className="flex flex-col" style={{ width: `${PANEL_W}px`, gap: 8 }}>
-            {/* signal screen */}
-            <div className="shrink-0">
-              <SignalScreenPanel />
-            </div>
-            {/* kpi */}
-            <div className="shrink-0" style={{ height: 240 }}>
-              <KPIPanel />
-            </div>
-            {/* lines */}
-            <div className="shrink-0" style={{ minHeight: 280 }}>
-              <LinesPanel />
+          {/* ─── right panel overlay (macro only) ─── */}
+          {viewMode === 'macro' && (
+          <div
+            className="absolute top-0 bottom-0 z-10 overflow-y-auto"
+            style={{
+              right: collapsed ? `-${PANEL_W}px` : 0,
+              width: `${PANEL_W}px`,
+              transition: 'right 320ms cubic-bezier(0.33, 1, 0.68, 1)',
+            }}
+          >
+            <div className="flex flex-col" style={{ gap: 8 }}>
+              {/* kpi */}
+              <div className="shrink-0" style={{ height: 240 }}>
+                <KPIPanel />
+              </div>
+              {/* lines */}
+              <div className="shrink-0" style={{ minHeight: 280 }}>
+                <LinesPanel />
+              </div>
             </div>
           </div>
+          )}
         </div>
-        )}
       </div>
 
       {/* ═══════════════ footer ═══════════════ */}
@@ -324,6 +334,41 @@ export default function App() {
         </div>
         <span style={{ color: 'rgba(255,255,255,0.04)' }}>v0.2.0</span>
       </footer>
+    </div>
+  );
+}
+
+/* ═══════════════ 地图浮动线路过滤 ═══════════════ */
+function FloatingLineFilter() {
+  const showAllLines = useSimStore((s) => s.showAllLines);
+  const showOnlyLines = useSimStore((s) => s.showOnlyLines);
+
+  return (
+    <div className="absolute top-3 left-3 z-10 flex items-center gap-1.5">
+      <button
+        onClick={showAllLines}
+        className="text-[10px] font-medium cursor-pointer rounded-md px-2.5 py-1.5 transition-all duration-150"
+        style={{
+          color: 'rgba(255,255,255,0.7)',
+          background: 'var(--glass)',
+          backdropFilter: 'blur(20px)',
+          border: '1px solid rgba(255,255,255,0.08)',
+        }}
+      >
+        全览
+      </button>
+      <button
+        onClick={() => showOnlyLines(['9'])}
+        className="text-[10px] font-medium cursor-pointer rounded-md px-2.5 py-1.5 transition-all duration-150"
+        style={{
+          color: 'var(--l9)',
+          background: 'rgba(168,214,74,0.08)',
+          backdropFilter: 'blur(20px)',
+          border: '1px solid rgba(168,214,74,0.16)',
+        }}
+      >
+        9号线
+      </button>
     </div>
   );
 }

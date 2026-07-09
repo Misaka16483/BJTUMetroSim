@@ -3,7 +3,7 @@ import type { MetroLineData } from '../data/amapMetroApi';
 import type { TrackMapData, SimStateResponse } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop } from '../data/backendApi';
 
-type ViewMode = 'macro' | 'micro' | 'interlocking';
+type ViewMode = 'macro' | 'micro' | 'interlocking' | 'driver';
 
 /** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {
@@ -54,9 +54,8 @@ interface SimState {
   runDirection: 'UP' | 'DOWN';
   stationIndex: number;
 
-  // 列车在地图上的位置
-  trainLat: number | null;
-  trainLng: number | null;
+  // 多线路列车在地图上的位置
+  trainPositions: Record<string, { lat: number; lng: number }>;
 
   // 当前区间进度 0~1
   segmentProgress: number;
@@ -235,8 +234,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   targetSpeedMps: 22.22,
   runDirection: 'DOWN',
   stationIndex: 0,
-  trainLat: null,
-  trainLng: null,
+  trainPositions: {},
   segmentProgress: 0,
   engineClockState: 'IDLE',
 
@@ -249,7 +247,7 @@ export const useSimStore = create<SimState>((set, get) => ({
     // 前端独立模式
     const next = !state.isRunning;
     if (!next) { tickCount = 0; simSecAccum = 7 * 3600; currentRunDirection = 'DOWN'; }
-    set({ isRunning: next, trainLat: null, trainLng: null });
+    set({ isRunning: next, trainPositions: {} });
   },
   setSpeed: (speed: number) => set({ speed }),
   setDayType: (dayType) => set({ dayType }),
@@ -381,6 +379,7 @@ export const useSimStore = create<SimState>((set, get) => ({
     const segProgress = segDist > 0 ? offsetInSegment / segDist : 0;
 
     // 列车地图位置 — 沿9号线 polyline 插值
+    const newPositions: Record<string, { lat: number; lng: number }> = {};
     let trainLat: number | null = null;
     let trainLng: number | null = null;
     const line9 = state.metroLines.find((l) => l.id === '9');
@@ -393,6 +392,7 @@ export const useSimStore = create<SimState>((set, get) => ({
       if (pos) {
         trainLat = pos[0];
         trainLng = pos[1];
+        newPositions['9'] = { lat: pos[0], lng: pos[1] };
       }
     }
 
@@ -410,8 +410,7 @@ export const useSimStore = create<SimState>((set, get) => ({
       runDirection: currentRunDirection,
       stationIndex: curStationIdx,
       segmentProgress: Math.round(segProgress * 1000) / 1000,
-      trainLat,
-      trainLng,
+      trainPositions: newPositions,
 
       // KPI
       punctuality: Math.round(kpiPunct * 10) / 10,
@@ -454,7 +453,8 @@ export const useSimStore = create<SimState>((set, get) => ({
       driveMode: t0.phase === 'DWELLING' ? 'CM' : 'AM',
     });
 
-    // 列车地图位置 — polyline 插值
+    // 列车地图位置 — polyline 插值 (支持多线路)
+    const newPositions: Record<string, { lat: number; lng: number }> = { ...state.trainPositions };
     const line9 = state.metroLines.find((l) => l.id === '9');
     if (line9 && cachedPolyline) {
       if (!cachedStationPolyIdx || cachedStationPolyIdx.length !== line9.stations.length) {
@@ -465,9 +465,10 @@ export const useSimStore = create<SimState>((set, get) => ({
         : Math.max(t0.stationIndex - 1, 0);
       const pos = interpolateOnPolyline(t0.stationIndex, nextIdx, t0.segmentProgress);
       if (pos) {
-        set({ trainLat: pos[0], trainLng: pos[1] });
+        newPositions['9'] = { lat: pos[0], lng: pos[1] };
       }
     }
+    set({ trainPositions: newPositions });
 
     // KPI
     set({
@@ -495,6 +496,6 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   stopBackendSim: async () => {
     await simStop();
-    set({ isRunning: false, engineClockState: 'STOPPED', trainLat: null, trainLng: null });
+    set({ isRunning: false, engineClockState: 'STOPPED', trainPositions: {} });
   },
 }));

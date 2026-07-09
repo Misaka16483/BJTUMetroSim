@@ -87,6 +87,11 @@ export function getInterlockingData(stationCode: string): StationInterlockingDat
   return interlockingData.get(stationCode) ?? interlockingData.get('BWR')!;
 }
 
+/** 获取所有联锁站点列表 [code, name, mileageM] */
+export function getInterlockingStations(): readonly (readonly [string, string, number])[] {
+  return stationCatalog;
+}
+
 export function listInterlockingStations(): StationInterlockingData[] {
   return [...interlockingData.values()];
 }
