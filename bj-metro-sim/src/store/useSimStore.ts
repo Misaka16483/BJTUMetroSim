@@ -1,18 +1,14 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
-<<<<<<< Updated upstream
 import type {
   SimDispatchDecision,
   SimPowerState,
   SimStateResponse,
   SimStationInfo,
   TrackMapData,
+  SpeedProfilePoint,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop } from '../data/backendApi';
-=======
-import type { TrackMapData, SimStateResponse, SpeedProfilePoint } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop, fetchSpeedProfile } from '../data/backendApi';
->>>>>>> Stashed changes
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'driver';
 

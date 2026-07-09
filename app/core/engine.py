@@ -378,33 +378,6 @@ class SimulationEngine:
             train.phase = DEPARTING
             # fall through to physics
 
-<<<<<<< Updated upstream
-        # ── 速度曲线 ──
-        brake_distance = (train.speed_mps ** 2) / (2 * self.BRAKE_MPS2)
-        remaining = train.distance_to_next_m
-        traction_limit_ratio = self._traction_limit_for_train(train)
-        effective_accel_mps2 = self.ACCEL_MPS2 * traction_limit_ratio
-        effective_cruise_mps = self.CRUISE_SPEED_MPS * max(0.55, traction_limit_ratio)
-        train.permitted_speed_mps = effective_cruise_mps
-
-        if train.phase == DEPARTING:
-            train.speed_mps += effective_accel_mps2 * dt
-            if train.speed_mps >= effective_cruise_mps:
-                train.speed_mps = effective_cruise_mps
-                train.phase = CRUISING
-        elif train.phase == CRUISING:
-            train.speed_mps = min(train.speed_mps, effective_cruise_mps)
-            if remaining <= brake_distance + 30:
-                train.phase = APPROACHING
-        elif train.phase == APPROACHING:
-            target = max(0.5, min(effective_cruise_mps, remaining / 30 * effective_cruise_mps))
-            diff = target - train.speed_mps
-            if diff < 0:
-                train.speed_mps = max(target, train.speed_mps - self.BRAKE_MPS2 * dt)
-            else:
-                train.speed_mps = min(target, train.speed_mps + effective_accel_mps2 * dt)
-            if remaining < 5 and train.speed_mps < 1.0:
-=======
         # ── 物理模型推进 ──
         try:
             cur_mileage = self._station_distances[train.station_index]
@@ -462,16 +435,13 @@ class SimulationEngine:
 
             if new_progress >= 1.0:
                 # 到站
->>>>>>> Stashed changes
                 train.speed_mps = 0
                 train.segment_progress = 0
                 train.station_index = next_idx
                 train.current_station_code = str(next_stn.get("code", ""))
                 train.current_station_name = next_stn.get("name", "")
                 train.phase = DWELLING
-<<<<<<< Updated upstream
                 train.dispatch_hold_applied_station_index = None
-=======
                 train.traction_percent = 0.0
                 train.brake_percent = 20.0
                 train.target_speed_mps = 0.0
@@ -481,7 +451,6 @@ class SimulationEngine:
                 self._profile_run_times.pop(train.train_id, None)
                 train._profile_triggered = False  # 下一站允许触发
                 self.ato.reset()  # 重置 PID 积分 + profile cache
->>>>>>> Stashed changes
 
                 new_next_idx = next_idx + 1 if train.direction == "UP" else next_idx - 1
                 if 0 <= new_next_idx < n:
@@ -510,13 +479,6 @@ class SimulationEngine:
                 else:
                     train.phase = DEPARTING
 
-<<<<<<< Updated upstream
-        # ── 推进距离 ──
-        train.speed_mps = min(train.speed_mps, effective_cruise_mps)
-        advance = train.speed_mps * dt
-        train.distance_to_next_m = max(0, remaining - advance)
-        train.segment_progress = 1 - (train.distance_to_next_m / dist) if dist > 0 else 1.0
-=======
         except Exception:
             train.traction_percent = 0.0
             train.brake_percent = 0.0
@@ -638,7 +600,6 @@ class SimulationEngine:
     def export_speed_profile(self, train_id: str) -> list[dict[str, Any]]:
         """返回指定列车的 DCDP 规划速度曲线数据."""
         return self._dcdp_curve_data.get(train_id, [])
->>>>>>> Stashed changes
 
     # ═══════════════════════════════════════════════════════════
     #  域服务调用
