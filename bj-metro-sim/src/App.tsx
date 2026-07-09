@@ -306,7 +306,7 @@ export default function App() {
           </div>
 
           {/* ─── right panel toggle ─── */}
-          {viewMode === 'macro' && (
+          {(viewMode === 'macro' || viewMode === 'fullLine') && (
           <button
             onClick={() => setCollapsed((v) => !v)}
             className="absolute z-20 w-8 h-8 flex items-center justify-center cursor-pointer rounded-full"
@@ -329,8 +329,8 @@ export default function App() {
           </button>
           )}
 
-          {/* ─── right panel overlay (macro only) ─── */}
-          {viewMode === 'macro' && (
+          {/* ─── right panel overlay (macro + fullLine) ─── */}
+          {(viewMode === 'macro' || viewMode === 'fullLine') && (
           <div
             className="absolute top-0 bottom-0 z-10 overflow-y-auto"
             style={{
