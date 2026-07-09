@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
 import type {
+  PowerNetworkState,
   SimDispatchDecision,
   SimPowerState,
   SimStateResponse,
@@ -44,9 +45,14 @@ interface SimState {
   maxPlatformDensity: number;
   totalTractionEnergyKwh: number;
   minTractionLimitRatio: number;
+  minTrainVoltageV: number;
+  totalAbsorbedRegenKw: number;
+  totalWastedRegenKw: number;
+  powerLossesKw: number;
   lastDispatchAction: string;
   simStations: SimStationInfo[];
   simPower: SimPowerState[];
+  simPowerNetwork: PowerNetworkState | null;
   dispatchDecisions: SimDispatchDecision[];
 
   // 选中的列车ID
@@ -237,9 +243,14 @@ export const useSimStore = create<SimState>((set, get) => ({
   maxPlatformDensity: 0,
   totalTractionEnergyKwh: 0,
   minTractionLimitRatio: 1,
+  minTrainVoltageV: 750,
+  totalAbsorbedRegenKw: 0,
+  totalWastedRegenKw: 0,
+  powerLossesKw: 0,
   lastDispatchAction: 'FOLLOW_TIMETABLE',
   simStations: [],
   simPower: [],
+  simPowerNetwork: null,
   dispatchDecisions: [],
   selectedTrainId: null,
   selectedStationCode: null,
@@ -444,7 +455,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   // ═══════════════════════════════════════════════════
 
   updateFromBackend: (data: SimStateResponse) => {
-    const { clock, trains, kpi, stations, power, dispatchDecisions } = data;
+    const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions } = data;
     const t0 = trains[0];
 
     const state = get();
@@ -454,11 +465,16 @@ export const useSimStore = create<SimState>((set, get) => ({
       isRunning: isEngineRunning,
       simStations: stations ?? [],
       simPower: power ?? [],
+      simPowerNetwork: powerNetwork ?? null,
       dispatchDecisions: dispatchDecisions ?? [],
       totalWaitingPax: kpi.totalWaitingPax ?? 0,
       maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
       totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
       minTractionLimitRatio: kpi.minTractionLimitRatio ?? 1,
+      minTrainVoltageV: kpi.minTrainVoltageV ?? 750,
+      totalAbsorbedRegenKw: kpi.totalAbsorbedRegenKw ?? 0,
+      totalWastedRegenKw: kpi.totalWastedRegenKw ?? 0,
+      powerLossesKw: kpi.powerLossesKw ?? 0,
       lastDispatchAction: kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
     });
 
@@ -510,6 +526,10 @@ export const useSimStore = create<SimState>((set, get) => ({
       maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
       totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
       minTractionLimitRatio: kpi.minTractionLimitRatio ?? 1,
+      minTrainVoltageV: kpi.minTrainVoltageV ?? 750,
+      totalAbsorbedRegenKw: kpi.totalAbsorbedRegenKw ?? 0,
+      totalWastedRegenKw: kpi.totalWastedRegenKw ?? 0,
+      powerLossesKw: kpi.powerLossesKw ?? 0,
       lastDispatchAction: t0.lastDispatchAction ?? kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
     });
   },

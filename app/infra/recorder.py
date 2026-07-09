@@ -124,6 +124,113 @@ class RunRecorder:
                 detail_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(run_id) REFERENCES runs(id)
             );
+            CREATE TABLE IF NOT EXISTS traction_substations (
+                substation_id TEXT PRIMARY KEY,
+                line_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                mileage_m REAL NOT NULL,
+                no_load_voltage_v REAL NOT NULL,
+                internal_resistance_ohm REAL NOT NULL,
+                rated_current_a REAL NOT NULL,
+                overload_current_a REAL NOT NULL,
+                efs_capacity_kw REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'IN_SERVICE',
+                quality TEXT NOT NULL DEFAULT 'ENGINEERING_ESTIMATE',
+                detail_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS feeder_arms (
+                feeder_id TEXT PRIMARY KEY,
+                substation_id TEXT NOT NULL,
+                line_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                side TEXT NOT NULL,
+                from_mileage_m REAL NOT NULL,
+                to_mileage_m REAL NOT NULL,
+                cable_resistance_ohm REAL NOT NULL,
+                continuous_current_a REAL NOT NULL,
+                short_time_current_a REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'CLOSED',
+                quality TEXT NOT NULL DEFAULT 'ENGINEERING_ESTIMATE',
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(substation_id) REFERENCES traction_substations(substation_id)
+            );
+            CREATE TABLE IF NOT EXISTS contact_rail_sections (
+                section_id TEXT PRIMARY KEY,
+                line_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                from_mileage_m REAL NOT NULL,
+                to_mileage_m REAL NOT NULL,
+                resistance_ohm_per_km REAL NOT NULL,
+                current_limit_a REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ENERGIZED',
+                quality TEXT NOT NULL DEFAULT 'ENGINEERING_ESTIMATE',
+                detail_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS return_rail_sections (
+                section_id TEXT PRIMARY KEY,
+                line_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                from_mileage_m REAL NOT NULL,
+                to_mileage_m REAL NOT NULL,
+                resistance_ohm_per_km REAL NOT NULL,
+                cross_bonding_group TEXT NOT NULL DEFAULT 'V0',
+                quality TEXT NOT NULL DEFAULT 'ENGINEERING_ESTIMATE',
+                detail_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS power_switches (
+                switch_id TEXT PRIMARY KEY,
+                line_id TEXT NOT NULL,
+                switch_type TEXT NOT NULL,
+                mileage_m REAL NOT NULL,
+                from_node_id TEXT NOT NULL,
+                to_node_id TEXT NOT NULL,
+                normal_state TEXT NOT NULL,
+                current_state TEXT NOT NULL,
+                remote_controllable INTEGER NOT NULL DEFAULT 1,
+                quality TEXT NOT NULL DEFAULT 'ENGINEERING_ESTIMATE',
+                detail_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS train_voltage_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                train_id TEXT NOT NULL,
+                power_section_id TEXT NOT NULL,
+                mileage_m REAL,
+                voltage_v REAL NOT NULL,
+                current_a REAL NOT NULL,
+                requested_power_kw REAL NOT NULL,
+                traction_limit_ratio REAL NOT NULL,
+                regen_limit_ratio REAL NOT NULL,
+                voltage_level TEXT NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
+            CREATE TABLE IF NOT EXISTS substation_power_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                substation_id TEXT NOT NULL,
+                voltage_v REAL NOT NULL,
+                current_a REAL NOT NULL,
+                power_kw REAL NOT NULL,
+                energy_kwh REAL NOT NULL,
+                load_ratio REAL NOT NULL,
+                status TEXT NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
+            CREATE TABLE IF NOT EXISTS regen_energy_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                generated_regen_kw REAL NOT NULL,
+                absorbed_regen_kw REAL NOT NULL,
+                feedback_regen_kw REAL NOT NULL,
+                wasted_regen_kw REAL NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
             CREATE INDEX IF NOT EXISTS idx_station_passenger_station_time
                 ON station_passenger_records(run_id, station_id, direction, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_train_load_train_time
@@ -132,6 +239,20 @@ class RunRecorder:
                 ON dispatch_decisions(run_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_power_records_section_time
                 ON power_records(run_id, power_section_id, sim_time_ms);
+            CREATE INDEX IF NOT EXISTS idx_traction_substations_line_mileage
+                ON traction_substations(line_id, mileage_m);
+            CREATE INDEX IF NOT EXISTS idx_feeder_arms_substation
+                ON feeder_arms(substation_id, direction, side);
+            CREATE INDEX IF NOT EXISTS idx_contact_rail_sections_line_mileage
+                ON contact_rail_sections(line_id, direction, from_mileage_m, to_mileage_m);
+            CREATE INDEX IF NOT EXISTS idx_power_switches_line_mileage
+                ON power_switches(line_id, mileage_m);
+            CREATE INDEX IF NOT EXISTS idx_train_voltage_records_train_time
+                ON train_voltage_records(run_id, train_id, sim_time_ms);
+            CREATE INDEX IF NOT EXISTS idx_substation_power_records_time
+                ON substation_power_records(run_id, substation_id, sim_time_ms);
+            CREATE INDEX IF NOT EXISTS idx_regen_energy_records_time
+                ON regen_energy_records(run_id, sim_time_ms);
             """
         )
         self.connection.commit()
@@ -147,6 +268,179 @@ class RunRecorder:
         )
         self.connection.commit()
         return int(cursor.lastrowid)
+
+    def upsert_power_topology(self, topology: dict[str, Any]) -> None:
+        line_id = str(topology.get("lineId", "9"))
+        quality = str(topology.get("quality", "ENGINEERING_ESTIMATE"))
+        for item in topology.get("substations", []):
+            self.connection.execute(
+                """
+                INSERT INTO traction_substations(
+                    substation_id, line_id, name, mileage_m, no_load_voltage_v,
+                    internal_resistance_ohm, rated_current_a, overload_current_a,
+                    efs_capacity_kw, status, quality, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(substation_id) DO UPDATE SET
+                    name=excluded.name,
+                    mileage_m=excluded.mileage_m,
+                    no_load_voltage_v=excluded.no_load_voltage_v,
+                    internal_resistance_ohm=excluded.internal_resistance_ohm,
+                    rated_current_a=excluded.rated_current_a,
+                    overload_current_a=excluded.overload_current_a,
+                    efs_capacity_kw=excluded.efs_capacity_kw,
+                    status=excluded.status,
+                    quality=excluded.quality,
+                    detail_json=excluded.detail_json
+                """,
+                (
+                    item["substationId"],
+                    line_id,
+                    item["name"],
+                    item["mileageM"],
+                    item["noLoadVoltageV"],
+                    item["internalResistanceOhm"],
+                    item["ratedCurrentA"],
+                    item["overloadCurrentA"],
+                    item.get("efsCapacityKw", 0.0),
+                    item.get("status", "IN_SERVICE"),
+                    quality,
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        for item in topology.get("feeders", []):
+            self.connection.execute(
+                """
+                INSERT INTO feeder_arms(
+                    feeder_id, substation_id, line_id, direction, side,
+                    from_mileage_m, to_mileage_m, cable_resistance_ohm,
+                    continuous_current_a, short_time_current_a, status, quality, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(feeder_id) DO UPDATE SET
+                    substation_id=excluded.substation_id,
+                    direction=excluded.direction,
+                    side=excluded.side,
+                    from_mileage_m=excluded.from_mileage_m,
+                    to_mileage_m=excluded.to_mileage_m,
+                    cable_resistance_ohm=excluded.cable_resistance_ohm,
+                    continuous_current_a=excluded.continuous_current_a,
+                    short_time_current_a=excluded.short_time_current_a,
+                    status=excluded.status,
+                    quality=excluded.quality,
+                    detail_json=excluded.detail_json
+                """,
+                (
+                    item["feederId"],
+                    item["substationId"],
+                    line_id,
+                    item["direction"],
+                    item["side"],
+                    item["fromMileageM"],
+                    item["toMileageM"],
+                    item["cableResistanceOhm"],
+                    item["continuousCurrentA"],
+                    item["shortTimeCurrentA"],
+                    item.get("status", "CLOSED"),
+                    quality,
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        for item in topology.get("contactRailSections", []):
+            self.connection.execute(
+                """
+                INSERT INTO contact_rail_sections(
+                    section_id, line_id, direction, from_mileage_m, to_mileage_m,
+                    resistance_ohm_per_km, current_limit_a, status, quality, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(section_id) DO UPDATE SET
+                    direction=excluded.direction,
+                    from_mileage_m=excluded.from_mileage_m,
+                    to_mileage_m=excluded.to_mileage_m,
+                    resistance_ohm_per_km=excluded.resistance_ohm_per_km,
+                    current_limit_a=excluded.current_limit_a,
+                    status=excluded.status,
+                    quality=excluded.quality,
+                    detail_json=excluded.detail_json
+                """,
+                (
+                    item["sectionId"],
+                    line_id,
+                    item["direction"],
+                    item["fromMileageM"],
+                    item["toMileageM"],
+                    item["resistanceOhmPerKm"],
+                    item["currentLimitA"],
+                    item.get("status", "ENERGIZED"),
+                    quality,
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        for item in topology.get("returnRailSections", []):
+            self.connection.execute(
+                """
+                INSERT INTO return_rail_sections(
+                    section_id, line_id, direction, from_mileage_m, to_mileage_m,
+                    resistance_ohm_per_km, cross_bonding_group, quality, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(section_id) DO UPDATE SET
+                    direction=excluded.direction,
+                    from_mileage_m=excluded.from_mileage_m,
+                    to_mileage_m=excluded.to_mileage_m,
+                    resistance_ohm_per_km=excluded.resistance_ohm_per_km,
+                    cross_bonding_group=excluded.cross_bonding_group,
+                    quality=excluded.quality,
+                    detail_json=excluded.detail_json
+                """,
+                (
+                    item["sectionId"],
+                    line_id,
+                    item["direction"],
+                    item["fromMileageM"],
+                    item["toMileageM"],
+                    item["resistanceOhmPerKm"],
+                    item.get("crossBondingGroup", "V0"),
+                    quality,
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        for item in topology.get("switches", []):
+            self.connection.execute(
+                """
+                INSERT INTO power_switches(
+                    switch_id, line_id, switch_type, mileage_m, from_node_id,
+                    to_node_id, normal_state, current_state, remote_controllable,
+                    quality, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(switch_id) DO UPDATE SET
+                    switch_type=excluded.switch_type,
+                    mileage_m=excluded.mileage_m,
+                    from_node_id=excluded.from_node_id,
+                    to_node_id=excluded.to_node_id,
+                    normal_state=excluded.normal_state,
+                    current_state=excluded.current_state,
+                    remote_controllable=excluded.remote_controllable,
+                    quality=excluded.quality,
+                    detail_json=excluded.detail_json
+                """,
+                (
+                    item["switchId"],
+                    line_id,
+                    item["switchType"],
+                    item["mileageM"],
+                    item["fromNodeId"],
+                    item["toNodeId"],
+                    item["normalState"],
+                    item["currentState"],
+                    1 if item.get("remoteControllable", True) else 0,
+                    quality,
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        self.connection.commit()
 
     def record_station_passenger(
         self,
@@ -346,6 +640,116 @@ class RunRecorder:
                 wasted_regen_kw,
                 source,
                 quality,
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+        self.connection.commit()
+
+    def record_train_voltage(
+        self,
+        run_id: int,
+        *,
+        sim_time_ms: int,
+        train_id: str,
+        power_section_id: str,
+        mileage_m: float | None = None,
+        voltage_v: float,
+        current_a: float,
+        requested_power_kw: float,
+        traction_limit_ratio: float,
+        regen_limit_ratio: float,
+        voltage_level: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO train_voltage_records(
+                run_id, sim_time_ms, train_id, power_section_id, mileage_m, voltage_v,
+                current_a, requested_power_kw, traction_limit_ratio,
+                regen_limit_ratio, voltage_level, detail_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                sim_time_ms,
+                train_id,
+                power_section_id,
+                mileage_m,
+                voltage_v,
+                current_a,
+                requested_power_kw,
+                traction_limit_ratio,
+                regen_limit_ratio,
+                voltage_level,
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+        self.connection.commit()
+
+    def record_substation_power(
+        self,
+        run_id: int,
+        *,
+        sim_time_ms: int,
+        substation_id: str,
+        voltage_v: float,
+        current_a: float,
+        power_kw: float,
+        energy_kwh: float,
+        load_ratio: float,
+        status: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO substation_power_records(
+                run_id, sim_time_ms, substation_id, voltage_v, current_a,
+                power_kw, energy_kwh, load_ratio, status, detail_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                sim_time_ms,
+                substation_id,
+                voltage_v,
+                current_a,
+                power_kw,
+                energy_kwh,
+                load_ratio,
+                status,
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+        self.connection.commit()
+
+    def record_regen_energy(
+        self,
+        run_id: int,
+        *,
+        sim_time_ms: int,
+        generated_regen_kw: float,
+        absorbed_regen_kw: float,
+        feedback_regen_kw: float,
+        wasted_regen_kw: float,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO regen_energy_records(
+                run_id, sim_time_ms, generated_regen_kw, absorbed_regen_kw,
+                feedback_regen_kw, wasted_regen_kw, detail_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                sim_time_ms,
+                generated_regen_kw,
+                absorbed_regen_kw,
+                feedback_regen_kw,
+                wasted_regen_kw,
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )

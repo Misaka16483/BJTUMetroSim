@@ -154,8 +154,70 @@ export interface SimPowerState {
   regenEnergyKwh: number;
   absorbedRegenKw: number;
   wastedRegenKw: number;
+  minTrainVoltageV?: number;
+  maxTrainCurrentA?: number;
+  substationCount?: number;
+  overloadedSubstations?: number;
+  overloadedFeeders?: number;
+  lossesKw?: number;
+  feedbackRegenKw?: number;
+  alerts?: Array<Record<string, unknown>>;
   source: string;
   quality: string;
+}
+
+export interface PowerSubstationState {
+  substationId: string;
+  name: string;
+  mileageM: number;
+  voltageV: number;
+  currentA: number;
+  powerKw: number;
+  energyKwh: number;
+  loadRatio: number;
+  status: string;
+}
+
+export interface PowerFeederState {
+  feederId: string;
+  substationId: string;
+  direction: string;
+  side: string;
+  currentA: number;
+  powerKw: number;
+  loadRatio: number;
+  status: string;
+}
+
+export interface TrainVoltageState {
+  trainId: string;
+  powerSectionId: string;
+  mileageM?: number;
+  voltageV: number;
+  currentA: number;
+  requestedPowerKw: number;
+  tractionLimitRatio: number;
+  regenLimitRatio: number;
+  voltageLevel: string;
+  leftSubstationId?: string | null;
+  rightSubstationId?: string | null;
+}
+
+export interface PowerNetworkState {
+  simTimeMs?: number;
+  substations: PowerSubstationState[];
+  feeders: PowerFeederState[];
+  trainVoltages: TrainVoltageState[];
+  regen: {
+    generatedKw: number;
+    absorbedKw: number;
+    feedbackKw: number;
+    wastedKw: number;
+  };
+  lossesKw: number;
+  alerts: Array<Record<string, unknown>>;
+  source?: string;
+  quality?: string;
 }
 
 export interface SimDispatchDecision {
@@ -179,6 +241,10 @@ export interface SimKpi {
   maxPlatformDensity?: number;
   totalTractionEnergyKwh?: number;
   minTractionLimitRatio?: number;
+  minTrainVoltageV?: number;
+  totalAbsorbedRegenKw?: number;
+  totalWastedRegenKw?: number;
+  powerLossesKw?: number;
   lastDispatchAction?: string;
 }
 
@@ -194,6 +260,7 @@ export interface SimStateResponse {
   trains: SimTrainState[];
   stations: SimStationInfo[];
   power?: SimPowerState[];
+  powerNetwork?: PowerNetworkState;
   dispatchDecisions?: SimDispatchDecision[];
   kpi: SimKpi;
   source: string;

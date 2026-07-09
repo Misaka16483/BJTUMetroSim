@@ -14,6 +14,7 @@ from app.core.message_bus import Envelope, MessageBus
 from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, RuleBasedDispatchService
 from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.services import (
     BoardingResult,
@@ -97,6 +98,7 @@ class TickSnapshot:
     trains: list[dict[str, Any]] = field(default_factory=list)
     stations: list[dict[str, Any]] = field(default_factory=list)
     power: list[dict[str, Any]] = field(default_factory=list)
+    power_network: dict[str, Any] = field(default_factory=dict)
     dispatch_decisions: list[dict[str, Any]] = field(default_factory=list)
     kpi: dict[str, Any] = field(default_factory=dict)
 
@@ -171,6 +173,8 @@ class SimulationEngine:
                     "trainCount": len(self.scenario.trains),
                 },
             )
+            if self.power_service.network is not None:
+                self.recorder.upsert_power_topology(self.power_service.network.topology_dict())
 
     def start(self) -> None:
         """启动仿真（后台线程）."""
@@ -295,6 +299,45 @@ class SimulationEngine:
                     source=state.source,
                     quality=state.quality,
                     detail={"tick": tick},
+                )
+            network_snapshot = self.power_service.last_network_snapshot
+            if network_snapshot is not None:
+                for train_flow in network_snapshot.trains:
+                    self.recorder.record_train_voltage(
+                        self._run_id,
+                        sim_time_ms=sim_time_ms,
+                        train_id=train_flow.train_id,
+                        power_section_id=train_flow.power_section_id,
+                        mileage_m=train_flow.mileage_m,
+                        voltage_v=train_flow.voltage_v,
+                        current_a=train_flow.current_a,
+                        requested_power_kw=train_flow.requested_power_kw,
+                        traction_limit_ratio=train_flow.traction_limit_ratio,
+                        regen_limit_ratio=train_flow.regen_limit_ratio,
+                        voltage_level=train_flow.voltage_level,
+                        detail={"tick": tick},
+                    )
+                for substation_flow in network_snapshot.substations:
+                    self.recorder.record_substation_power(
+                        self._run_id,
+                        sim_time_ms=sim_time_ms,
+                        substation_id=substation_flow.substation_id,
+                        voltage_v=substation_flow.voltage_v,
+                        current_a=substation_flow.current_a,
+                        power_kw=substation_flow.power_kw,
+                        energy_kwh=substation_flow.energy_kwh,
+                        load_ratio=substation_flow.load_ratio,
+                        status=substation_flow.status,
+                        detail={"tick": tick},
+                    )
+                self.recorder.record_regen_energy(
+                    self._run_id,
+                    sim_time_ms=sim_time_ms,
+                    generated_regen_kw=network_snapshot.generated_regen_kw,
+                    absorbed_regen_kw=network_snapshot.absorbed_regen_kw,
+                    feedback_regen_kw=network_snapshot.feedback_regen_kw,
+                    wasted_regen_kw=network_snapshot.wasted_regen_kw,
+                    detail={"tick": tick, "alerts": network_snapshot.alerts},
                 )
 
         # 7) 更新快照
@@ -484,6 +527,9 @@ class SimulationEngine:
                     speed_mps=train.speed_mps,
                     traction_force_n=traction_force_n,
                     brake_force_n=brake_force_n,
+                    position_m=self._train_mileage_m(train),
+                    direction=train.direction,
+                    aux_power_kw=150.0,
                 )
             )
         return self.power_service.update(requests, dt_sec=self.clock.tick_seconds)
@@ -545,6 +591,7 @@ class SimulationEngine:
                 for stn in self._station_list
             ],
             power=[self._power_snapshot(state) for state in self._last_power_states.values()],
+            power_network=self._power_network_snapshot(),
             dispatch_decisions=[self._dispatch_snapshot(item) for item in self._last_dispatch_decisions],
             kpi={
                 "activeTrains": len(active),
@@ -564,6 +611,22 @@ class SimulationEngine:
                 ),
                 "minTractionLimitRatio": round(
                     min((state.traction_limit_ratio for state in self._last_power_states.values()), default=1.0),
+                    3,
+                ),
+                "minTrainVoltageV": round(
+                    min((state.min_train_voltage_v for state in self._last_power_states.values()), default=750.0),
+                    2,
+                ),
+                "totalAbsorbedRegenKw": round(
+                    sum(state.absorbed_regen_kw for state in self._last_power_states.values()),
+                    3,
+                ),
+                "totalWastedRegenKw": round(
+                    sum(state.wasted_regen_kw for state in self._last_power_states.values()),
+                    3,
+                ),
+                "powerLossesKw": round(
+                    max((state.losses_kw for state in self._last_power_states.values()), default=0.0),
                     3,
                 ),
                 "lastDispatchAction": self._last_dispatch_decisions[-1].action
@@ -640,25 +703,28 @@ class SimulationEngine:
         )
 
     def _build_power_service(self) -> PowerService:
+        topology_path = Path(__file__).resolve().parents[2] / "data" / "scenarios" / "line9_power_topology.json"
+        network = load_line9_power_network(topology_path) if topology_path.exists() else None
         return PowerService(
             [
                 PowerSection(
                     power_section_id="PWR-09-UP",
                     name="Line 9 Up traction section",
-                    max_traction_power_kw=900.0,
-                    warning_power_kw=650.0,
-                    regen_absorb_limit_kw=180.0,
+                    max_traction_power_kw=12000.0,
+                    warning_power_kw=9000.0,
+                    regen_absorb_limit_kw=1800.0,
                 ),
                 PowerSection(
                     power_section_id="PWR-09-DOWN",
                     name="Line 9 Down traction section",
-                    max_traction_power_kw=900.0,
-                    warning_power_kw=650.0,
-                    regen_absorb_limit_kw=180.0,
+                    max_traction_power_kw=12000.0,
+                    warning_power_kw=9000.0,
+                    regen_absorb_limit_kw=1800.0,
                 ),
             ],
             traction_efficiency=0.88,
             regen_efficiency=0.65,
+            network=network,
         )
 
     def _empty_power_states(self) -> dict[str, Any]:
@@ -666,6 +732,16 @@ class SimulationEngine:
 
     def _power_section_for_train(self, train: SimTrainState) -> str:
         return "PWR-09-UP" if train.direction == "UP" else "PWR-09-DOWN"
+
+    def _train_mileage_m(self, train: SimTrainState) -> float:
+        if not self._station_distances:
+            return 0.0
+        current_m = self._station_distances[train.station_index]
+        next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
+        if next_idx < 0 or next_idx >= len(self._station_distances):
+            return current_m
+        next_m = self._station_distances[next_idx]
+        return current_m + (next_m - current_m) * max(0.0, min(1.0, train.segment_progress))
 
     def _traction_limit_for_train(self, train: SimTrainState) -> float:
         state = self._last_power_states.get(self._power_section_for_train(train))
@@ -704,9 +780,21 @@ class SimulationEngine:
             "regenEnergyKwh": round(state.regen_energy_kwh, 4),
             "absorbedRegenKw": round(state.absorbed_regen_kw, 3),
             "wastedRegenKw": round(state.wasted_regen_kw, 3),
+            "minTrainVoltageV": round(state.min_train_voltage_v, 2),
+            "maxTrainCurrentA": round(state.max_train_current_a, 2),
+            "substationCount": state.substation_count,
+            "overloadedSubstations": state.overloaded_substations,
+            "overloadedFeeders": state.overloaded_feeders,
+            "lossesKw": round(state.losses_kw, 3),
+            "feedbackRegenKw": round(state.feedback_regen_kw, 3),
+            "alerts": list(state.alerts),
             "source": state.source,
             "quality": state.quality,
         }
+
+    def _power_network_snapshot(self) -> JsonDict:
+        snapshot = self.power_service.last_network_snapshot
+        return snapshot.to_dict() if snapshot is not None else {}
 
     @staticmethod
     def _dispatch_snapshot(decision: DispatchDecision) -> JsonDict:

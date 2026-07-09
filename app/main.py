@@ -3,13 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import select
 import sys
-import termios
 import time
-import tty
 from pathlib import Path
 from typing import Any
+
+try:
+    import select
+    import termios
+    import tty
+except ModuleNotFoundError:
+    select = None
+    termios = None
+    tty = None
 
 from app.adapters.cab import MitsubishiPlcCabOutputFrameBuilder, MitsubishiPlcCabOutputState, MitsubishiPlcTcpClient
 from app.adapters.hmi import NetworkScreenClient, NetworkScreenFrameBuilder, NetworkScreenState
@@ -277,6 +283,8 @@ def vehicle_console(args: argparse.Namespace) -> None:
 
 
 def vehicle_live_console(session: VehicleInteractiveSession, refresh_interval_s: float) -> None:
+    if termios is None or tty is None or select is None:
+        raise RuntimeError("live vehicle console requires a POSIX terminal; use --line-mode on Windows")
     if refresh_interval_s <= 0:
         raise ValueError("refresh_interval_s must be positive")
 

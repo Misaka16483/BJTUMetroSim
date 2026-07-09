@@ -26,6 +26,14 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(track_map["counts"]["platforms"], 56)
         self.assertEqual(track_map["counts"]["routes"], 249)
 
+    def test_power_topology_shape(self) -> None:
+        topology = self.service.power_topology()
+        self.assertEqual(topology["lineId"], "9")
+        self.assertEqual(topology["nominalVoltageV"], 750)
+        self.assertGreaterEqual(len(topology["substations"]), 10)
+        self.assertGreaterEqual(len(topology["contactRailSections"]), 18)
+        self.assertEqual(topology["quality"], "ENGINEERING_ESTIMATE")
+
     def test_member_d_demo_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = Line9DataService(run_dir=Path(tmp))

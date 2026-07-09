@@ -6,6 +6,7 @@ import DriverConsole from './components/DriverConsole';
 import MicroTrackView from './components/MicroTrackView';
 import StationInterlockingView from './components/StationInterlockingView';
 import OperationalLoopPanel from './components/OperationalLoopPanel';
+import PowerNetworkPanel from './components/PowerNetworkPanel';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -306,6 +307,9 @@ export default function App() {
               {/* member D closed-loop */}
               <div className="shrink-0" style={{ height: 360 }}>
                 <OperationalLoopPanel />
+              </div>
+              <div className="shrink-0" style={{ height: 380 }}>
+                <PowerNetworkPanel />
               </div>
               {/* lines */}
               <div className="shrink-0" style={{ minHeight: 280 }}>
