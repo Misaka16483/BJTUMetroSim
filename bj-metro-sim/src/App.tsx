@@ -126,8 +126,13 @@ export default function App() {
         .then((res) => {
           if (!active) return;
           const points = res.profiles?.['T0901'] ?? [];
-          if (points.length > 0) {
-            useSimStore.setState({ speedProfile: points });
+          const meta = res.profileMeta?.['T0901'] ?? null;
+          const current = useSimStore.getState();
+          const expectedEndM = current.pathTotalLengthM || current.targetDistanceM;
+          const profileEndM = points.length > 0 ? points[points.length - 1].positionM : 0;
+          const matchesCurrentInterval = expectedEndM <= 0 || Math.abs(profileEndM - expectedEndM) <= 2;
+          if (points.length > 0 && matchesCurrentInterval) {
+            useSimStore.setState({ speedProfile: points, speedProfileMeta: meta });
           } else {
             setTimeout(tryFetch, 250);
           }

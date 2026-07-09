@@ -91,24 +91,20 @@ class ATOController:
         self._last_error_mps = None
         self._integral_error = 0.0
         self._filtered_derivative = 0.0
+        self._profile_cache_key = None
+        self._profile_cache = None
         self.last_profile_mode = "NONE"
+
+    @property
+    def current_profile(self) -> OptimizedSpeedProfile | None:
+        return self._profile_cache
 
     def target_speed_mps(self, state: TrainState, target: AtoTarget) -> float:
         profile = self._profile_for(state, target)
-        target_position_m = self._target_position_m(target)
         if profile is not None:
             lookup_position_m = self._profile_lookup_position_m(state, target)
             self.last_profile_mode = profile.mode_at_position(lookup_position_m)
             profile_speed_mps = profile.speed_at_position_mps(lookup_position_m)
-            braking_curve_speed_mps = self._braking_curve_target_speed_mps(state, target, approach_margin_m=0.0)
-            if (
-                target_position_m - state.position_m > self.config.stop_tolerance_m
-                and profile_speed_mps < self.config.profile_min_approach_speed_mps
-            ):
-                profile_speed_mps = min(
-                    braking_curve_speed_mps,
-                    max(profile_speed_mps, self.config.profile_min_approach_speed_mps),
-                )
             return min(
                 self._permitted_speed_mps_at(target, lookup_position_m),
                 self.config.target_cruise_speed_mps,

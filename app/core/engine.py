@@ -17,6 +17,7 @@ from app.domain.control.services import ATOController
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, RuleBasedDispatchService
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
+from app.domain.line.services import LineMapRepository, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.services import (
     BoardingResult,
@@ -72,8 +73,18 @@ class SimTrainState:
     energy_kwh: float = 0.0
     target_speed_mps: float = 0.0
     estimated_run_time_s: float = 0.0   # 预计区间运行时间，由速度曲线积分得出
+    path_position_m: float = 0.0
+    path_total_length_m: float = 0.0
+    current_segment_id: int | None = None
+    local_speed_limit_mps: float = 22.22
+    grade_ratio: float = 0.0
+    path_segment_count: int = 0
+    path_constraint_count: int = 0
     # ── profile 触发控制 ──
     _profile_triggered: bool = False
+    _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
+    _path_origin_station_index: int | None = field(default=None, repr=False, compare=False)
+    _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> JsonDict:
         return {
@@ -102,6 +113,13 @@ class SimTrainState:
             "energyKwh": round(self.energy_kwh, 2),
             "targetSpeedMps": round(self.target_speed_mps, 2),
             "estimatedRunTimeS": round(self.estimated_run_time_s, 1),
+            "pathPositionM": round(self.path_position_m, 1),
+            "pathTotalLengthM": round(self.path_total_length_m, 1),
+            "currentSegmentId": self.current_segment_id,
+            "localSpeedLimitMps": round(self.local_speed_limit_mps, 2),
+            "gradeRatio": round(self.grade_ratio, 7),
+            "pathSegmentCount": self.path_segment_count,
+            "pathConstraintCount": self.path_constraint_count,
         }
 
 
@@ -142,10 +160,12 @@ class SimulationEngine:
         self.clock = SimulationClock(tick_seconds=scenario.tick_seconds)
         self.bus = MessageBus()
         self.track_query = TrackQueryService(line_map)
+        self.path_planner = PathPlanner(line_map)
 
         # ── 构建车站运行索引 ──
         self._station_list: list[JsonDict] = self._build_station_list()
         self._station_distances: list[float] = self._build_station_distances()
+        self._station_platform_ids: dict[int, tuple[int, ...]] = self._build_station_platform_ids()
 
         # ── 列车状态 ──
         self.trains: list[SimTrainState] = []
@@ -159,12 +179,19 @@ class SimulationEngine:
         self._last_power_states: dict[str, Any] = {}
         self._last_dispatch_decisions: list[DispatchDecision] = []
 
-        # ── 物理模型：ATO 制动曲线 + 合成规划曲线 ──
-        self.ato = ATOController(AtoConfig(
+        # ── 物理模型：PathPlan-aware ATO + DCDP 规划曲线 ──
+        self._ato_config = AtoConfig(
             target_cruise_speed_mps=self.CRUISE_SPEED_MPS,
-            use_dynamic_programming_profile=False,  # 制动曲线（即时）
-        ))
-        self._dcdp_curve_data: dict[str, list[dict[str, Any]]] = {}     # 规划曲线（合成）
+            expected_deceleration_mps2=0.6,
+            use_dynamic_programming_profile=True,
+            profile_position_step_m=10.0,
+            profile_speed_step_mps=1.0,
+            profile_max_states_per_stage=700,
+        )
+        self.ato = ATOController(self._ato_config)
+        self._ato_by_train: dict[str, ATOController] = {}
+        self._dcdp_curve_data: dict[str, list[dict[str, Any]]] = {}     # 规划曲线
+        self._dcdp_curve_meta: dict[str, dict[str, Any]] = {}
         self._profile_run_times: dict[str, float] = {}                  # 预计区间运行时间
 
         # ── 线程安全 ──
@@ -183,6 +210,10 @@ class SimulationEngine:
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
         self._last_dispatch_decisions = []
+        self._ato_by_train = {}
+        self._dcdp_curve_data = {}
+        self._dcdp_curve_meta = {}
+        self._profile_run_times = {}
         self.trains = [self._create_train(cfg) for cfg in self.scenario.trains]
         self._snapshot = self._build_snapshot()
 
@@ -392,7 +423,16 @@ class SimulationEngine:
             return
 
         next_stn = stations[next_idx]
-        dist = abs(self._station_distances[next_idx] - self._station_distances[train.station_index])
+        path_plan = self._ensure_interval_path(train, next_idx)
+        dist = (
+            path_plan.total_length_m
+            if path_plan is not None
+            else abs(self._station_distances[next_idx] - self._station_distances[train.station_index])
+        )
+
+        if path_plan is not None:
+            self._advance_train_on_path(train, next_idx, next_stn, path_plan, sim_time_ms, dist, dt)
+            return
 
         # ── DWELLING ──
         if train.phase in (DWELLING, IDLE):
@@ -406,11 +446,6 @@ class SimulationEngine:
             # 从 CSV 读取当前区间线路限速
             limit_kmh = int(self._station_list[train.station_index].get("speedLimitToNextKmh", 80))
             train.permitted_speed_mps = limit_kmh / 3.6
-
-            # 生成下一区间的合成规划曲线（即时，无阻塞）
-            if not train._profile_triggered:
-                train._profile_triggered = True
-                self._generate_synthetic_profile(train.train_id, train.station_index, train.direction, train.permitted_speed_mps)
 
             if train.dwell_remaining_sec > 0:
                 train.dwell_remaining_sec = max(0, train.dwell_remaining_sec - dt)
@@ -491,6 +526,7 @@ class SimulationEngine:
 
                 # 清除当前曲线 + 触发标志
                 self._dcdp_curve_data.pop(train.train_id, None)
+                self._dcdp_curve_meta.pop(train.train_id, None)
                 self._profile_run_times.pop(train.train_id, None)
                 train._profile_triggered = False  # 下一站允许触发
                 self.ato.reset()  # 重置 PID 积分 + profile cache
@@ -530,6 +566,325 @@ class SimulationEngine:
             train.distance_to_next_m = max(0, train.distance_to_next_m - train.speed_mps * dt)
             train.segment_progress = 1 - (train.distance_to_next_m / dist) if dist > 0 else 1.0
 
+    def _advance_train_on_path(
+        self,
+        train: SimTrainState,
+        next_idx: int,
+        next_stn: JsonDict,
+        path_plan: PathPlan,
+        sim_time_ms: int,
+        dist: float,
+        dt: float,
+    ) -> None:
+        """按 PathPlan 局部坐标推进一辆车."""
+        if train.phase in (DWELLING, IDLE):
+            train.speed_mps = 0.0
+            train.path_position_m = 0.0
+            train.path_total_length_m = dist
+            train.distance_to_next_m = dist
+            train.target_distance_m = dist
+            train.segment_progress = 0.0
+            train.traction_percent = 0.0
+            train.brake_percent = 0.0 if train.phase == IDLE else 20.0
+            train.target_speed_mps = 0.0
+            self._update_train_path_context(train)
+
+            limit_kmh = int(self._station_list[train.station_index].get("speedLimitToNextKmh", 80))
+            train.permitted_speed_mps = limit_kmh / 3.6
+            train.local_speed_limit_mps = path_plan.speed_limit_at(train.path_position_m, train.permitted_speed_mps)
+
+            if not train._profile_triggered:
+                train._profile_triggered = True
+                self._prime_path_profile(train, path_plan)
+
+            if train.dwell_remaining_sec > 0:
+                train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - dt)
+                return
+
+            train.dwell_remaining_sec = 0.0
+            train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
+            train.phase = DEPARTING
+
+        try:
+            path_position_m = min(max(0.0, train.path_position_m), path_plan.total_length_m)
+            self._update_train_path_context(train)
+
+            state = TrainState(
+                train_id=train.train_id,
+                position_m=path_position_m,
+                speed_mps=train.speed_mps,
+                sim_time_s=self.clock.sim_time_seconds,
+                segment_id=train.current_segment_id,
+                net_energy_kwh=train.energy_kwh,
+            )
+            target = AtoTarget(
+                target_position_m=path_plan.total_length_m,
+                permitted_speed_mps=train.permitted_speed_mps,
+                path_plan=path_plan,
+            )
+            ato = self._ato_for_train(train.train_id)
+            cmd = ato.decide(state, target)
+
+            vcfg = VehicleConfig(train_id=train.train_id)
+            vm = SimpleVehicleModel(vcfg)
+            gradient_force_n = vcfg.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
+            result = vm.step(
+                state,
+                cmd,
+                dt,
+                traction_limit_ratio=self._traction_limit_for_train(train),
+                gradient_force_n=gradient_force_n,
+            )
+
+            new_position_m = min(max(0.0, result.position_m), path_plan.total_length_m)
+            next_limit_mps = path_plan.speed_limit_at(new_position_m, train.permitted_speed_mps)
+            train.speed_mps = min(max(0.0, result.speed_mps), next_limit_mps)
+            train.path_position_m = new_position_m
+            train.path_total_length_m = path_plan.total_length_m
+            train.segment_progress = (
+                min(1.0, train.path_position_m / path_plan.total_length_m)
+                if path_plan.total_length_m > 0
+                else 1.0
+            )
+            train.distance_to_next_m = max(0.0, path_plan.total_length_m - train.path_position_m)
+            train.target_distance_m = path_plan.total_length_m
+            train.traction_percent = cmd.traction_percent
+            train.brake_percent = cmd.brake_percent
+            train.target_speed_mps = ato.last_target_speed_mps
+            train.energy_kwh = result.net_energy_kwh
+            self._update_train_path_context(train)
+
+            arrived = (
+                train.distance_to_next_m <= self._ato_config.stop_tolerance_m
+                and train.speed_mps <= 0.2
+            )
+
+            if arrived:
+                self._complete_path_arrival(train, next_idx, next_stn, sim_time_ms)
+                return
+
+            cruise_threshold = min(self.CRUISE_SPEED_MPS, train.local_speed_limit_mps) * 0.95
+            if train.speed_mps >= cruise_threshold:
+                train.phase = CRUISING
+            elif cmd.brake_percent > 5 and train.speed_mps > 0.5:
+                train.phase = APPROACHING
+            else:
+                train.phase = DEPARTING
+
+        except Exception as exc:
+            print(f"[Engine] PathPlan advancement failed for {train.train_id}: {exc}")
+            train.traction_percent = 0.0
+            train.brake_percent = 0.0
+            train.target_speed_mps = 0.0
+            train.speed_mps = max(0.0, train.speed_mps - 0.8 * dt)
+            train.path_position_m = min(path_plan.total_length_m, train.path_position_m + train.speed_mps * dt)
+            train.distance_to_next_m = max(0.0, path_plan.total_length_m - train.path_position_m)
+            train.segment_progress = train.path_position_m / dist if dist > 0 else 1.0
+            self._update_train_path_context(train)
+
+    def _complete_path_arrival(
+        self,
+        train: SimTrainState,
+        next_idx: int,
+        next_stn: JsonDict,
+        sim_time_ms: int,
+    ) -> None:
+        train.speed_mps = 0.0
+        train.segment_progress = 0.0
+        train.path_position_m = 0.0
+        train.path_total_length_m = 0.0
+        train.current_segment_id = None
+        train.local_speed_limit_mps = train.permitted_speed_mps
+        train.grade_ratio = 0.0
+        train.path_segment_count = 0
+        train.path_constraint_count = 0
+        train.station_index = next_idx
+        train.current_station_code = str(next_stn.get("code", ""))
+        train.current_station_name = next_stn.get("name", "")
+        train.phase = DWELLING
+        train.dispatch_hold_applied_station_index = None
+        train.traction_percent = 0.0
+        train.brake_percent = 20.0
+        train.target_speed_mps = 0.0
+
+        self._dcdp_curve_data.pop(train.train_id, None)
+        self._dcdp_curve_meta.pop(train.train_id, None)
+        self._profile_run_times.pop(train.train_id, None)
+        train._profile_triggered = False
+        train._path_plan = None
+        train._path_origin_station_index = None
+        train._path_destination_station_index = None
+        self._ato_for_train(train.train_id).reset()
+
+        stations = self._station_list
+        new_next_idx = next_idx + 1 if train.direction == "UP" else next_idx - 1
+        if 0 <= new_next_idx < len(stations):
+            new_next_stn = stations[new_next_idx]
+            train.next_station_code = str(new_next_stn.get("code", ""))
+            train.next_station_name = new_next_stn.get("name", "")
+            next_plan = self._path_plan_for_station_pair(next_idx, new_next_idx)
+            if next_plan is not None:
+                train.target_distance_m = next_plan.total_length_m
+                train.distance_to_next_m = next_plan.total_length_m
+            else:
+                train.target_distance_m = abs(self._station_distances[new_next_idx] - self._station_distances[next_idx])
+                train.distance_to_next_m = train.target_distance_m
+        else:
+            train.next_station_code = ""
+            train.next_station_name = ""
+            train.target_distance_m = 0.0
+            train.distance_to_next_m = 0.0
+
+        self._process_station_stop(train, sim_time_ms)
+
+    def _ato_for_train(self, train_id: str) -> ATOController:
+        controller = self._ato_by_train.get(train_id)
+        if controller is None:
+            controller = ATOController(self._ato_config)
+            self._ato_by_train[train_id] = controller
+            if len(self._ato_by_train) == 1:
+                self.ato = controller
+        return controller
+
+    def _ensure_interval_path(self, train: SimTrainState, next_idx: int) -> PathPlan | None:
+        if (
+            train._path_plan is not None
+            and train._path_origin_station_index == train.station_index
+            and train._path_destination_station_index == next_idx
+        ):
+            self._update_train_path_context(train)
+            return train._path_plan
+
+        path_plan = self._path_plan_for_station_pair(train.station_index, next_idx)
+        if path_plan is None:
+            return None
+
+        train._path_plan = path_plan
+        train._path_origin_station_index = train.station_index
+        train._path_destination_station_index = next_idx
+        train.path_position_m = 0.0
+        train.path_total_length_m = path_plan.total_length_m
+        train.target_distance_m = path_plan.total_length_m
+        train.distance_to_next_m = path_plan.total_length_m
+        train.path_segment_count = len(path_plan.segment_ids)
+        train.path_constraint_count = len(path_plan.constraints)
+        train._profile_triggered = False
+        self._dcdp_curve_data.pop(train.train_id, None)
+        self._dcdp_curve_meta.pop(train.train_id, None)
+        self._profile_run_times.pop(train.train_id, None)
+        self._ato_for_train(train.train_id).reset()
+        self._update_train_path_context(train)
+        return path_plan
+
+    def _path_plan_for_station_pair(self, origin_idx: int, destination_idx: int) -> PathPlan | None:
+        origin_platforms = self._station_platform_ids.get(origin_idx, ())
+        destination_platforms = self._station_platform_ids.get(destination_idx, ())
+        if not origin_platforms or not destination_platforms:
+            return None
+
+        direction = "forward" if destination_idx > origin_idx else "backward"
+        preferred_pairs = [(origin_platforms[0], destination_platforms[0])]
+        all_pairs = [
+            (origin_platform_id, destination_platform_id)
+            for origin_platform_id in origin_platforms
+            for destination_platform_id in destination_platforms
+        ]
+        plans: list[PathPlan] = []
+        seen_pairs: set[tuple[int, int]] = set()
+        for origin_platform_id, destination_platform_id in preferred_pairs + all_pairs:
+            pair = (origin_platform_id, destination_platform_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            try:
+                plans.append(
+                    self.path_planner.plan_between_platforms(
+                        origin_platform_id,
+                        destination_platform_id,
+                        direction=direction,
+                    )
+                )
+            except ValueError:
+                continue
+        if plans:
+            return min(plans, key=lambda item: item.total_length_m)
+        return None
+
+    def _prime_path_profile(self, train: SimTrainState, path_plan: PathPlan) -> None:
+        ato = self._ato_for_train(train.train_id)
+        state = TrainState(
+            train_id=train.train_id,
+            position_m=0.0,
+            speed_mps=0.0,
+            sim_time_s=self.clock.sim_time_seconds,
+            segment_id=path_plan.start_segment_id,
+            net_energy_kwh=train.energy_kwh,
+        )
+        target = AtoTarget(
+            target_position_m=path_plan.total_length_m,
+            permitted_speed_mps=train.permitted_speed_mps,
+            path_plan=path_plan,
+        )
+        train.target_speed_mps = ato.target_speed_mps(state, target)
+        self._store_path_profile(train, path_plan, ato)
+
+    def _store_path_profile(
+        self,
+        train: SimTrainState,
+        path_plan: PathPlan,
+        ato: ATOController,
+    ) -> None:
+        profile = ato.current_profile
+        if profile is None:
+            return
+
+        points: list[dict[str, Any]] = []
+        for point in profile.points:
+            constraint = path_plan.constraint_at(point.position_m)
+            points.append(
+                {
+                    "positionM": round(point.position_m, 1),
+                    "speedMps": round(point.speed_mps, 2),
+                    "mode": point.mode,
+                    "localSpeedLimitMps": round(
+                        path_plan.speed_limit_at(point.position_m, train.permitted_speed_mps),
+                        2,
+                    ),
+                    "gradeRatio": round(path_plan.grade_ratio_at(point.position_m), 7),
+                    "segmentId": constraint.segment_id if constraint is not None else None,
+                }
+            )
+        self._dcdp_curve_data[train.train_id] = points
+        self._dcdp_curve_meta[train.train_id] = {
+            "source": "DCDP_STRICT",
+            "terminalScore": profile.terminal_score,
+            "scheduledRunTimeS": profile.scheduled_run_time_s,
+            "targetPositionM": profile.target_position_m,
+            "permittedSpeedMps": profile.permitted_speed_mps,
+            "pointCount": len(points),
+        }
+        self._profile_run_times[train.train_id] = profile.scheduled_run_time_s
+
+    def _update_train_path_context(self, train: SimTrainState) -> None:
+        path_plan = train._path_plan
+        if path_plan is None:
+            train.path_total_length_m = 0.0
+            train.current_segment_id = None
+            train.local_speed_limit_mps = train.permitted_speed_mps
+            train.grade_ratio = 0.0
+            train.path_segment_count = 0
+            train.path_constraint_count = 0
+            return
+
+        train.path_total_length_m = path_plan.total_length_m
+        train.path_segment_count = len(path_plan.segment_ids)
+        train.path_constraint_count = len(path_plan.constraints)
+        bounded_position_m = min(max(0.0, train.path_position_m), path_plan.total_length_m)
+        constraint = path_plan.constraint_at(bounded_position_m)
+        train.current_segment_id = constraint.segment_id if constraint is not None else None
+        train.local_speed_limit_mps = path_plan.speed_limit_at(bounded_position_m, train.permitted_speed_mps)
+        train.grade_ratio = path_plan.grade_ratio_at(bounded_position_m)
+
 
     def _lookup_profile_speed(self, train_id: str, position_m: float) -> tuple[float, str] | None:
         """从规划曲线中线性插值当前位置的目标速度和运行模式."""
@@ -548,101 +903,13 @@ class SimulationEngine:
             return (points[0]["speedMps"], points[0].get("mode", ""))
         return (points[-1]["speedMps"], points[-1].get("mode", ""))
 
-    def _generate_synthetic_profile(self, train_id: str, station_index: int, direction: str, permitted_speed_mps: float) -> None:
-        """为给定区间即时生成合成规划曲线（加速→巡航→惰行→制动）."""
-        import math
-        stations = self._station_list
-        n = len(stations)
-        next_idx = station_index + 1 if direction == "UP" else station_index - 1
-        if next_idx < 0 or next_idx >= n:
-            return
-
-        cur_mileage = self._station_distances[station_index]
-        next_mileage = self._station_distances[next_idx]
-        dist = abs(next_mileage - cur_mileage)
-        if dist < 10:
-            return
-
-        ACCEL = 0.54   # m/s² (100kN/180t - 3000N 阻力)
-        DECEL = 0.8    # m/s²
-        CRUISE = min(self.CRUISE_SPEED_MPS, permitted_speed_mps)  # 不超过线路限速
-
-        accel_to_cruise = CRUISE ** 2 / (2 * ACCEL)
-        decel_from_cruise = CRUISE ** 2 / (2 * DECEL)
-        cruise_dist = dist - accel_to_cruise - decel_from_cruise
-
-        step = 20.0
-        points: list[dict[str, Any]] = []
-        pos = 0.0
-
-        # 加速段
-        while pos < min(accel_to_cruise, dist) and cruise_dist >= 0:
-            v = math.sqrt(2 * ACCEL * max(pos, 0.1))
-            points.append({"positionM": round(cur_mileage + pos, 1),
-                           "speedMps": round(min(v, CRUISE), 2),
-                           "mode": "MAX_TRACTION"})
-            pos += step
-
-        # 巡航段
-        cruise_start = pos
-        while pos < cruise_start + max(cruise_dist, 0):
-            points.append({"positionM": round(cur_mileage + pos, 1),
-                           "speedMps": round(CRUISE, 2),
-                           "mode": "CRUISE"})
-            pos += step
-
-        # 惰行 + 制动段
-        while pos < dist:
-            remaining = max(dist - pos, 0.1)
-            v = math.sqrt(2 * DECEL * remaining)
-            mode = "COAST" if v > CRUISE * 0.5 else "MAX_BRAKE"
-            points.append({"positionM": round(cur_mileage + pos, 1),
-                           "speedMps": round(min(v, CRUISE), 2),
-                           "mode": mode})
-            pos += step
-
-        points.append({"positionM": round(cur_mileage + dist, 1),
-                       "speedMps": 0.0, "mode": "STOP"})
-
-        if cruise_dist < 0:
-            # 距离太短无法巡航：纯加速+制动
-            mid = dist / 2
-            points.clear()
-            pos = 0.0
-            while pos < mid:
-                v = math.sqrt(2 * ACCEL * max(pos, 0.1))
-                points.append({"positionM": round(cur_mileage + pos, 1),
-                               "speedMps": round(v, 2), "mode": "MAX_TRACTION"})
-                pos += step
-            while pos <= dist:
-                remaining = max(dist - pos, 0.1)
-                v = math.sqrt(2 * DECEL * remaining)
-                points.append({"positionM": round(cur_mileage + pos, 1),
-                               "speedMps": round(min(v, points[-1]["speedMps"] if points else CRUISE), 2),
-                               "mode": "MAX_BRAKE"})
-                pos += step
-            points.append({"positionM": round(cur_mileage + dist, 1),
-                           "speedMps": 0.0, "mode": "STOP"})
-
-        self._dcdp_curve_data[train_id] = points
-
-        # 从合成速度曲线积分预计运行时间
-        total_time = 0.0
-        for i in range(len(points) - 1):
-            dp = points[i+1]["positionM"] - points[i]["positionM"]
-            v_avg = (points[i]["speedMps"] + points[i+1]["speedMps"]) / 2
-            if v_avg > 0.001:
-                total_time += dp / v_avg
-        self._profile_run_times[train_id] = total_time
-
-        print(f"[Profile] Synthetic: {stations[station_index].get('name','')} → "
-              f"{stations[next_idx].get('name','')} ({dist:.0f}m), "
-              f"{len(points)} pts, max={max(pt['speedMps'] for pt in points)*3.6:.0f} km/h, "
-              f"est={total_time:.0f}s")
-
     def export_speed_profile(self, train_id: str) -> list[dict[str, Any]]:
         """返回指定列车的 DCDP 规划速度曲线数据."""
         return self._dcdp_curve_data.get(train_id, [])
+
+    def export_speed_profile_meta(self, train_id: str) -> dict[str, Any]:
+        """返回指定列车速度曲线来源与终端质量."""
+        return self._dcdp_curve_meta.get(train_id, {})
 
     # ═══════════════════════════════════════════════════════════
     #  域服务调用
@@ -849,6 +1116,33 @@ class SimulationEngine:
         """各站累计里程 (m)."""
         return [float(stn.get("mileageM", 0)) for stn in self._station_list]
 
+    def _build_station_platform_ids(self) -> dict[int, tuple[int, ...]]:
+        """按车站里程把线路站台表映射到 station_index."""
+        platforms_by_mileage: dict[float, list[int]] = {}
+        for platform in self.line_map.get("platforms", []):
+            platform_id = platform.get("id")
+            mileage = platform.get("mileageM")
+            if platform_id is None or mileage is None:
+                continue
+            platforms_by_mileage.setdefault(round(float(mileage), 2), []).append(int(platform_id))
+
+        mapping: dict[int, tuple[int, ...]] = {}
+        for index, station in enumerate(self._station_list):
+            station_mileage = float(station.get("mileageM", 0.0))
+            exact = platforms_by_mileage.get(round(station_mileage, 2), [])
+            if exact:
+                mapping[index] = tuple(sorted(exact))
+                continue
+
+            nearest_key = min(
+                platforms_by_mileage,
+                key=lambda key: abs(key - station_mileage),
+                default=None,
+            )
+            if nearest_key is not None and abs(nearest_key - station_mileage) <= 1.0:
+                mapping[index] = tuple(sorted(platforms_by_mileage[nearest_key]))
+        return mapping
+
     def _create_train(self, cfg: TrainConfig) -> SimTrainState:
         """根据配置初始化一辆列车."""
         # 查找起点站序号
@@ -862,6 +1156,9 @@ class SimulationEngine:
         dist = abs(
             self._station_distances[next_idx] - self._station_distances[idx]
         )
+        initial_path_plan = self._path_plan_for_station_pair(idx, next_idx) if idx != next_idx else None
+        if initial_path_plan is not None:
+            dist = initial_path_plan.total_length_m
 
         return SimTrainState(
             train_id=cfg.train_id,

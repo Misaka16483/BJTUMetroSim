@@ -599,11 +599,13 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _speed_profile(self) -> JsonDict:
         if self.engine is None:
-            return {"profiles": {}, "source": "unavailable"}
+            return {"profiles": {}, "profileMeta": {}, "source": "unavailable"}
         profiles: dict[str, Any] = {}
+        profile_meta: dict[str, Any] = {}
         for train in self.engine.trains:
             profiles[train.train_id] = self.engine.export_speed_profile(train.train_id)
-        return {"profiles": profiles, "source": "simulation-engine"}
+            profile_meta[train.train_id] = self.engine.export_speed_profile_meta(train.train_id)
+        return {"profiles": profiles, "profileMeta": profile_meta, "source": "simulation-engine"}
 
     def _send_json(self, payload: JsonDict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

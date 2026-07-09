@@ -136,6 +136,13 @@ export interface SimTrainState {
   energyKwh?: number;
   targetSpeedMps?: number;
   estimatedRunTimeS?: number;
+  pathPositionM?: number;
+  pathTotalLengthM?: number;
+  currentSegmentId?: number | null;
+  localSpeedLimitMps?: number;
+  gradeRatio?: number;
+  pathSegmentCount?: number;
+  pathConstraintCount?: number;
 }
 
 export interface SimStationInfo {
@@ -276,11 +283,24 @@ export interface SpeedProfilePoint {
   positionM: number;
   speedMps: number;
   mode: string;
+  localSpeedLimitMps?: number;
+  gradeRatio?: number;
+  segmentId?: number | null;
 }
 
 export interface SpeedProfileResponse {
   profiles: Record<string, SpeedProfilePoint[]>;
+  profileMeta?: Record<string, SpeedProfileMeta>;
   source: string;
+}
+
+export interface SpeedProfileMeta {
+  source: string;
+  terminalScore?: number | null;
+  scheduledRunTimeS?: number;
+  targetPositionM?: number;
+  permittedSpeedMps?: number;
+  pointCount?: number;
 }
 
 export function fetchSimState(): Promise<SimStateResponse> {
@@ -306,4 +326,3 @@ export function simResume(): Promise<unknown> {
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
 }
-
