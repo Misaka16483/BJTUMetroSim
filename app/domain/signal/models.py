@@ -21,11 +21,11 @@ class TrainState:
     """
 
     train_id: str
-    sim_time_ms: int
-    seg_id: int
-    offset_m: float
-    position_m: float
-    speed_mps: float
+    sim_time_ms: int = 0      # 成员C 主要使用（毫秒），B 的模型不传此字段时会默认为 0
+    seg_id: int = 0            # 当前所在 Seg ID
+    offset_m: float = 0.0     # 当前 Seg 内的偏移（米）
+    position_m: float = 0.0   # 累计位置（米）
+    speed_mps: float = 0.0    # 当前速度（米/秒）
     acceleration_mps2: float = 0.0
     traction_level: float = 0.0
     brake_level: float = 0.0
@@ -39,6 +39,30 @@ class TrainState:
     # Length for section-occupancy derivation (Phase 2).
     # Default 120 m ≈ 6-car B-type metro train.  A/B override per scenario.
     length_m: float = 120.0
+    # —— 成员B 需要的字段（与 B 的 SimpleVehicleModel 兼容）——
+    # B 使用 segment_id（等价于 seg_id），默认与 seg_id 一致
+    segment_id: int | None = None
+    # B 使用秒为单位的时间戳（我们的代码用 sim_time_ms）
+    sim_time_s: float = 0.0
+    # B/D 累计牵引能耗（kWh）
+    net_energy_kwh: float = 0.0
+
+    def __post_init__(self) -> None:
+        """数据校验 —— 兼容成员B的 SimpleVehicleModel 和我们的联锁模块。"""
+        if not self.train_id:
+            raise ValueError("train_id 不能为空")
+        if self.position_m < 0:
+            raise ValueError("position_m 不能为负数")
+        if self.speed_mps < 0:
+            raise ValueError("speed_mps 不能为负数")
+        if self.length_m <= 0:
+            raise ValueError("length_m 必须为正数")
+        if self.segment_id is not None and self.segment_id <= 0:
+            raise ValueError("segment_id 必须为正数")
+        if self.sim_time_s < 0:
+            raise ValueError("sim_time_s 不能为负数")
+        if self.net_energy_kwh < 0:
+            raise ValueError("net_energy_kwh 不能为负数")
 
 
 @dataclass(frozen=True)

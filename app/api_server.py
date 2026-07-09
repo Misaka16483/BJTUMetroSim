@@ -15,6 +15,9 @@ from app.domain.interlocking.section_occupation import SectionOccupationService
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.operations.member_c_demo import MemberCDemoRunner
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
+from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
+from app.domain.operations.phase1_member_d_demo import Phase1MemberDDemoRunner
+from app.domain.operations.phase2_member_d_full_demo import Phase2MemberDFullDemoRunner
 
 
 JsonDict = dict[str, Any]
@@ -257,6 +260,18 @@ class Line9DataService:
             "generatedAt": datetime.now(timezone.utc).isoformat(),
             "summary": summary,
         }
+
+    def member_d_phase0_demo(self) -> JsonDict:
+        db_path = self.run_dir / "phase0_member_d_demo.sqlite"
+        return Phase0MemberDDemoRunner(db_path).run()
+
+    def member_d_phase1_demo(self) -> JsonDict:
+        db_path = self.run_dir / "phase1_member_d_demo.sqlite"
+        return Phase1MemberDDemoRunner(db_path).run()
+
+    def member_d_phase2_full_demo(self) -> JsonDict:
+        db_path = self.run_dir / "phase2_member_d_full_demo.sqlite"
+        return Phase2MemberDFullDemoRunner(db_path).run()
 
     @property
     def sim_runner(self) -> MemberCDemoRunner:
