@@ -7,6 +7,9 @@ const COLORS: Record<number, string> = { 1: '#58a6ff', 2: '#d29922', 3: '#8b949e
 const SYMBOLS: Record<number, string> = { 1: '◆', 2: '◇', 3: '●' };
 const SIG_LABELS: Record<number, string> = { 1: '主信号', 2: '调车', 3: '预告' };
 
+const TRAIN_IMG = new Image();
+TRAIN_IMG.src = '/metro_train.png';
+
 export default function StationInterlockingView({ data }: Props) {
   const canvasWrapRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -15,7 +18,7 @@ export default function StationInterlockingView({ data }: Props) {
   const offsetRef = useRef({ x: 0, y: 0 });
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
 
-  const { bounds, tracks, platforms, signals, switches, routes, labels } = data;
+  const { bounds, tracks, platforms, signals, switches, routes, labels, stationCode } = data;
 
   const updateCenter = useCallback(() => {
     const c = canvasRef.current;
@@ -101,8 +104,19 @@ export default function StationInterlockingView({ data }: Props) {
       ctx.fillText(data.directionLabels.down, 40, tracks.find(t => t.dir === 'down')?.y! + 50);
     }
 
+    // ── 列车（北京西站上行站台，跟联锁图一起缩放平移）──
+    if (stationCode === 'BWR') {
+      const platTrack = tracks.find(t => t.id === 'up-plat');
+      if (platTrack && TRAIN_IMG.complete && TRAIN_IMG.naturalWidth > 0) {
+        const cx = platTrack.x + platTrack.width / 2;
+        const cy = platTrack.y;
+        const tw = 120, th = 60;
+        ctx.drawImage(TRAIN_IMG, cx - tw / 2, cy - th / 2, tw, th);
+      }
+    }
+
     ctx.restore();
-  }, [scale, data, tracks, platforms, signals, switches, routes, labels, bounds]);
+  }, [scale, data, tracks, platforms, signals, switches, routes, labels, bounds, stationCode]);
 
   const handleWheel = useCallback((e: WheelEvent) => { e.preventDefault(); setScale(s => Math.max(0.3, Math.min(5, s * (e.deltaY > 0 ? 0.9 : 1.1)))); }, []);
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -119,6 +133,7 @@ export default function StationInterlockingView({ data }: Props) {
   }, [draw]);
 
   useEffect(() => { draw(); }, [draw]);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
