@@ -256,6 +256,30 @@ export interface PowerNetworkState {
     wastedKw: number;
   };
   lossesKw: number;
+  solver?: {
+    converged: boolean;
+    iterations: number;
+    solveTimeMs: number;
+    powerBalanceErrorKw: number;
+    powerBalanceErrorRatio: number;
+  };
+  switches?: Array<{
+    switchId: string;
+    switchType: string;
+    mileageM: number;
+    fromNodeId: string;
+    toNodeId: string;
+    normalState: string;
+    currentState: string;
+    remoteControllable: boolean;
+  }>;
+  commandResults?: Array<{
+    commandId: string;
+    commandType: string;
+    simTimeMs: number;
+    status: string;
+    error?: string;
+  }>;
   alerts: Array<Record<string, unknown>>;
   source?: string;
   quality?: string;

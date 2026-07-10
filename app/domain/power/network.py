@@ -97,6 +97,13 @@ class TractionPowerNetwork:
         self.switches[switch_id] = next_switch
         return next_switch
 
+    def set_feeder_status(self, feeder_id: str, status: str) -> FeederArm:
+        if feeder_id not in self.feeders:
+            raise KeyError(feeder_id)
+        next_feeder = replace(self.feeders[feeder_id], status=status.upper())
+        self.feeders[feeder_id] = next_feeder
+        return next_feeder
+
     def topology_dict(self) -> dict:
         return {
             "lineId": self.line_id,

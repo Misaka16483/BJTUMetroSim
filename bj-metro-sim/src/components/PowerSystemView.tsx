@@ -80,8 +80,9 @@ export default function PowerSystemView() {
   const trainVoltages = simPowerNetwork?.trainVoltages ?? [];
   const feeders = simPowerNetwork?.feeders ?? [];
   const alerts = simPowerNetwork?.alerts ?? [];
-  const switches = powerTopology?.switches ?? [];
+  const switches = simPowerNetwork?.switches ?? powerTopology?.switches ?? [];
   const regen = simPowerNetwork?.regen;
+  const solver = simPowerNetwork?.solver;
   const firstMileage = substations[0]?.mileageM ?? 0;
   const lastMileage = substations[substations.length - 1]?.mileageM ?? firstMileage + 1;
   const span = Math.max(lastMileage - firstMileage, 1);
@@ -129,6 +130,13 @@ export default function PowerSystemView() {
     });
   }, [simPowerNetwork, trainVoltages, substations, regen]);
 
+  useEffect(() => {
+    const result = simPowerNetwork?.commandResults?.at(-1);
+    if (!result) return;
+    if (result.status === 'APPLIED') setActionStatus(`${result.commandId} 已执行`);
+    if (result.status === 'REJECTED') setActionStatus(`${result.commandId} 被拒绝：${result.error ?? '未知原因'}`);
+  }, [simPowerNetwork?.commandResults]);
+
   const minVoltageTrain = useMemo(
     () => [...trainVoltages].sort((a, b) => a.voltageV - b.voltageV)[0],
     [trainVoltages],
@@ -148,7 +156,7 @@ export default function PowerSystemView() {
       mode: 'N_MINUS_1_BIG_BILATERAL',
     })
       .then(() => {
-        setActionStatus(`${selectedSubstationId} 已停运`);
+        setActionStatus(`${selectedSubstationId} 故障命令已排队`);
         addEvent(latestTick, `N-1 ${selectedSubstationId}`, '#ff453a');
       })
       .catch((error) => setActionStatus(error instanceof Error ? `故障注入失败：${error.message}` : '故障注入失败'))
@@ -161,7 +169,7 @@ export default function PowerSystemView() {
     setActionStatus('正在恢复供电网络');
     postJson('/api/sim/power/reset', {})
       .then(() => {
-        setActionStatus('正常供电已恢复');
+        setActionStatus('供电网络复位命令已排队');
         addEvent(latestTick, '网络复位', '#58a6ff');
       })
       .catch((error) => setActionStatus(error instanceof Error ? `恢复失败：${error.message}` : '恢复失败'))
@@ -174,7 +182,7 @@ export default function PowerSystemView() {
     setActionStatus(`正在${state === 'CLOSED' ? '闭合' : '断开'} ${selectedSwitchId}`);
     postJson(`/api/sim/power/switches/${selectedSwitchId}/operate`, { state })
       .then(() => {
-        setActionStatus(`${selectedSwitchId} 已${state === 'CLOSED' ? '闭合' : '断开'}`);
+        setActionStatus(`${selectedSwitchId} ${state === 'CLOSED' ? '闭合' : '断开'}命令已排队`);
         addEvent(latestTick, `${state === 'CLOSED' ? '闭合' : '断开'} ${selectedSwitchId.replace('SW-TIE-', '')}`, state === 'CLOSED' ? '#8FC31F' : '#8ba0bb');
       })
       .catch((error) => setActionStatus(error instanceof Error ? `开关操作失败：${error.message}` : '开关操作失败'))
@@ -199,6 +207,8 @@ export default function PowerSystemView() {
                 <Readout label="仿真状态" value={simulationStateLabel(engineClockState)} color={engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)'} />
                 <Readout label="仿真时间" value={simTime} color="var(--cyan)" />
                 <Readout label="数据质量" value={powerQualityLabel(powerTopology?.quality)} color="var(--text-muted)" />
+                <Readout label="潮流求解" value={solver ? `${fmt(solver.solveTimeMs, 1)} ms` : '--'} color={solver?.converged === false ? 'var(--amber)' : 'var(--green)'} />
+                <Readout label="平衡误差" value={solver ? `${fmt(solver.powerBalanceErrorRatio * 100, 3)}%` : '--'} color={(solver?.powerBalanceErrorRatio ?? 0) >= 0.01 ? 'var(--amber)' : 'var(--cyan)'} />
               </div>
             </div>
 

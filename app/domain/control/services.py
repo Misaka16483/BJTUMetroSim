@@ -53,6 +53,20 @@ class ATOController:
                 source=CommandSource.ATO,
             )
 
+        if (
+            distance_to_target_m <= self.config.creep_distance_m
+            and state.speed_mps <= self.config.creep_speed_threshold_mps
+        ):
+            self.last_target_speed_mps = self.config.creep_speed_threshold_mps
+            self.last_speed_error_mps = self.config.creep_speed_threshold_mps - state.speed_mps
+            self.last_pid_output_percent = self.config.creep_traction_percent
+            self.last_profile_mode = "CREEP"
+            return ControlCommand(
+                state.train_id,
+                traction_percent=self.config.creep_traction_percent,
+                source=CommandSource.ATO,
+            )
+
         target_speed_mps = self.target_speed_mps(state, target)
         brake_distance_m = state.speed_mps * state.speed_mps / (2.0 * self.config.expected_deceleration_mps2)
         if (

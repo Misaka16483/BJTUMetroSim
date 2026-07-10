@@ -40,13 +40,23 @@ def _require_percent(value: float, field_name: str) -> None:
 @dataclass(frozen=True)
 class VehicleConfig:
     train_id: str = "T001"
-    mass_kg: float = 180_000.0
+    mass_kg: float = 225_000.0
     max_speed_mps: float = 22.22
-    max_traction_force_n: float = 100_000.0
-    max_service_brake_force_n: float = 125_000.0
-    emergency_brake_force_n: float = 180_000.0
-    basic_resistance_n: float = 3_000.0
+    max_traction_force_n: float = 300_000.0
+    max_service_brake_force_n: float = 300_000.0
+    emergency_brake_force_n: float = 337_500.0
+    basic_resistance_n: float = 4_560.0
     stop_speed_threshold_mps: float = 0.05
+    train_length_m: float = 118.0
+    average_passenger_mass_kg: float = 65.0
+    motor_count: int = 16
+    wheel_radius_m: float = 0.46
+    gear_ratio: float = 9.02
+    drivetrain_efficiency: float = 0.90
+    regen_efficiency: float = 0.80
+    auxiliary_power_kw: float = 150.0
+    nominal_line_voltage_v: float = 750.0
+    parameter_quality: str = "TEACHER_CURVE_WITH_CALIBRATED_DRIVETRAIN"
 
     def __post_init__(self) -> None:
         _require_non_empty(self.train_id, "train_id")
@@ -57,6 +67,29 @@ class VehicleConfig:
         _require_positive(self.emergency_brake_force_n, "emergency_brake_force_n")
         _require_non_negative(self.basic_resistance_n, "basic_resistance_n")
         _require_positive(self.stop_speed_threshold_mps, "stop_speed_threshold_mps")
+        _require_positive(self.train_length_m, "train_length_m")
+        _require_positive(self.average_passenger_mass_kg, "average_passenger_mass_kg")
+        _require_positive(float(self.motor_count), "motor_count")
+        _require_positive(self.wheel_radius_m, "wheel_radius_m")
+        _require_positive(self.gear_ratio, "gear_ratio")
+        _require_positive(self.drivetrain_efficiency, "drivetrain_efficiency")
+        _require_positive(self.regen_efficiency, "regen_efficiency")
+        _require_non_negative(self.auxiliary_power_kw, "auxiliary_power_kw")
+        _require_positive(self.nominal_line_voltage_v, "nominal_line_voltage_v")
+
+    @property
+    def empty_mass_kg(self) -> float:
+        return 225_000.0
+
+    @classmethod
+    def for_load(cls, train_id: str, onboard_pax: int, average_passenger_mass_kg: float = 65.0) -> VehicleConfig:
+        if onboard_pax < 0:
+            raise ValueError("onboard_pax must be non-negative")
+        return cls(
+            train_id=train_id,
+            mass_kg=225_000.0 + onboard_pax * average_passenger_mass_kg,
+            average_passenger_mass_kg=average_passenger_mass_kg,
+        )
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

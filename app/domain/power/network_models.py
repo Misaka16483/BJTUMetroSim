@@ -172,6 +172,11 @@ class PowerFlowSnapshot:
     feedback_regen_kw: float = 0.0
     wasted_regen_kw: float = 0.0
     losses_kw: float = 0.0
+    converged: bool = True
+    iterations: int = 0
+    solve_time_ms: float = 0.0
+    power_balance_error_kw: float = 0.0
+    power_balance_error_ratio: float = 0.0
     alerts: list[JsonDict] = field(default_factory=list)
     source: str = "SELF_SIM"
     quality: str = "ENGINEERING_ESTIMATE"
@@ -229,6 +234,13 @@ class PowerFlowSnapshot:
                 "wastedKw": round(self.wasted_regen_kw, 3),
             },
             "lossesKw": round(self.losses_kw, 3),
+            "solver": {
+                "converged": self.converged,
+                "iterations": self.iterations,
+                "solveTimeMs": round(self.solve_time_ms, 3),
+                "powerBalanceErrorKw": round(self.power_balance_error_kw, 4),
+                "powerBalanceErrorRatio": round(self.power_balance_error_ratio, 6),
+            },
             "alerts": self.alerts,
             "source": self.source,
             "quality": self.quality,

@@ -417,6 +417,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self._sim_power_state())
             elif path == "/api/sim/speed-profile":
                 self._send_json(self._speed_profile())
+            elif path == "/api/sim/run/export":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json({"ok": True, "data": self.engine.export_current_run()})
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
@@ -563,17 +568,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         target_id = str(payload.get("targetId", ""))
         if fault_type != "SUBSTATION_OUTAGE" or not target_id:
             return {"ok": False, "error": "UNSUPPORTED_POWER_FAULT"}
-        result = self.engine.apply_power_substation_outage(
-            target_id,
-            big_bilateral=str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
+        result = self.engine.queue_power_command(
+            "SUBSTATION_OUTAGE",
+            {
+                "targetId": target_id,
+                "bigBilateral": str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
+            },
         )
         return {"ok": True, "data": {"faultId": f"PF-{target_id}", **result}}
 
     def _reset_power_network(self) -> JsonDict:
         if self.engine is None:
             return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
-        self.engine.reset_power_network()
-        return {"ok": True, "action": "power_reset"}
+        return {"ok": True, "data": self.engine.queue_power_command("RESET_NETWORK", {})}
 
     def _operate_power_switch(self, switch_id: str, payload: JsonDict) -> JsonDict:
         if self.engine is None or self.engine.power_service.network is None:
@@ -581,7 +588,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         state = str(payload.get("state", "")).upper()
         if state not in {"OPEN", "CLOSED"}:
             return {"ok": False, "error": "INVALID_SWITCH_STATE"}
-        switch = self.engine.operate_power_switch(switch_id, state)
+        result = self.engine.queue_power_command(
+            "OPERATE_SWITCH",
+            {"switchId": switch_id, "state": state},
+        )
+        switch = self.engine.power_service.network.switches[switch_id]
         return {
             "ok": True,
             "data": {
@@ -593,6 +604,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "normalState": switch.normal_state,
                 "currentState": switch.current_state,
                 "remoteControllable": switch.remote_controllable,
+                **result,
             },
         }
 

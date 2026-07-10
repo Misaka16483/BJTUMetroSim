@@ -231,6 +231,30 @@ class RunRecorder:
                 detail_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(run_id) REFERENCES runs(id)
             );
+            CREATE TABLE IF NOT EXISTS power_solver_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                converged INTEGER NOT NULL,
+                iterations INTEGER NOT NULL,
+                solve_time_ms REAL NOT NULL,
+                power_balance_error_kw REAL NOT NULL,
+                power_balance_error_ratio REAL NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
+            CREATE TABLE IF NOT EXISTS power_command_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                command_id TEXT NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                command_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                error TEXT,
+                FOREIGN KEY(run_id) REFERENCES runs(id),
+                UNIQUE(run_id, command_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_station_passenger_station_time
                 ON station_passenger_records(run_id, station_id, direction, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_train_load_train_time
@@ -253,6 +277,10 @@ class RunRecorder:
                 ON substation_power_records(run_id, substation_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_regen_energy_records_time
                 ON regen_energy_records(run_id, sim_time_ms);
+            CREATE INDEX IF NOT EXISTS idx_power_solver_records_time
+                ON power_solver_records(run_id, sim_time_ms);
+            CREATE INDEX IF NOT EXISTS idx_power_command_records_time
+                ON power_command_records(run_id, sim_time_ms);
             """
         )
         self.connection.commit()
@@ -754,6 +782,142 @@ class RunRecorder:
             ),
         )
         self.connection.commit()
+
+    def record_power_solver(
+        self,
+        run_id: int,
+        *,
+        sim_time_ms: int,
+        converged: bool,
+        iterations: int,
+        solve_time_ms: float,
+        power_balance_error_kw: float,
+        power_balance_error_ratio: float,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO power_solver_records(
+                run_id, sim_time_ms, converged, iterations, solve_time_ms,
+                power_balance_error_kw, power_balance_error_ratio, detail_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                sim_time_ms,
+                1 if converged else 0,
+                iterations,
+                solve_time_ms,
+                power_balance_error_kw,
+                power_balance_error_ratio,
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+        self.connection.commit()
+
+    def record_power_command(
+        self,
+        run_id: int,
+        *,
+        command_id: str,
+        sim_time_ms: int,
+        command_type: str,
+        status: str,
+        payload: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO power_command_records(
+                run_id, command_id, sim_time_ms, command_type, status, payload_json, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                command_id,
+                sim_time_ms,
+                command_type,
+                status,
+                json.dumps(payload or {}, ensure_ascii=False),
+                error,
+            ),
+        )
+        self.connection.commit()
+
+    def replay_events(self, run_id: int, topic: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT tick, topic, payload_json, created_at FROM events WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if topic is not None:
+            sql += " AND topic = ?"
+            params.append(topic)
+        sql += " ORDER BY COALESCE(tick, -1), id"
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            {
+                "tick": row[0],
+                "topic": row[1],
+                "payload": json.loads(row[2]),
+                "createdAt": row[3],
+            }
+            for row in rows
+        ]
+
+    def export_run(self, run_id: int) -> dict[str, Any]:
+        run = self.connection.execute(
+            "SELECT id, name, started_at, metadata_json FROM runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise KeyError(f"run_id={run_id}")
+        table_names = (
+            "events",
+            "metrics",
+            "station_passenger_records",
+            "train_load_records",
+            "dwell_records",
+            "dispatch_decisions",
+            "power_records",
+            "train_voltage_records",
+            "substation_power_records",
+            "regen_energy_records",
+            "power_solver_records",
+            "power_command_records",
+        )
+        payload: dict[str, Any] = {
+            "run": {
+                "id": run[0],
+                "name": run[1],
+                "startedAt": run[2],
+                "metadata": json.loads(run[3]),
+            },
+            "tables": {},
+        }
+        previous_row_factory = self.connection.row_factory
+        self.connection.row_factory = sqlite3.Row
+        try:
+            for table_name in table_names:
+                rows = self.connection.execute(
+                    f"SELECT * FROM {table_name} WHERE run_id = ? ORDER BY id",
+                    (run_id,),
+                ).fetchall()
+                items: list[dict[str, Any]] = []
+                for row in rows:
+                    item = dict(row)
+                    for key, value in list(item.items()):
+                        if key.endswith("_json") and isinstance(value, str):
+                            item[key[:-5]] = json.loads(value)
+                            del item[key]
+                    items.append(item)
+                payload["tables"][table_name] = items
+        finally:
+            self.connection.row_factory = previous_row_factory
+        return payload
+
+    def export_run_json(self, run_id: int, output_path: str | Path) -> Path:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self.export_run(run_id), ensure_ascii=False, indent=2), encoding="utf-8")
+        return target
 
     def record_event(
         self,

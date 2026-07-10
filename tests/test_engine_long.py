@@ -1,53 +1,48 @@
-"""测试仿真引擎 — 运行20秒观察列车加速出站."""
-import json
-import time
-import urllib.request
+from __future__ import annotations
 
-def get(path):
-    r = urllib.request.urlopen(f"http://127.0.0.1:8000{path}")
-    return json.loads(r.read())
-
-def post(path):
-    req = urllib.request.Request(f"http://127.0.0.1:8000{path}", method="POST")
-    r = urllib.request.urlopen(req)
-    return json.loads(r.read())
-
-# Clear old DB
 import sqlite3
-db = sqlite3.connect("outputs/runs/phase1_engine.sqlite")
-db.execute("DELETE FROM events")
-db.execute("DELETE FROM metrics")
-db.execute("DELETE FROM station_passenger_records")
-db.execute("DELETE FROM train_load_records")
-db.execute("DELETE FROM dwell_records")
-db.execute("DELETE FROM dispatch_decisions")
-db.execute("DELETE FROM runs")
-db.commit()
-db.close()
+import unittest
+from contextlib import closing
+from pathlib import Path
 
-# Start
-print(">>> Start simulation")
-result = post("/api/sim/start")
-print(f"    started at {result['simTimeMs']}ms")
+from app.core.engine import SimulationEngine
+from app.infra.recorder import RunRecorder
 
-# Poll for 20 seconds
-for i in range(20):
-    time.sleep(1)
-    state = get("/api/sim/state")
-    t = state["trains"][0]
-    print(f"  t={state['clock']['tick']:3d}  {t['phase']:12s}  speed={t['speedMps']:6.2f}m/s  "
-          f"station={t['currentStation']:6s}  next={t['nextStation']}  "
-          f"pax={t['onboardPax']:3d}  dwell={t['dwellRemainingSec']:5.1f}s  "
-          f"progress={t['segmentProgress']:.3f}")
 
-# Stop
-print("\n>>> Stop")
-post("/api/sim/stop")
+ROOT = Path(__file__).resolve().parents[1]
 
-# Show recorded events count
-db = sqlite3.connect("outputs/runs/phase1_engine.sqlite")
-for table in ["events", "station_passenger_records", "dwell_records"]:
-    count = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-    print(f"  {table}: {count} rows")
-db.close()
-print("DONE")
+
+class EngineLongRunTests(unittest.TestCase):
+    def test_five_train_sixty_second_run_records_without_external_server(self) -> None:
+        output_dir = ROOT / "outputs" / "test-runtime"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        db_path = output_dir / "engine_long.sqlite"
+        db_path.unlink(missing_ok=True)
+        recorder = RunRecorder(db_path)
+        try:
+            engine = SimulationEngine.load_from_files(
+                scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
+                line_map_path=ROOT / "data" / "cache" / "line_map.json",
+                stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                recorder=recorder,
+            )
+            engine.load()
+            engine.clock.start()
+            for _tick in range(240):
+                engine._tick()
+            snapshot = engine.snapshot()
+            assert snapshot is not None
+            self.assertEqual(snapshot.tick, 240)
+            self.assertTrue(all(item["phase"] != "IDLE" for item in snapshot.trains))
+            self.assertTrue(snapshot.power_network["solver"]["converged"])
+            with closing(sqlite3.connect(db_path)) as connection:
+                self.assertGreater(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+                self.assertGreater(connection.execute("SELECT COUNT(*) FROM power_solver_records").fetchone()[0], 0)
+                self.assertGreater(connection.execute("SELECT COUNT(*) FROM train_voltage_records").fetchone()[0], 0)
+        finally:
+            recorder.close()
+            db_path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
