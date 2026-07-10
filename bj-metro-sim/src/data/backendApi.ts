@@ -149,6 +149,7 @@ export interface SimTrainState {
   gradeRatio?: number;
   pathSegmentCount?: number;
   pathConstraintCount?: number;
+  operationMode?: string;
 }
 
 export interface SimStationInfo {
@@ -421,22 +422,94 @@ export function simSetVehicleConfig(payload: VehicleConfigPayload): Promise<Vehi
   });
 }
 
-export function simSetManualMode(enabled: boolean): Promise<{ ok: boolean; manualMode: boolean }> {
+export function simSetManualMode(enabled: boolean, trainId?: string): Promise<{ ok: boolean; manualMode: boolean }> {
   return fetch('/api/sim/manual-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify({ enabled, trainId }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
   });
 }
 
-export function simSendManualCommand(tractionPercent: number, brakePercent: number): Promise<unknown> {
+export function simSendManualCommand(tractionPercent: number, brakePercent: number, trainId?: string): Promise<unknown> {
   return fetch('/api/sim/manual-command', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tractionPercent, brakePercent }),
+    body: JSON.stringify({ tractionPercent, brakePercent, trainId }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json();
+  });
+}
+
+export interface AddTrainPayload {
+  trainId: string;
+  initialStationCode: string;
+  direction: 'UP' | 'DOWN';
+  operationMode?: 'ATO' | 'MANUAL';
+  capacityPax?: number;
+  initialLoadPax?: number;
+  vehicleConfig?: VehicleConfigPayload;
+  color?: string;
+}
+
+export interface AddTrainResponse {
+  ok: boolean;
+  train?: SimTrainState;
+  error?: string;
+}
+
+export function simAddTrain(payload: AddTrainPayload): Promise<AddTrainResponse> {
+  return fetch('/api/sim/train/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<AddTrainResponse>;
+  });
+}
+
+export function simRemoveTrain(trainId: string): Promise<{ ok: boolean; removed?: string; error?: string }> {
+  return fetch('/api/sim/train/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean }>;
+  });
+}
+
+export function simSetTrainVehicleConfig(trainId: string, payload: VehicleConfigPayload): Promise<VehicleConfigResponse> {
+  return fetch('/api/sim/train/vehicle-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, ...payload }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<VehicleConfigResponse>;
+  });
+}
+
+export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<{ ok: boolean; manualMode: boolean }> {
+  return fetch('/api/sim/train/manual-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, enabled }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+  });
+}
+
+export function simSendTrainManualCommand(trainId: string, tractionPercent: number, brakePercent: number): Promise<unknown> {
+  return fetch('/api/sim/train/manual-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, tractionPercent, brakePercent }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     return resp.json();

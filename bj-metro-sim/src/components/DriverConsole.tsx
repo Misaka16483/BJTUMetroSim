@@ -98,8 +98,8 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
     energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
     speedTimeHistory, estimatedRunTimeS, pathPositionM, pathTotalLengthM,
     currentSegmentId, localSpeedLimitMps, gradeRatio,
-    startBackendSim, pauseBackendSim, resumeBackendSim, stopBackendSim,
     manualMode, manualTraction, manualBrake, setManualMode,
+    selectedTrainId, trains, selectTrain, trainColors,
   } = useSimStore();
   const color = lineColor(line9.id);
 
@@ -109,6 +109,35 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
 
   return (
     <div className="flex-1 flex flex-col min-h-0" style={{ background: '#111827' }}>
+
+      {/* ── 列车选择条 ── */}
+      {trains.length > 1 && (
+        <div className="shrink-0 flex items-center gap-2 px-8 pt-3 pb-1" style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+          <span className="text-[9px] font-medium uppercase tracking-[0.12em] text-[#6b7280]">SELECT TRAIN</span>
+          <div className="flex gap-1.5">
+            {trains.map((t) => {
+              const sel = t.trainId === selectedTrainId;
+              const tc = trainColors[t.trainId] || '#58a6ff';
+              return (
+                <button
+                  key={t.trainId}
+                  onClick={() => selectTrain(t.trainId)}
+                  className="px-2.5 py-1 rounded text-[10px] font-medium cursor-pointer transition-colors duration-150"
+                  style={{
+                    color: sel ? '#e2e8f0' : tc,
+                    background: sel ? `${tc}22` : 'rgba(255,255,255,0.03)',
+                    border: sel ? `1px solid ${tc}40` : '1px solid rgba(255,255,255,0.04)',
+                  }}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full inline-block mr-1" style={{ backgroundColor: tc }} />
+                  {t.trainId}
+                  <span className="text-[8px] ml-1 opacity-50">{t.operationMode === 'MANUAL' ? 'RM' : 'ATO'}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── 中部顶部：站台信息 ── */}
       <div className="shrink-0 px-8 pt-6 pb-4">
@@ -180,13 +209,12 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
             <span className="font-mono text-[20px] font-bold tracking-[0.04em]" style={{ color: '#e2e8f0' }}>{simTime}</span>
           </div>
 
-          {isBackend && <ControlButtons state={engineClockState} onStart={startBackendSim} onPause={pauseBackendSim} onResume={resumeBackendSim} onStop={stopBackendSim} />}
 
           {/* ── ATO / 手动 切换 ── */}
           <div
             className="flex items-center rounded cursor-pointer"
             style={{ border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)' }}
-            onClick={() => setManualMode(!manualMode)}
+            onClick={() => setManualMode(!manualMode, selectedTrainId ?? undefined)}
           >
             <div
               className="flex-1 text-center py-1.5 rounded text-[9px] font-bold uppercase tracking-[0.1em] transition-colors duration-150"
@@ -400,43 +428,6 @@ function MetricBadge({ label, value, unit, accent }: { label: string; value: str
       <span className="text-[13px] font-bold font-mono" style={{ color: accent }}>{value}</span>
       {unit && <span className="text-[8px] font-medium text-[#6b7280]">{unit}</span>}
     </div>
-  );
-}
-
-/* ═══ 控制按钮 ═══ */
-function ControlButtons({ state, onStart, onPause, onResume, onStop }: {
-  state: string; onStart: () => void; onPause: () => void; onResume: () => void; onStop: () => void;
-}) {
-  const isActive = state === 'RUNNING' || state === 'PAUSED';
-  return (
-    <div className="flex flex-col" style={{ gap: 6 }}>
-      {!isActive ? (
-        <CabButton onClick={onStart} color="#22c55e" label="START" icon="play" />
-      ) : state === 'RUNNING' ? (
-        <>
-          <CabButton onClick={onPause} color="#eab308" label="PAUSE" icon="pause" />
-          <CabButton onClick={onStop} color="#ef4444" label="STOP" icon="stop" />
-        </>
-      ) : (
-        <>
-          <CabButton onClick={onResume} color="#22c55e" label="RESUME" icon="play" />
-          <CabButton onClick={onStop} color="#ef4444" label="STOP" icon="stop" />
-        </>
-      )}
-    </div>
-  );
-}
-
-function CabButton({ onClick, color, label, icon }: { onClick: () => void; color: string; label: string; icon: 'play' | 'pause' | 'stop' }) {
-  return (
-    <button onClick={onClick}
-      className="flex items-center justify-center gap-2 cursor-pointer rounded py-2.5 transition-colors duration-150 w-full select-none"
-      style={{ color, background: `${color}0d`, border: `1px solid ${color}26` }}>
-      {icon === 'play' && <svg width="10" height="10" viewBox="0 0 10 10"><polygon points="2,1 9,5 2,9" fill="currentColor" /></svg>}
-      {icon === 'pause' && <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="3" height="8" rx="0.5" fill="currentColor" /><rect x="6" y="1" width="3" height="8" rx="0.5" fill="currentColor" /></svg>}
-      {icon === 'stop' && <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" rx="1.2" fill="currentColor" /></svg>}
-      <span className="text-[10px] font-bold tracking-[0.12em]">{label}</span>
-    </button>
   );
 }
 

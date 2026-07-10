@@ -451,12 +451,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
-            if not self.engine:
-                self._send_json(
-                    {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                )
-                return
+            if path == "/api/sim/start" or path == "/api/sim/pause" or path == "/api/sim/resume" or path == "/api/sim/stop":
+                if not self.engine:
+                    self._send_json(
+                        {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
 
             if path == "/api/sim/start":
                 self.engine.start()
@@ -475,6 +476,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/train/add":
+                self._send_json(self._add_train())
+            elif path == "/api/sim/train/remove":
+                self._send_json(self._remove_train())
+            elif path == "/api/sim/train/vehicle-config":
+                self._send_json(self._set_train_vehicle_config())
+            elif path == "/api/sim/train/manual-mode":
+                self._send_json(self._set_train_manual_mode())
+            elif path == "/api/sim/train/manual-command":
+                self._send_json(self._send_train_manual_command())
             elif path == "/api/sim/vehicle-config":
                 payload = self._read_json_body()
                 vcfg = self.engine.set_vehicle_config(payload)
@@ -482,10 +493,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/manual-mode":
                 payload = self._read_json_body()
                 enabled = bool(payload.get("enabled", False))
-                self._send_json(self.engine.set_manual_mode(enabled))
+                train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
+                self._send_json(self.engine.set_manual_mode(train_id, enabled))
             elif path == "/api/sim/manual-command":
                 payload = self._read_json_body()
+                train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
                 self._send_json(self.engine.set_manual_command(
+                    train_id,
                     float(payload.get("tractionPercent", 0)),
                     float(payload.get("brakePercent", 0)),
                 ))
@@ -628,6 +642,50 @@ class ApiHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
+
+    def _add_train(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        return self.engine.add_train(payload)
+
+    def _remove_train(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        return self.engine.remove_train(str(payload.get("trainId", "")))
+
+    def _set_train_vehicle_config(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        vcfg = self.engine.set_train_vehicle_config(train_id, payload)
+        return {"ok": True, "vehicleConfig": vcfg.to_dict()}
+
+    def _set_train_manual_mode(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        return self.engine.set_manual_mode(train_id, bool(payload.get("enabled", False)))
+
+    def _send_train_manual_command(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        return self.engine.set_manual_command(
+            train_id,
+            float(payload.get("tractionPercent", 0)),
+            float(payload.get("brakePercent", 0)),
+        )
 
     def _speed_profile(self) -> JsonDict:
         if self.engine is None:

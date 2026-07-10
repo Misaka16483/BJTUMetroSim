@@ -72,6 +72,8 @@ class SimTrainState:
     last_dispatch_action: str = "FOLLOW_TIMETABLE"
     last_dispatch_reason: str = "NO_ADJUSTMENT_NEEDED"
     dispatch_hold_applied_station_index: int | None = None
+    # ── 驾驶模式 ──
+    operation_mode: str = "ATO"  # "ATO" or "MANUAL"
     # ── 驾驶台反馈字段 ──
     traction_percent: float = 0.0
     brake_percent: float = 0.0
@@ -100,6 +102,8 @@ class SimTrainState:
     _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
     _path_origin_station_index: int | None = field(default=None, repr=False, compare=False)
     _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
+    # ── 手动驾驶 per-train 指令 ──
+    _manual_command: ControlCommand | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> JsonDict:
         return {
@@ -145,6 +149,7 @@ class SimTrainState:
             "regenLimitRatio": round(self.regen_limit_ratio, 4),
             "powerLimitedDurationSec": round(self.power_limited_duration_sec, 3),
             "powerConstraintDelaySec": round(self.power_constraint_delay_sec, 3),
+            "operationMode": self.operation_mode,
         }
 
 
@@ -243,12 +248,11 @@ class SimulationEngine:
         self._dcdp_curve_meta: dict[str, dict[str, Any]] = {}
         self._profile_run_times: dict[str, float] = {}                  # 预计区间运行时间
 
-        # ── 用户配置的车辆参数 ──
-        self._user_vehicle_config: VehicleConfig | None = None
+        # ── 用户配置的车辆参数（per-train） ──
+        self._vehicle_config_by_train: dict[str, VehicleConfig] = {}
 
-        # ── 手动驾驶模式 ──
-        self._manual_mode: bool = False
-        self._manual_command: ControlCommand | None = None
+        # ── 手动驾驶模式（per-train） ──
+        self._manual_mode_by_train: dict[str, bool] = {}
 
         # ── 线程安全 ──
         self._lock = threading.Lock()
@@ -262,71 +266,147 @@ class SimulationEngine:
     # ═══════════════════════════════════════════════════════════
 
     def set_vehicle_config(self, data: JsonDict) -> VehicleConfig:
-        """接收前端传来的车辆参数并保存."""
-        train_id = self.trains[0].train_id if self.trains else "T0901"
+        """接收前端传来的车辆参数并保存（默认用于所有新车）."""
+        train_id = data.get("trainId", self.trains[0].train_id if self.trains else "T0901")
         vcfg = VehicleConfig.from_user_config(train_id, data)
-        self._user_vehicle_config = vcfg
+        self._vehicle_config_by_train[train_id] = vcfg
+        for train in self.trains:
+            if train.train_id == train_id:
+                train.mass_kg = vcfg.mass_kg
+                train.capacity_pax = 600
         return vcfg
 
-    def set_manual_mode(self, enabled: bool) -> dict:
-        """切换手动/ATO模式."""
-        self._manual_mode = enabled
-        if not enabled:
-            self._manual_command = None
-        return {"ok": True, "manualMode": enabled}
+    def set_train_vehicle_config(self, train_id: str, data: JsonDict) -> VehicleConfig:
+        """为指定列车设置车辆参数."""
+        vcfg = VehicleConfig.from_user_config(train_id, data)
+        self._vehicle_config_by_train[train_id] = vcfg
+        for train in self.trains:
+            if train.train_id == train_id:
+                train.mass_kg = vcfg.mass_kg
+        return vcfg
 
-    def set_manual_command(self, traction_percent: float, brake_percent: float) -> dict:
-        """接收手动驾驶指令."""
-        if not self._manual_mode:
-            return {"ok": False, "error": "NOT_IN_MANUAL_MODE"}
-        train_id = self.trains[0].train_id if self.trains else "T0901"
-        self._manual_command = ControlCommand(
-            train_id=train_id,
-            traction_percent=max(0.0, min(100.0, traction_percent)),
-            brake_percent=max(0.0, min(100.0, brake_percent)),
-            source=CommandSource.MANUAL,
-        )
-        return {"ok": True, "tractionPercent": self._manual_command.traction_percent, "brakePercent": self._manual_command.brake_percent}
+    def set_manual_mode(self, train_id: str, enabled: bool) -> dict:
+        """切换指定列车的 MANUAL/ATO 模式."""
+        for train in self.trains:
+            if train.train_id == train_id:
+                train.operation_mode = "MANUAL" if enabled else "ATO"
+                if not enabled:
+                    train._manual_command = None
+                self._manual_mode_by_train[train_id] = enabled
+                return {"ok": True, "trainId": train_id, "manualMode": enabled}
+        return {"ok": False, "error": "TRAIN_NOT_FOUND"}
+
+    def set_manual_command(self, train_id: str, traction_percent: float, brake_percent: float) -> dict:
+        """接收指定列车的手动驾驶指令."""
+        for train in self.trains:
+            if train.train_id == train_id:
+                if train.operation_mode != "MANUAL":
+                    return {"ok": False, "error": "NOT_IN_MANUAL_MODE"}
+                train._manual_command = ControlCommand(
+                    train_id=train_id,
+                    traction_percent=max(0.0, min(100.0, traction_percent)),
+                    brake_percent=max(0.0, min(100.0, brake_percent)),
+                    source=CommandSource.MANUAL,
+                )
+                return {"ok": True, "trainId": train_id, "tractionPercent": train._manual_command.traction_percent, "brakePercent": train._manual_command.brake_percent}
+        return {"ok": False, "error": "TRAIN_NOT_FOUND"}
 
     def _make_vehicle_config(self, train_id: str) -> VehicleConfig:
         """构建当前应使用的车辆配置."""
-        if self._user_vehicle_config is not None:
-            uc = self._user_vehicle_config
+        vcfg = self._vehicle_config_by_train.get(train_id)
+        if vcfg is not None:
             return VehicleConfig(
                 train_id=train_id,
-                formation=uc.formation,
-                car_masses_kg=uc.car_masses_kg,
-                head_car_length_m=uc.head_car_length_m,
-                middle_car_length_m=uc.middle_car_length_m,
-                wheel_radius_m=uc.wheel_radius_m,
-                max_speed_mps=uc.max_speed_mps,
-                max_traction_force_n=uc.max_traction_force_n,
-                max_service_brake_force_n=uc.max_service_brake_force_n,
-                emergency_brake_force_n=uc.emergency_brake_force_n,
-                basic_resistance_n=uc.basic_resistance_n,
-                motor_count=uc.motor_count,
-                gear_ratio=uc.gear_ratio,
-                drivetrain_efficiency=uc.drivetrain_efficiency,
-                regen_efficiency=uc.regen_efficiency,
-                auxiliary_power_kw=uc.auxiliary_power_kw,
-                nominal_line_voltage_v=uc.nominal_line_voltage_v,
+                formation=vcfg.formation,
+                car_masses_kg=vcfg.car_masses_kg,
+                head_car_length_m=vcfg.head_car_length_m,
+                middle_car_length_m=vcfg.middle_car_length_m,
+                wheel_radius_m=vcfg.wheel_radius_m,
+                max_speed_mps=vcfg.max_speed_mps,
+                max_traction_force_n=vcfg.max_traction_force_n,
+                max_service_brake_force_n=vcfg.max_service_brake_force_n,
+                emergency_brake_force_n=vcfg.emergency_brake_force_n,
+                basic_resistance_n=vcfg.basic_resistance_n,
+                motor_count=vcfg.motor_count,
+                gear_ratio=vcfg.gear_ratio,
+                drivetrain_efficiency=vcfg.drivetrain_efficiency,
+                regen_efficiency=vcfg.regen_efficiency,
+                auxiliary_power_kw=vcfg.auxiliary_power_kw,
+                nominal_line_voltage_v=vcfg.nominal_line_voltage_v,
             )
         return VehicleConfig(train_id=train_id)
 
     def _manual_override(self, ato_cmd: ControlCommand, train_id: str) -> ControlCommand:
-        """如果处于手动模式，用前端指令替代 ATO 指令."""
-        if not self._manual_mode or self._manual_command is None:
-            return ato_cmd
-        mc = self._manual_command
-        return ControlCommand(
+        """如果该列车处于手动模式，用其手动指令替代 ATO 指令."""
+        for train in self.trains:
+            if train.train_id == train_id:
+                if train.operation_mode != "MANUAL" or train._manual_command is None:
+                    return ato_cmd
+                mc = train._manual_command
+                return ControlCommand(
+                    train_id=train_id,
+                    traction_percent=mc.traction_percent,
+                    brake_percent=mc.brake_percent,
+                    source=CommandSource.MANUAL,
+                )
+        return ato_cmd
+
+    def add_train(self, payload: JsonDict) -> JsonDict:
+        """动态添加一列车."""
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        for t in self.trains:
+            if t.train_id == train_id:
+                return {"ok": False, "error": "TRAIN_ID_EXISTS"}
+
+        initial_station_code = str(payload.get("initialStationCode", self._station_list[0].get("code", "GGZ")))
+        direction = str(payload.get("direction", "UP"))
+        operation_mode = str(payload.get("operationMode", "ATO"))
+        if operation_mode not in ("ATO", "MANUAL"):
+            operation_mode = "ATO"
+
+        cfg = TrainConfig(
             train_id=train_id,
-            traction_percent=mc.traction_percent,
-            brake_percent=mc.brake_percent,
-            source=CommandSource.MANUAL,
+            line_id="9",
+            initial_station_code=initial_station_code,
+            direction=direction,
+            capacity_pax=int(payload.get("capacityPax", 600)),
+            initial_load_pax=int(payload.get("initialLoadPax", 0)),
         )
+        train = self._create_train(cfg)
+        train.operation_mode = operation_mode
+        if operation_mode == "MANUAL":
+            self._manual_mode_by_train[train_id] = True
+
+        # 如有用户车辆参数，应用之
+        vehicle_data = payload.get("vehicleConfig")
+        if vehicle_data and isinstance(vehicle_data, dict):
+            vcfg = VehicleConfig.from_user_config(train_id, vehicle_data)
+            self._vehicle_config_by_train[train_id] = vcfg
+            train.mass_kg = vcfg.mass_kg
+
+        self.trains.append(train)
+        self._snapshot = self._build_snapshot()
+        return {"ok": True, "train": train.to_dict()}
+
+    def remove_train(self, train_id: str) -> JsonDict:
+        """动态删除一列车."""
+        before = len(self.trains)
+        self.trains = [t for t in self.trains if t.train_id != train_id]
+        self._vehicle_config_by_train.pop(train_id, None)
+        self._manual_mode_by_train.pop(train_id, None)
+        self._dcdp_curve_data.pop(train_id, None)
+        self._dcdp_curve_meta.pop(train_id, None)
+        self._profile_run_times.pop(train_id, None)
+        self._ato_by_train.pop(train_id, None)
+        if len(self.trains) == before:
+            return {"ok": False, "error": "TRAIN_NOT_FOUND"}
+        self._snapshot = self._build_snapshot()
+        return {"ok": True, "removed": train_id}
 
     def load(self) -> None:
-        """加载场景，初始化列车状态."""
+        """加载场景，初始化仿真（初始无车，由前端动态加车）."""
         self.clock.load()
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
@@ -339,7 +419,9 @@ class SimulationEngine:
         self._power_command_results = []
         self._power_command_sequence = 0
         self._recorded_power_command_ids = set()
-        self.trains = [self._create_train(cfg) for cfg in self.scenario.trains]
+        self._manual_mode_by_train = {}
+        self._vehicle_config_by_train = {}
+        self.trains = []  # 初始无车，由前端动态加车
         self._snapshot = self._build_snapshot()
 
         if self.recorder is not None:
@@ -905,7 +987,7 @@ class SimulationEngine:
             )
             cmd = self.ato.decide(state, target)
 
-            if not self._manual_mode:
+            if train.operation_mode != "MANUAL":
                 if profile_mode == "MAX_TRACTION" and train.speed_mps < effective_limit - 0.2:
                     cmd = ControlCommand(
                         train_id=train.train_id,

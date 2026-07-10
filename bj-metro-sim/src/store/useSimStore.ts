@@ -7,13 +7,15 @@ import type {
   SimPowerState,
   SimStateResponse,
   SimStationInfo,
+  SimTrainState,
   TrackMapData,
   SpeedProfilePoint,
   SpeedProfileMeta,
   VehicleConfigPayload,
   VehicleConfigResponse,
+  AddTrainPayload,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSetManualMode, simSendManualCommand } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSetManualMode, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power';
 
@@ -61,13 +63,23 @@ interface SimState {
   simPowerNetwork: PowerNetworkState | null;
   dispatchDecisions: SimDispatchDecision[];
 
+  // 所有列车状态
+  trains: SimTrainState[];
+
+  // 列车颜色 (trainId -> hex)
+  trainColors: Record<string, string>;
+
+  // 每车速度历史缓存
+  speedHistoryByTrain: Record<string, SpeedHistoryEntry[]>;
+  speedTimeHistoryByTrain: Record<string, SpeedTimeEntry[]>;
+
   // 选中的列车ID
   selectedTrainId: string | null;
 
   // 选中的车站代码 (用于轨道级→联锁图跳转)
   selectedStationCode: string | null;
 
-  // 信号屏 / MMI 字段
+  // 信号屏 / MMI 字段 (由选中列车驱动)
   driveMode: string;
   currentStation: string;
   nextStation: string;
@@ -92,18 +104,11 @@ interface SimState {
   // ── 速度曲线 ──
   speedProfile: SpeedProfilePoint[];
   speedProfileMeta: SpeedProfileMeta | null;
-  speedHistory: Array<{
-    positionM: number;
-    speedMps: number;
-    targetSpeedMps?: number;
-    localSpeedLimitMps?: number;
-    gradeRatio?: number;
-    segmentId?: number | null;
-  }>;
-  speedTimeHistory: Array<{ elapsedS: number; speedMps: number }>;
+  speedHistory: SpeedHistoryEntry[];
+  speedTimeHistory: SpeedTimeEntry[];
   stationIndex: number;
 
-  // 多线路列车在地图上的位置
+  // 多车在地图上的位置 (trainId → 坐标)
   trainPositions: Record<string, { lat: number; lng: number }>;
 
   // 当前区间进度 0~1
@@ -133,11 +138,17 @@ interface SimState {
   submitVehicleConfig: () => Promise<void>;
   setShowVehicleConfig: (show: boolean) => void;
 
+  // 列车管理
+  addTrain: (payload: AddTrainPayload) => Promise<boolean>;
+  removeTrain: (trainId: string) => Promise<boolean>;
+  setTrainColor: (trainId: string, color: string) => void;
+
   // 手动驾驶
   manualMode: boolean;
+  manualTrainIds: Set<string>;
   manualTraction: number;
   manualBrake: number;
-  setManualMode: (enabled: boolean) => Promise<void>;
+  setManualMode: (enabled: boolean, trainId?: string) => Promise<void>;
   sendManualCommand: (traction: number, brake: number) => void;
   _lastManualSend: number;
 
@@ -267,6 +278,78 @@ function interpolateOnPolyline(
   return sub[sub.length - 1];
 }
 
+type SpeedHistoryEntry = {
+  positionM: number;
+  speedMps: number;
+  targetSpeedMps?: number;
+  localSpeedLimitMps?: number;
+  gradeRatio?: number;
+  segmentId?: number | null;
+};
+
+type SpeedTimeEntry = { elapsedS: number; speedMps: number };
+
+const DEF_TRAIN_COLORS = [
+  '#8FC31F', '#58a6ff', '#f59e0b', '#22c55e', '#ef4444',
+  '#c084fc', '#00a8ff', '#fbbf24', '#ec4899', '#14b8a6',
+  '#8b5cf6', '#f97316',
+];
+
+function _nextTrainColor(used: Set<string>): string {
+  for (const c of DEF_TRAIN_COLORS) {
+    if (!used.has(c)) return c;
+  }
+  return DEF_TRAIN_COLORS[used.size % DEF_TRAIN_COLORS.length];
+}
+function _applyTrainDetail(t: SimTrainState, trainId: string, state?: ReturnType<typeof useSimStore.getState>, forceReset = false) {
+  const manualMode = t.operationMode === 'MANUAL';
+  const base = {
+    currentStation: t.currentStation,
+    nextStation: t.nextStation,
+    currentSpeedMps: t.speedMps,
+    permittedSpeedMps: t.permittedSpeedMps,
+    distanceToNextStationM: Math.round(t.distanceToNextM),
+    targetDistanceM: Math.round(t.targetDistanceM),
+    runDirection: t.direction,
+    stationIndex: t.stationIndex,
+    segmentProgress: t.segmentProgress,
+    driveMode: t.phase === 'DWELLING' ? 'CM' : manualMode ? 'RM' : 'AM',
+    tractionPercent: t.tractionPercent ?? 0,
+    brakePercent: t.brakePercent ?? 0,
+    energyKwh: t.energyKwh ?? 0,
+    estimatedRunTimeS: t.estimatedRunTimeS ?? 0,
+    targetSpeedMps: t.targetSpeedMps ?? 22.22,
+    pathPositionM: t.pathPositionM ?? 0,
+    pathTotalLengthM: t.pathTotalLengthM ?? 0,
+    currentSegmentId: t.currentSegmentId ?? null,
+    localSpeedLimitMps: t.localSpeedLimitMps ?? t.permittedSpeedMps,
+    gradeRatio: t.gradeRatio ?? 0,
+    pathSegmentCount: t.pathSegmentCount ?? 0,
+    pathConstraintCount: t.pathConstraintCount ?? 0,
+    avgLoadRate: Math.round(t.loadFactor * 100),
+    totalPassengers: t.onboardPax,
+    lastDispatchAction: t.lastDispatchAction,
+  };
+  if (!state) return base;
+
+  let intervalChanged = forceReset;
+  if (!forceReset) {
+    const currentPathLengthM = t.pathTotalLengthM ?? t.targetDistanceM ?? 0;
+    intervalChanged = (
+      t.currentStation !== state.currentStation
+      || t.nextStation !== state.nextStation
+      || Math.abs(currentPathLengthM - state.pathTotalLengthM) > 0.5
+    );
+  }
+  return {
+    ...base,
+    speedHistory: intervalChanged ? [] : state.speedHistory,
+    speedTimeHistory: intervalChanged ? [] : state.speedTimeHistory,
+    speedProfile: intervalChanged ? [] : state.speedProfile,
+    speedProfileMeta: intervalChanged ? null : state.speedProfileMeta,
+  };
+}
+
 export const useSimStore = create<SimState>((set, get) => ({
   isRunning: false,
   speed: 1,
@@ -299,6 +382,10 @@ export const useSimStore = create<SimState>((set, get) => ({
   simPower: [],
   simPowerNetwork: null,
   dispatchDecisions: [],
+  trains: [],
+  trainColors: {},
+  speedHistoryByTrain: {},
+  speedTimeHistoryByTrain: {},
   selectedTrainId: null,
   selectedStationCode: null,
 
@@ -348,6 +435,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   showVehicleConfig: false,
 
   manualMode: false,
+  manualTrainIds: new Set<string>(),
   manualTraction: 0,
   manualBrake: 0,
   _lastManualSend: 0,
@@ -365,7 +453,22 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
   setSpeed: (speed: number) => set({ speed }),
   setDayType: (dayType) => set({ dayType }),
-  selectTrain: (id: string | null) => set({ selectedTrainId: id }),
+  selectTrain: (id: string | null) => {
+    const state = get();
+    if (!id) {
+      set({ selectedTrainId: null });
+      return;
+    }
+    const train = state.trains.find((t) => t.trainId === id);
+    if (!train) return;
+    const sel = _applyTrainDetail(train, id, state, true);
+    set({
+      selectedTrainId: id,
+      ...sel,
+      speedHistory: state.speedHistoryByTrain[id] || [],
+      speedTimeHistory: state.speedTimeHistoryByTrain[id] || [],
+    });
+  },
   setSelectedStationCode: (code: string | null) => set({ selectedStationCode: code }),
 
   setMetroLines: (lines) => {
@@ -538,13 +641,21 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   updateFromBackend: (data: SimStateResponse) => {
     const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions } = data;
-    const t0 = trains[0];
-
     const state = get();
     const isEngineRunning = clock.state === 'RUNNING';
+
+    // 如果有车但没有选中，自动选第一辆
+    let selId = state.selectedTrainId;
+    if (selId && !trains.find((t) => t.trainId === selId)) selId = null;
+    if (!selId && trains.length > 0) selId = trains[0].trainId;
+
+    const selTrain = selId ? trains.find((t) => t.trainId === selId) : null;
+
     set({
       engineClockState: clock.state,
       isRunning: isEngineRunning,
+      trains: trains,
+      selectedTrainId: selId,
       simStations: stations ?? [],
       simPower: power ?? [],
       simPowerNetwork: powerNetwork ?? null,
@@ -560,135 +671,85 @@ export const useSimStore = create<SimState>((set, get) => ({
       lastDispatchAction: kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
     });
 
-    if (!t0) return;
-
-    if (!isEngineRunning && clock.state !== 'PAUSED') return;
-
-    // 仿真时间
-    set({ simTime: clock.simTime });
-
-    // 信号屏字段
-    // 站台变化时重置速度曲线
-    const currentPathLengthM = t0.pathTotalLengthM ?? t0.targetDistanceM ?? 0;
-    const intervalChanged = (
-      t0.currentStation !== state.currentStation
-      || t0.nextStation !== state.nextStation
-      || Math.abs(currentPathLengthM - state.pathTotalLengthM) > 0.5
-    );
-    const baseSpeedHistory = intervalChanged ? [] : state.speedHistory;
-    const baseSpeedTimeHistory = intervalChanged ? [] : state.speedTimeHistory;
-    if (intervalChanged) {
-      set({ speedHistory: [], speedProfile: [], speedProfileMeta: null, speedTimeHistory: [] });
+    // 为新出现的列车自动分配颜色
+    const curColors = get().trainColors;
+    const usedColors = new Set(Object.values(curColors));
+    const newColors = { ...curColors };
+    let changed = false;
+    for (const t of trains) {
+      if (!newColors[t.trainId]) {
+        newColors[t.trainId] = _nextTrainColor(usedColors);
+        usedColors.add(newColors[t.trainId]);
+        changed = true;
+      }
     }
-    set({
-      currentStation: t0.currentStation,
-      nextStation: t0.nextStation,
-      currentSpeedMps: t0.speedMps,
-      permittedSpeedMps: t0.permittedSpeedMps,
-      distanceToNextStationM: Math.round(t0.distanceToNextM),
-      targetDistanceM: Math.round(t0.targetDistanceM),
-      runDirection: t0.direction,
-      stationIndex: t0.stationIndex,
-      segmentProgress: t0.segmentProgress,
-      driveMode: t0.phase === 'DWELLING' ? 'CM' : 'AM',
-      tractionPercent: t0.tractionPercent ?? 0,
-      brakePercent: t0.brakePercent ?? 0,
-      energyKwh: t0.energyKwh ?? 0,
-      estimatedRunTimeS: t0.estimatedRunTimeS ?? 0,
-      targetSpeedMps: t0.targetSpeedMps ?? 22.22,
-      pathPositionM: t0.pathPositionM ?? 0,
-      pathTotalLengthM: t0.pathTotalLengthM ?? 0,
-      currentSegmentId: t0.currentSegmentId ?? null,
-      localSpeedLimitMps: t0.localSpeedLimitMps ?? t0.permittedSpeedMps,
-      gradeRatio: t0.gradeRatio ?? 0,
-      pathSegmentCount: t0.pathSegmentCount ?? 0,
-      pathConstraintCount: t0.pathConstraintCount ?? 0,
-    });
+    if (changed) set({ trainColors: newColors });
 
-    // 列车地图位置 — polyline 插值 (支持多线路)
-    const newPositions: Record<string, { lat: number; lng: number }> = { ...state.trainPositions };
+    if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
+      set({ simTime: clock.simTime });
+      const sel = _applyTrainDetail(selTrain, selTrain.trainId, get());
+      set({ ...sel, manualMode: selTrain.operationMode === 'MANUAL' });
+    }
+
+    // 全部列车地图位置
     const line9 = state.metroLines.find((l) => l.id === '9');
+    const newPositions: Record<string, { lat: number; lng: number }> = {};
     if (line9 && cachedPolyline) {
       if (!cachedStationPolyIdx || cachedStationPolyIdx.length !== line9.stations.length) {
         buildPolylineCache(line9);
       }
-      const nextIdx = t0.direction === 'UP'
-        ? Math.min(t0.stationIndex + 1, state.line9Stations.length - 1)
-        : Math.max(t0.stationIndex - 1, 0);
-      const pos = interpolateOnPolyline(t0.stationIndex, nextIdx, t0.segmentProgress);
-      if (pos) {
-        newPositions['9'] = { lat: pos[0], lng: pos[1] };
+      for (const t of trains) {
+        const stIdx = t.stationIndex;
+        const nextIdx = t.direction === 'UP'
+          ? Math.min(stIdx + 1, (line9.stations.length || 1) - 1)
+          : Math.max(stIdx - 1, 0);
+        const pos = interpolateOnPolyline(stIdx, nextIdx, t.segmentProgress);
+        if (pos) {
+          newPositions[t.trainId] = { lat: pos[0], lng: pos[1] };
+        }
       }
     }
     set({ trainPositions: newPositions });
 
     // KPI
     set({
-      avgLoadRate: Math.round(t0.loadFactor * 100),
-      totalPassengers: t0.onboardPax,
       totalBoarded: kpi.totalOnboardPax,
       avgWaitTime: kpi.totalWaitingPax ?? 0,
-      totalWaitingPax: kpi.totalWaitingPax ?? 0,
-      maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
-      totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
-      minTractionLimitRatio: kpi.minTractionLimitRatio ?? 1,
-      minTrainVoltageV: kpi.minTrainVoltageV ?? 750,
-      totalAbsorbedRegenKw: kpi.totalAbsorbedRegenKw ?? 0,
-      totalWastedRegenKw: kpi.totalWastedRegenKw ?? 0,
-      powerLossesKw: kpi.powerLossesKw ?? 0,
-      lastDispatchAction: t0.lastDispatchAction ?? kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
     });
 
-    // 速度历史曲线 — 记录 (位置, 速度) 对
-    const hasPathPosition = typeof t0.pathPositionM === 'number' && (t0.pathTotalLengthM ?? 0) > 0;
-    if (hasPathPosition) {
-      const newHistory = [
-        ...baseSpeedHistory,
-        {
-          positionM: t0.pathPositionM ?? 0,
-          speedMps: t0.speedMps,
-          targetSpeedMps: t0.targetSpeedMps ?? 0,
-          localSpeedLimitMps: t0.localSpeedLimitMps,
-          gradeRatio: t0.gradeRatio,
-          segmentId: t0.currentSegmentId,
-        },
-      ];
-      if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
-      set({ speedHistory: newHistory });
-    } else {
-      const tm = state.trackMap;
-      if (tm?.stations?.length) {
-      const stIdx = t0.stationIndex;
-      const nextIdx = t0.direction === 'UP' ? stIdx + 1 : stIdx - 1;
-      if (nextIdx >= 0 && nextIdx < tm.stations.length) {
-        const curM = tm.stations[stIdx]?.mileageM ?? 0;
-        const nextM = tm.stations[nextIdx]?.mileageM ?? curM + 1347;
-        const positionM = curM + t0.segmentProgress * Math.abs(nextM - curM);
+    // 速度历史曲线 — 选中列车
+    if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
+      const curState = get();
+      const hasPathPosition = typeof selTrain.pathPositionM === 'number' && (selTrain.pathTotalLengthM ?? 0) > 0;
+      if (hasPathPosition) {
         const newHistory = [
-          ...baseSpeedHistory,
+          ...curState.speedHistory,
           {
-            positionM,
-            speedMps: t0.speedMps,
-            targetSpeedMps: t0.targetSpeedMps ?? 0,
-            localSpeedLimitMps: t0.localSpeedLimitMps,
-            gradeRatio: t0.gradeRatio,
-            segmentId: t0.currentSegmentId,
+            positionM: selTrain.pathPositionM ?? 0,
+            speedMps: selTrain.speedMps,
+            targetSpeedMps: selTrain.targetSpeedMps ?? 0,
+            localSpeedLimitMps: selTrain.localSpeedLimitMps,
+            gradeRatio: selTrain.gradeRatio,
+            segmentId: selTrain.currentSegmentId,
           },
         ];
         if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
-        set({ speedHistory: newHistory });
+        set({
+          speedHistory: newHistory,
+          speedHistoryByTrain: { ...curState.speedHistoryByTrain, [selId]: newHistory },
+        });
       }
-      }
-    }
 
-    // 速度-时间曲线 — 记录 (发车后秒数, 速度) 对
-    if (t0.phase !== 'DWELLING' && t0.phase !== 'IDLE') {
-      const elapsedS = baseSpeedTimeHistory.length > 0
-        ? baseSpeedTimeHistory[baseSpeedTimeHistory.length - 1].elapsedS + 0.25
-        : 0.25;
-      const newTimeHistory = [...baseSpeedTimeHistory, { elapsedS, speedMps: t0.speedMps }];
-      if (newTimeHistory.length > 500) newTimeHistory.splice(0, newTimeHistory.length - 500);
-      set({ speedTimeHistory: newTimeHistory });
+      if (selTrain.phase !== 'DWELLING' && selTrain.phase !== 'IDLE') {
+        const baseTime = curState.speedTimeHistory;
+        const elapsedS = baseTime.length > 0 ? baseTime[baseTime.length - 1].elapsedS + 0.25 : 0.25;
+        const newTimeHistory = [...baseTime, { elapsedS, speedMps: selTrain.speedMps }];
+        if (newTimeHistory.length > 500) newTimeHistory.splice(0, newTimeHistory.length - 500);
+        set({
+          speedTimeHistory: newTimeHistory,
+          speedTimeHistoryByTrain: { ...curState.speedTimeHistoryByTrain, [selId]: newTimeHistory },
+        });
+      }
     }
   },
 
@@ -717,6 +778,8 @@ export const useSimStore = create<SimState>((set, get) => ({
       speedProfileMeta: null,
       speedHistory: [],
       speedTimeHistory: [],
+      speedHistoryByTrain: {},
+      speedTimeHistoryByTrain: {},
     });
   },
 
@@ -731,16 +794,61 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   setShowVehicleConfig: (show) => set({ showVehicleConfig: show }),
 
-  setManualMode: async (enabled) => {
-    await simSetManualMode(enabled);
-    set({ manualMode: enabled, manualTraction: 0, manualBrake: 0 });
+  addTrain: async (payload: AddTrainPayload) => {
+    const resp = await simAddTrain(payload);
+    if (resp.ok) {
+      const state = get();
+      const usedColors = new Set(Object.values(state.trainColors));
+      const color = payload.color || _nextTrainColor(usedColors);
+      set({ trainColors: { ...state.trainColors, [payload.trainId]: color } });
+      if (!state.selectedTrainId) {
+        set({ selectedTrainId: payload.trainId });
+      }
+    }
+    return !!resp.ok;
+  },
+
+  removeTrain: async (trainId: string) => {
+    const resp = await simRemoveTrain(trainId);
+    if (resp.ok) {
+      const state = get();
+      const nextColors = { ...state.trainColors };
+      delete nextColors[trainId];
+      const nextSpdHist = { ...state.speedHistoryByTrain };
+      delete nextSpdHist[trainId];
+      const nextTimeHist = { ...state.speedTimeHistoryByTrain };
+      delete nextTimeHist[trainId];
+      if (state.selectedTrainId === trainId) {
+        const remaining = state.trains.filter((t) => t.trainId !== trainId);
+        set({ selectedTrainId: remaining[0]?.trainId ?? null, trainColors: nextColors, speedHistoryByTrain: nextSpdHist, speedTimeHistoryByTrain: nextTimeHist });
+      } else {
+        set({ trainColors: nextColors, speedHistoryByTrain: nextSpdHist, speedTimeHistoryByTrain: nextTimeHist });
+      }
+    }
+    return !!resp.ok;
+  },
+
+  setTrainColor: (trainId: string, color: string) => {
+    set((s) => ({ trainColors: { ...s.trainColors, [trainId]: color } }));
+  },
+
+  setManualMode: async (enabled: boolean, trainId?: string) => {
+    const id = trainId ?? get().selectedTrainId;
+    if (!id) return;
+    await simSetTrainManualMode(id, enabled);
+    const next = new Set(get().manualTrainIds);
+    if (enabled) next.add(id);
+    else next.delete(id);
+    set({ manualMode: enabled, manualTrainIds: next, manualTraction: 0, manualBrake: 0 });
   },
 
   sendManualCommand: (traction, brake) => {
     const now = Date.now();
     const s = get();
     if (now - s._lastManualSend < 100) return;
+    const id = s.selectedTrainId;
+    if (!id) return;
     set({ _lastManualSend: now, manualTraction: traction, manualBrake: brake });
-    simSendManualCommand(traction, brake).catch(() => {});
+    simSendManualCommand(traction, brake, id).catch(() => {});
   },
 }));
