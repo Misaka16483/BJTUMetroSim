@@ -293,6 +293,281 @@ class Line9DataService:
         self._sim_runner = MemberCDemoRunner(self.cache_path)
         return self.sim_runner.state_snapshot()
 
+    def member_c_static_routes(self) -> JsonDict:
+        """返回全部进路静态数据 + 完整拓扑图（基于原始 Segment 连接字段）。
+
+        不计算里程——直接用 Seg 的四向连接指针做 BFS，
+        分出主干（row=0）和侧枝（row=1,2,3...），
+        每个 Seg 返回行号和序号（col），前端按行画轨道。
+        """
+        from app.domain.interlocking.route_catalog import RouteCatalog
+        cat = RouteCatalog(self.line_map)
+
+        seg_by_id = {s["id"]: s for s in self.line_map.get("segments", [])}
+
+        # 1) 从郭公庄上行站台的 Seg 找主干入口 → 沿 endForwardSegId 走
+        up_platforms = sorted(
+            [p for p in self.line_map.get("platforms", [])
+             if p.get("direction") == "0x55"],
+            key=lambda p: p.get("mileageM", 0),
+        )
+        start_seg = int(up_platforms[0]["segmentId"]) if up_platforms else 13
+
+        # 2) BFS 分配 (row, col)：主干 row=0，分支 row+1
+        segs_out: list[dict] = []
+        assigned: dict[int, tuple[int, int]] = {}  # seg_id → (row, col)
+
+        def walk_chain(seg_id: int, row: int) -> int:
+            """沿 endForwardSegId 走一条链，返回分配的列数。
+            栈式处理：先走完当前链，再递归分支（不用Python递归栈以避免主干被分支抢占）。"""
+            chain_segs: list[tuple[int, int, bool, int | None]] = []  # (sid, col, has_div, div_seg)
+            sid = seg_id
+            col = 0
+            while sid is not None and sid not in assigned:
+                seg = seg_by_id.get(sid)
+                efd = seg.get("endForwardSegId") if seg else None
+                edv = seg.get("endDivergingSegId") if seg else None
+                edv_int = int(edv) if edv is not None else None
+                chain_segs.append((sid, col, edv_int is not None, edv_int))
+                col += 1
+                nxt = int(efd) if efd is not None else None
+                sid = nxt if nxt is not None and nxt not in assigned else None
+            # 先分配当前链所有Seg
+            for sid2, col2, has_div2, div2 in chain_segs:
+                assigned[sid2] = (row, col2)
+                seg = seg_by_id.get(sid2)
+                seg_len = float(seg.get("lengthM", 0)) if seg else 0
+                stn = None
+                for p in self.line_map.get("platforms", []):
+                    if p.get("segmentId") == sid2 and p.get("direction") == "0x55":
+                        stn = p.get("id"); break
+                segs_out.append({
+                    "id": sid2, "row": row, "col": col2,
+                    "len": seg_len, "sw": has_div2, "stn": stn,
+                    "endFwd": int(seg.get("endForwardSegId")) if seg and seg.get("endForwardSegId") is not None else None,
+                    "endDiv": div2,
+                })
+            # 然后递归分支（此时主干Seg已分配完毕，不会被分支抢占）
+            for sid2, col2, has_div2, div2 in chain_segs:
+                if div2 is not None and div2 not in assigned:
+                    walk_chain(div2, row + 1)
+            return col
+
+        walk_chain(start_seg, 0)
+
+        # 3) 处理独立岛屿（无法从郭公庄站台 BFS 到达的 Seg）—— 按连通分量分组
+        unassigned = [sid for sid in seg_by_id if sid not in assigned]
+        island_row = 10  # 孤岛从row=10开始
+        for root_sid in unassigned:
+            if root_sid in assigned:
+                continue
+            # 从这个根出发 BFS 一个连通分量
+            walk_chain(root_sid, island_row)
+            island_row += 1
+
+        # 4) 信号（assigned 的 Seg 上标注）
+        # The running demo only contains the train's current mainline chain.
+        # Rebuild the presentation topology from every imported Seg so depot,
+        # opposite-direction, and non-simulated branches stay visible.
+        seg_by_id = {
+            int(segment["id"]): segment
+            for segment in self.line_map.get("segments", [])
+            if segment.get("id") is not None
+        }
+        platform_by_seg: dict[int, list[int]] = {}
+        for platform in self.line_map.get("platforms", []):
+            segment_id = platform.get("segmentId")
+            if segment_id is not None:
+                platform_by_seg.setdefault(int(segment_id), []).append(int(platform["id"]))
+
+        def seg_ref(segment: JsonDict, field: str) -> int | None:
+            value = segment.get(field)
+            return int(value) if value is not None and int(value) in seg_by_id else None
+
+        # A row is a continuous normal path. Each diverging path starts on its
+        # own row beside the point that creates it, which produces a stable,
+        # complete schematic instead of a misleading single-line chain.
+        assigned = {}
+        pending: list[tuple[int, int, int]] = []
+        roots = sorted(
+            sid for sid, segment in seg_by_id.items()
+            if seg_ref(segment, "startForwardSegId") is None
+        )
+        for row, root_id in enumerate(roots):
+            pending.append((root_id, row, 0))
+
+        next_row = len(pending)
+        while pending:
+            start_id, row, start_col = pending.pop(0)
+            sid = start_id
+            col = start_col
+            while sid is not None and sid not in assigned:
+                segment = seg_by_id[sid]
+                assigned[sid] = (row, col)
+                diverging_id = seg_ref(segment, "endDivergingSegId")
+                if diverging_id is not None and diverging_id not in assigned:
+                    pending.append((diverging_id, next_row, col + 1))
+                    next_row += 1
+                sid = seg_ref(segment, "endForwardSegId")
+                col += 1
+            if not pending:
+                remaining = sorted(set(seg_by_id) - set(assigned))
+                if remaining:
+                    pending.append((remaining[0], next_row, 0))
+                    next_row += 1
+
+        segs_out = []
+        for sid, segment in sorted(seg_by_id.items()):
+            row, col = assigned[sid]
+            segs_out.append({
+                "id": sid,
+                "lengthM": float(segment.get("lengthM") or 0),
+                "row": row,
+                "col": col,
+                "platformIds": platform_by_seg.get(sid, []),
+                "startForward": seg_ref(segment, "startForwardSegId"),
+                "startDiverging": seg_ref(segment, "startDivergingSegId"),
+                "endForward": seg_ref(segment, "endForwardSegId"),
+                "endDiverging": seg_ref(segment, "endDivergingSegId"),
+            })
+
+        signals = []
+        for s in self.line_map.get("signals", []):
+            sig_id = s.get("id")
+            seg_id = s.get("segmentId")
+            if sig_id is None or seg_id is None or int(seg_id) not in assigned:
+                continue
+            signals.append({
+                "id": int(sig_id), "name": str(s.get("name", "")),
+                "segId": int(seg_id),
+            })
+
+        # 5) 道岔
+        switches = []
+        for sw_id_str in cat.switch_ids:
+            sw = cat.get_switch(sw_id_str)
+            if sw is None: continue
+            in_assigned = sw.frog_seg_id is not None and sw.frog_seg_id in assigned
+            switches.append({
+                "id": sw.switch_id, "name": sw.name,
+                "frogSeg": sw.frog_seg_id, "normSeg": sw.normal_seg_id,
+                "revSeg": sw.reverse_seg_id,
+                "onMain": in_assigned,
+            })
+
+        # 6) 计轴区段→Seg 映射 + 进路
+        axle_segs = {}
+        for a in self.line_map.get("axleSections", []):
+            aid = a.get("id")
+            sl = [int(s) for s in a.get("segmentIds", []) if s is not None]
+            if aid is not None and sl: axle_segs[str(aid)] = sl
+
+        def _sig_seg(sig_id):
+            for s in self.line_map.get("signals", []):
+                if s.get("id") == sig_id:
+                    rs = s.get("segmentId")
+                    return int(rs) if rs is not None else 0
+            return 0
+
+        def _sig_name(sig_id):
+            for s in self.line_map.get("signals", []):
+                if s.get("id") == sig_id: return str(s.get("name", ""))
+            return ""
+
+        topology_neighbors: dict[int, set[int]] = {sid: set() for sid in seg_by_id}
+        for sid, segment in seg_by_id.items():
+            for field in (
+                "startForwardSegId", "startDivergingSegId",
+                "endForwardSegId", "endDivergingSegId",
+            ):
+                neighbor = seg_ref(segment, field)
+                if neighbor is not None:
+                    topology_neighbors[sid].add(neighbor)
+                    topology_neighbors[neighbor].add(sid)
+
+        def _ordered_route_segments(
+            segment_ids: list[int], start_signal_id: int, end_signal_id: int,
+        ) -> tuple[list[int], bool]:
+            """Order a route's Seg set from its entry signal to its exit signal.
+
+            Route rows identify axle sections, not a traversal sequence.  The
+            order must therefore be recovered from the imported Seg topology.
+            """
+            covered = list(dict.fromkeys(segment_ids))
+            if len(covered) < 2:
+                return covered, True
+            covered_set = set(covered)
+            start_seg = _sig_seg(start_signal_id)
+            end_seg = _sig_seg(end_signal_id)
+
+            def attached_to(signal_seg: int) -> list[int]:
+                if signal_seg in covered_set:
+                    return [signal_seg]
+                return [
+                    sid for sid in covered
+                    if signal_seg in topology_neighbors[sid]
+                ]
+
+            start_candidates = attached_to(start_seg)
+            end_candidates = attached_to(end_seg)
+            endpoints = [
+                sid for sid in covered
+                if len(topology_neighbors[sid] & covered_set) <= 1
+            ]
+            if not start_candidates:
+                start_candidates = endpoints or [covered[0]]
+            if not end_candidates:
+                end_candidates = endpoints or [covered[-1]]
+
+            best_path: list[int] | None = None
+            for source in start_candidates:
+                queue: list[list[int]] = [[source]]
+                visited = {source}
+                while queue:
+                    path = queue.pop(0)
+                    current = path[-1]
+                    if current in end_candidates:
+                        if best_path is None or len(path) > len(best_path):
+                            best_path = path
+                        continue
+                    for neighbor in sorted(topology_neighbors[current] & covered_set):
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            queue.append(path + [neighbor])
+
+            if best_path is not None and set(best_path) == covered_set:
+                return best_path, True
+            return covered, False
+
+        routes = []
+        for rid in cat.route_ids:
+            rd = cat.get(rid)
+            if rd is None: continue
+            raw_path_segs = []
+            for sec_id in rd.axle_section_ids:
+                for s in axle_segs.get(sec_id, []):
+                    if s not in raw_path_segs: raw_path_segs.append(s)
+            path_segs, path_order_complete = _ordered_route_segments(
+                raw_path_segs, rd.start_signal_id, rd.end_signal_id,
+            )
+            routes.append({
+                "id": rid, "name": rd.name,
+                "startSig": rd.start_signal_id, "startSigName": _sig_name(rd.start_signal_id),
+                "endSig": rd.end_signal_id, "endSigName": _sig_name(rd.end_signal_id),
+                "pathSegs": path_segs,
+                "rawPathSegs": raw_path_segs,
+                "pathOrderComplete": path_order_complete,
+                "switches": rd.required_switches,
+                "conflicts": sorted(cat.conflicts_with(rid)),
+                "axleSections": rd.axle_section_ids,
+            })
+
+        return {
+            "segments": segs_out, "signals": signals, "switches": switches,
+            "routes": routes,
+            "layout": {"rows": next_row, "segmentCount": len(segs_out)},
+        }
+
     def _load_station_catalog(self) -> list[JsonDict]:
         with self.stations_path.open("r", encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
@@ -428,12 +703,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.member_d_phase2_full_demo())
             elif path == "/api/phase2/member-c/demo":
                 self._serve_html_file(ROOT / "member-c-demo.html")
+            elif path == "/api/phase2/member-c/routes":
+                self._serve_html_file(ROOT / "member-c-routes.html")
             elif path == "/api/phase2/member-c/state":
                 self._send_json(self.service.member_c_state())
             elif path == "/api/phase2/member-c/step":
                 self._send_json(self.service.member_c_step())
             elif path == "/api/phase2/member-c/reset":
                 self._send_json(self.service.member_c_reset())
+            elif path == "/api/phase2/member-c/static-routes":
+                self._send_json(self.service.member_c_static_routes())
             elif match := re.fullmatch(r"/api/track/segments/(\d+)/context", path):
                 self._send_json(self.service.segment_context(int(match.group(1))))
             else:
@@ -635,6 +914,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 

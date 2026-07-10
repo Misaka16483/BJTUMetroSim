@@ -15,10 +15,18 @@ from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
 from app.domain.control.services import ATOController
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, RuleBasedDispatchService
+from app.domain.interlocking.route_catalog import RouteCatalog
+from app.domain.interlocking.route_service import RouteService
+from app.domain.interlocking.rule_engine import InterlockingRuleEngine
+from app.domain.interlocking.section_occupation import SectionOccupationService
+from app.domain.interlocking.signal_resolver import SignalAspectResolver
+from app.domain.interlocking.switch_lock import SwitchLockService
+from app.domain.interlocking.models import RouteRequest, SwitchDef
 from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
+from app.domain.signal.models import TrainState
 from app.domain.station.services import (
     BoardingResult,
     DwellPlan,
@@ -136,6 +144,8 @@ class TickSnapshot:
     power_network: dict[str, Any] = field(default_factory=dict)
     dispatch_decisions: list[dict[str, Any]] = field(default_factory=list)
     kpi: dict[str, Any] = field(default_factory=dict)
+    # 联锁数据（成员C Phase 2）
+    interlocking: dict[str, Any] = field(default_factory=dict)
 
 
 class SimulationEngine:
@@ -175,6 +185,10 @@ class SimulationEngine:
         self.station_service = self._build_station_service()
         self.power_service: PowerService = self._build_power_service()
         self.dispatch_service = RuleBasedDispatchService()
+
+        # ── 联锁服务（成员C Phase 2 集成）──
+        self._init_interlocking()
+
         self._last_arrivals_by_platform: dict[tuple[str, str], int] = {}
         self._last_power_states: dict[str, Any] = {}
         self._last_dispatch_decisions: list[DispatchDecision] = []
@@ -1235,6 +1249,10 @@ class SimulationEngine:
 
     def _empty_power_states(self) -> dict[str, Any]:
         return self.power_service.update([], dt_sec=0.0)
+
+    def _init_interlocking(self) -> None:
+        """联锁服务初始化桩——当前引擎尚未集成联锁，预留空实现。"""
+        pass
 
     def _power_section_for_train(self, train: SimTrainState) -> str:
         return "PWR-09-UP" if train.direction == "UP" else "PWR-09-DOWN"

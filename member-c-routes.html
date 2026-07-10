@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>9号线进路可视化 — 成员C</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#040810;color:#c9d1d9;height:100vh;display:flex;flex-direction:column}
+#bar{display:flex;align-items:center;gap:10px;padding:8px 16px;background:#0d1424;border-bottom:1px solid #172436;flex-shrink:0}
+#bar button{padding:5px 12px;border:1px solid #1a2240;border-radius:4px;cursor:pointer;font-size:12px;background:#0d1424;color:#8b949e}
+#bar button:hover{color:#fff;border-color:#2b4a6b}
+#main{display:flex;flex:1;min-height:0}
+#left{display:flex;flex-direction:column;flex:1;min-width:0}
+#map-wrap{flex:1;overflow:hidden;cursor:grab}
+#map-wrap:active{cursor:grabbing}
+canvas{display:block}
+#foot{padding:4px 16px;background:#0d1424;border-top:1px solid #172436;font-size:10px;color:#3a4a5a;flex-shrink:0}
+#route-panel{width:360px;flex-shrink:0;border-left:1px solid #172436;background:#0d1117;display:flex;flex-direction:column;overflow:hidden}
+#route-panel h3{padding:10px 14px;border-bottom:1px solid #172436;font-size:11px;text-transform:uppercase;color:#5f7088;background:#0d1424;flex-shrink:0;display:flex;justify-content:space-between}
+#filter{padding:6px 12px;background:#0d1424;border-bottom:1px solid #172436}
+#filter input{width:100%;padding:4px 8px;border:1px solid #1a2240;border-radius:3px;background:#0d1117;color:#c9d1d9;font-size:11px;font-family:monospace;outline:none}
+#filter input:focus{border-color:#58a6ff}
+#route-list{flex:1;overflow-y:auto}
+.rb{padding:4px 12px;border-bottom:1px solid #0d1424;cursor:pointer;font-size:10px;font-family:monospace;display:flex;justify-content:space-between;transition:.1s}
+.rb:hover{background:#1a2640}
+.rb.sel{background:#1a2e40;border-left:2px solid #58a6ff}
+.rb .m{font-size:9px;color:#484f58}
+#info{position:fixed;bottom:12px;right:380px;background:#161b22ee;padding:8px 14px;border-radius:6px;font-size:11px;border:1px solid #30363d;z-index:5;max-width:340px;line-height:1.5}
+</style>
+</head>
+<body>
+<div id="bar">
+  <button onclick="fit()">自适应</button>
+  <button onclick="zm(1.3)">+</button><button onclick="zm(0.77)">-</button>
+  <span style="font-size:11px;color:#3a4a5a;font-family:monospace" id="zl">100%</span>
+  <span style="margin-left:12px;font-size:11px;color:#8b949e">点击右侧按钮查看进路 · 绿点=始端 红点=终端</span>
+</div>
+<div id="main">
+  <div id="left">
+    <div id="map-wrap"><canvas id="c"></canvas></div>
+    <div id="foot">加载中...</div>
+  </div>
+  <div id="route-panel">
+    <h3>ROUTES <span style="color:#3a4a5a;font-weight:400;font-size:10px" id="rcnt">0</span></h3>
+    <div id="filter"><input placeholder="搜索进路ID/名称/信号..." oninput="filterRoutes()" id="fi"></div>
+    <div id="route-list"></div>
+  </div>
+</div>
+<div id="info"></div>
+<script>
+var API='http://127.0.0.1:8000', D=null, sel={}, sc=1, ox=0, oy=0, dr=null;
+var c=document.getElementById('c'), cx=c.getContext('2d');
+var mc=document.getElementById('map-wrap'), BM=60, UY=90, DY=140, SY=60, PX=0.15;
+var segPos={};
+
+function rz(){var w2=mc.clientWidth,h2=mc.clientHeight;c.width=w2*2;c.height=h2*2;c.style.width=w2+'px';c.style.height=h2+'px'}
+window.addEventListener('resize',function(){rz();draw()});
+function zm(k){sc=Math.max(0.1,Math.min(20,sc*k));updateZ();draw()}
+function fit(){sc=(mc.clientWidth*2-BM*2)/Math.max(D.totalM*PX,1);ox=0;oy=0;updateZ();draw()}
+function updateZ(){document.getElementById('zl').textContent=Math.round(sc*100)+'%'}
+mc.addEventListener('wheel',function(e){e.preventDefault();zm(e.deltaY>0?0.9:1.1)},{passive:false});
+mc.addEventListener('mousedown',function(e){dr={sx:e.clientX,sy:e.clientY,ox:ox,oy:oy}});
+window.addEventListener('mousemove',function(e){if(!dr)return;ox=dr.ox+(e.clientX-dr.sx);oy=dr.oy+(e.clientY-dr.sy);draw()});
+window.addEventListener('mouseup',function(){dr=null});
+
+function buildCache(){
+  var a=BM,i;segPos={};
+  for(i=0;i<D.segments.length;i++){var s=D.segments[i];segPos[s.id]={x:a,w:s.len*PX,ml:s.ml,sw:s.sw,stn:s.stn};a+=s.len*PX}
+}
+
+function draw(){
+  rz();cx.clearRect(0,0,c.width,c.height);
+  if(!D||!D.segments)return;
+  if(Object.keys(segPos).length===0)buildCache();
+  var sg=D.segments,tm=D.totalM,i,j;
+  cx.save();cx.scale(2,2);cx.translate(ox,oy);cx.scale(sc,sc);
+  cx.fillStyle='#040810';cx.fillRect(-50,-50,BM+tm*PX+100,DY+120);
+
+  // 轨道
+  cx.strokeStyle='#3a5a7a';cx.lineWidth=3;cx.beginPath();cx.moveTo(BM,UY);cx.lineTo(BM+tm*PX,UY);cx.stroke();
+  cx.strokeStyle='#2a3a4a';cx.lineWidth=2;cx.beginPath();cx.moveTo(BM,DY);cx.lineTo(BM+tm*PX,DY);cx.stroke();
+
+  // Seg
+  cx.strokeStyle='#1a2a3a';cx.lineWidth=0.3;
+  cx.fillStyle='#3a4a60';cx.font='8px monospace';cx.textAlign='center';
+  for(i=0;i<sg.length;i++){var sp=segPos[sg[i].id];cx.beginPath();cx.moveTo(sp.x,UY-8);cx.lineTo(sp.x,UY+8);cx.stroke();if(sp.w>28)cx.fillText(sg[i].id,sp.x+sp.w/2,UY+18)}
+
+  // 站台
+  for(i=0;i<sg.length;i++){if(!sg[i].stn)continue;var sp2=segPos[sg[i].id];
+    cx.fillStyle='rgba(143,195,31,0.25)';cx.fillRect(sp2.x,UY-12,sp2.w,24);
+    cx.fillStyle='#f0c040';cx.font='10px sans-serif';cx.textAlign='center';cx.fillText('P'+sg[i].stn,sp2.x+sp2.w/2,UY-16)}
+
+  // 道岔 —— 用斜叉线标记在岔心位置
+  for(i=0;i<D.switches.length;i++){var sw=D.switches[i];
+    if(sw.fml<0||sw.fml>tm)continue;var sx4=BM+sw.fml*PX;
+    cx.strokeStyle='#d29922';cx.lineWidth=1.2;cx.globalAlpha=0.7;
+    cx.beginPath();cx.moveTo(sx4-18,UY);cx.lineTo(sx4-8,UY);cx.lineTo(sx4+4,DY);cx.lineTo(sx4+18,DY);cx.stroke();cx.globalAlpha=1;
+    cx.fillStyle='#d29922';cx.font='9px monospace';cx.textAlign='center';cx.fillText('W'+sw.name,sx4,DY+28)}
+
+  // 信号
+  for(i=0;i<D.signals.length;i++){var sig=D.signals[i];var sx3=BM+sig.ml*PX;
+    cx.fillStyle='#58a6ff';cx.beginPath();cx.arc(sx3,SY,3,0,2*Math.PI);cx.fill();
+    cx.fillStyle='#6a7a90';cx.font='8px monospace';cx.textAlign='center';cx.fillText(sig.name||'S'+sig.id,sx3,SY-8)}
+
+  // 选中的进路染色
+  for(var rid in sel){var rd=sel[rid];
+    cx.fillStyle='rgba(88,166,255,0.35)';
+    var segs=(rd.pathSegs||[]);
+    for(j=0;j<segs.length;j++){var sp5=segPos[segs[j]];if(sp5)cx.fillRect(sp5.x-1,UY-4,sp5.w+2,8)}
+    // 起点绿 终点红
+    var rs=BM+rd.startMl*PX, re=BM+rd.endMl*PX;
+    if(rd.startMl>=0){cx.fillStyle='#3fb950';cx.beginPath();cx.arc(rs,UY,5,0,2*Math.PI);cx.fill()}
+    if(rd.endMl>=0){cx.fillStyle='#f85149';cx.beginPath();cx.arc(re,UY,5,0,2*Math.PI);cx.fill()}}
+
+  cx.restore();
+  document.getElementById('foot').textContent = D.segments.length+' Seg · '+D.signals.length+' 信号 · '+D.switches.length+' 道岔 · '+D.routes.length+' 进路 · 总长'+(D.totalM/1000).toFixed(1)+'km';
+}
+
+function clickRoute(rid){
+  if(sel[rid]){delete sel[rid]}else{var rd=D.routes.find(function(r){return r.id===rid});if(rd)sel[rid]=rd}
+  draw(); updateList(document.getElementById('fi').value);
+  var info=document.getElementById('info'), keys=Object.keys(sel);
+  if(keys.length===0){info.innerHTML=''}else if(keys.length===1){var r=sel[keys[0]];
+    info.innerHTML='<b>#'+r.id+' '+r.name+'</b><br>sig'+r.startSig+'('+r.startSigName+') → sig'+r.endSig+'('+r.endSigName+')<br>进路区段:'+(r.axleSections||[]).join(',')+'<br>道岔:'+JSON.stringify(r.switches)+'<br>敌对:'+(r.conflicts||[]).join(',')+'<br>覆盖Seg:'+(r.pathSegs||[]).join(',')}
+  else{info.innerHTML='已选 <b>'+keys.length+'</b> 条进路'}
+}
+
+function filterRoutes(){
+  var q=document.getElementById('fi').value.toLowerCase();updateList(q)
+}
+
+function updateList(filter){
+  var lst=document.getElementById('route-list'), list=D.routes;
+  if(filter){list=list.filter(function(r){return r.id.indexOf(filter)>=0||r.name.toLowerCase().indexOf(filter)>=0||(r.axleSections||[]).join(',').indexOf(filter)>=0})}
+  lst.innerHTML=list.map(function(r){return '<div class="rb'+(sel[r.id]?' sel':'')+'" onclick="clickRoute(\''+r.id+'\')"><span><b>'+r.id+'</b> '+r.name+'</span><span class="m">sig'+r.startSig+'→sig'+r.endSig+'</span></div>'}).join('');
+  document.getElementById('rcnt').textContent=list.length;
+}
+
+// 加载
+fetch(API+'/api/phase2/member-c/static-routes').then(function(r){return r.json()}).then(function(d){
+  D=d; buildCache(); draw(); updateList(''); fit();
+  console.log('Loaded:', d.segments.length, 'segs', d.routes.length, 'routes');
+}).catch(function(e){console.error('Load failed:', e); alert('请先启动后端: python -m app.api_server --port 8000')});
+</script>
+</body>
+</html>

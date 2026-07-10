@@ -553,23 +553,24 @@ class RouteServiceTests(unittest.TestCase):
         self.assertFalse(self.switch_lock.is_locked("1"))
 
     def test_auto_release_when_all_sections_cleared(self) -> None:
+        """T001 进入进路区段→全部离开→自动释放"""
         self.svc.request(RouteRequest("REQ-1", "1", "T001"))
-        # Train enters section 1 → drive through → section_occ clears
+        # 第一步：T001 进入区段（触发 has_entered=True）
         self.section_occ.update(
             [_make_train(train_id="T001", seg_id=13, offset_m=80.0, length_m=60.0)],
             _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
         )
+        self.svc.update()  # 标记 has_entered
         self.assertTrue(self.svc.is_locked("1"))
-        # Train leaves — section_occ will clear on next update with empty train list
+        # 第二步：T001 离开，区段全空
         self.section_occ.update([], _fake_track_query())
         self.svc.update()
         self.assertFalse(self.svc.is_locked("1"))
 
     def test_update_only_releases_our_train_sections(self) -> None:
-        """When T002 is still on a section, T001's route still auto-releases
-        because T001 itself has left all sections."""
+        """T001+T002同时在区段上→T001离开→进路释放（T002还在）"""
         self.svc.request(RouteRequest("REQ-1", "1", "T001"))
-        # Both T001 and T002 on seg 13
+        # 第一步：两车同时进入
         self.section_occ.update(
             [
                 _make_train(train_id="T001", seg_id=13),
@@ -577,7 +578,8 @@ class RouteServiceTests(unittest.TestCase):
             ],
             _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
         )
-        # T001 leaves — T002 stays
+        self.svc.update()  # 标记 has_entered
+        # 第二步：T001 离开，T002 还在
         self.section_occ.update(
             [_make_train(train_id="T002", seg_id=13)],
             _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),

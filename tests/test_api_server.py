@@ -34,6 +34,21 @@ class ApiServerTests(unittest.TestCase):
         self.assertGreaterEqual(len(topology["contactRailSections"]), 18)
         self.assertEqual(topology["quality"], "ENGINEERING_ESTIMATE")
 
+    def test_member_c_static_topology_contains_full_line(self) -> None:
+        topology = self.service.member_c_static_routes()
+        segment_ids = {segment["id"] for segment in topology["segments"]}
+
+        self.assertEqual(len(segment_ids), 319)
+        self.assertTrue({1, 2}.issubset(segment_ids))
+        self.assertEqual(len(topology["routes"]), 249)
+        self.assertEqual(len(topology["signals"]), 157)
+        self.assertEqual(len(topology["switches"]), 60)
+        self.assertTrue(all("row" in segment and "col" in segment for segment in topology["segments"]))
+        self.assertTrue(all(route["pathOrderComplete"] for route in topology["routes"]))
+
+        route_seven = next(route for route in topology["routes"] if route["id"] == "7")
+        self.assertEqual(route_seven["pathSegs"], [11, 12, 36, 34, 32, 31])
+
     def test_member_d_demo_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = Line9DataService(run_dir=Path(tmp))

@@ -60,6 +60,9 @@ class RouteCatalog:
                 protection_section_ids=[
                     str(s) for s in (raw.get("protectionSectionIds") or []) if s is not None
                 ],
+                approach_section_ids=[
+                    str(s) for s in (raw.get("pointApproachSectionIds") or []) if s is not None
+                ],
                 ci_area_id=raw.get("ciAreaId"),
             )
 
@@ -170,6 +173,7 @@ class RouteCatalog:
                     end_signal_id=route.end_signal_id,
                     axle_section_ids=route.axle_section_ids,
                     protection_section_ids=route.protection_section_ids,
+                    approach_section_ids=route.approach_section_ids,
                     ci_area_id=route.ci_area_id,
                     required_switches=req,
                 )

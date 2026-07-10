@@ -105,6 +105,7 @@ class RouteDef:
     end_signal_id: int                   # 终端信号机 ID（进路到这里结束）
     axle_section_ids: list[str]          # 进路包含的计轴区段 ID 列表
     protection_section_ids: list[str]    # 保护区段 ID 列表
+    approach_section_ids: list[str] = field(default_factory=list)  # 接近区段 ID 列表
     ci_area_id: int | None = None        # CI 区域 ID
     # 以下由 RouteCatalog._derive_switch_requirements() 补填：
     required_switches: dict[str, str] = field(default_factory=dict)
@@ -184,6 +185,11 @@ class RouteState:
     locked_switches: dict[str, str] = field(default_factory=dict)  # 已锁定的道岔及位置
     failure_reason: str | None = None    # 办理失败时的原因
     lock_time_ms: int | None = None      # 锁闭时刻（仿真毫秒）
+    approach_sections: list[str] = field(default_factory=list)  # 接近区段 ID 列表（从 RouteDef 复制）
+    # 状态推进标记：列车是否已进入过进路区段
+    # LOCKED + 进入接近区段 → APPROACH_LOCKED
+    # APPROACH_LOCKED + 进入第一个进路区段 → 开始监控释放
+    has_entered: bool = False
 
 
 # ---------------------------------------------------------------------------
