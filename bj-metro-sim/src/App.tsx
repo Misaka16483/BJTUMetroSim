@@ -8,6 +8,7 @@ import StationInterlockingView from './components/StationInterlockingView';
 import FullLineInterlockingView from './components/FullLineInterlockingView';
 import OperationalLoopPanel from './components/OperationalLoopPanel';
 import PowerNetworkPanel from './components/PowerNetworkPanel';
+import PowerSystemView from './components/PowerSystemView';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -21,6 +22,7 @@ export default function App() {
   const setLinesLoading = useSimStore((s) => s.setLinesLoading);
   const setLinesError = useSimStore((s) => s.setLinesError);
   const setTrackMap = useSimStore((s) => s.setTrackMap);
+  const setPowerTopology = useSimStore((s) => s.setPowerTopology);
   const setBackendStatus = useSimStore((s) => s.setBackendStatus);
   const viewMode = useSimStore((s) => s.viewMode);
   const setViewMode = useSimStore((s) => s.setViewMode);
@@ -34,7 +36,17 @@ export default function App() {
   const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
   const [collapsed, setCollapsed] = useState(false);
-  const modeIndex = viewMode === 'macro' ? 0 : viewMode === 'micro' ? 1 : viewMode === 'interlocking' ? 2 : viewMode === 'fullLine' ? 3 : 4;
+  const modeIndex = viewMode === 'macro'
+    ? 0
+    : viewMode === 'micro'
+      ? 1
+      : viewMode === 'interlocking'
+        ? 2
+        : viewMode === 'fullLine'
+          ? 3
+          : viewMode === 'driver'
+            ? 4
+            : 5;
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
@@ -81,8 +93,9 @@ export default function App() {
     // Step 2 — 并行尝试后端（获取 9号线 trackMap, 仿真引擎等富数据）
     loadFullNetwork().finally(() => {
       fetchBackendBundle()
-        .then(({ line: _line9, trackMap: nextTrackMap }) => {
+        .then(({ line: _line9, trackMap: nextTrackMap, powerTopology }) => {
           setTrackMap(nextTrackMap);
+          setPowerTopology(powerTopology);
           setBackendStatus('connected');
         })
         .catch((err) => {
@@ -180,12 +193,11 @@ export default function App() {
             background: 'rgba(255,255,255,0.03)',
           }}
         >
-          {/* sliding pill indicator */}
           <div
             className="absolute top-0 rounded-full"
             style={{
-              left: `${modeIndex * 20}%`,
-              width: '20%',
+              left: `${modeIndex * (100 / 6)}%`,
+              width: `${100 / 6}%`,
               bottom: 0,
               background: viewMode === 'macro'
                 ? 'rgba(74,158,255,0.35)'
@@ -195,65 +207,18 @@ export default function App() {
                     ? 'rgba(255,69,58,0.32)'
                     : viewMode === 'fullLine'
                       ? 'rgba(255,152,0,0.35)'
-                      : 'rgba(168,214,74,0.38)',
-              transition: 'left 280ms cubic-bezier(0.33,1,0.68,1), background 280ms ease',
+                      : viewMode === 'driver'
+                        ? 'rgba(168,214,74,0.38)'
+                        : 'rgba(88,166,255,0.36)',
+              transition: 'left 280ms cubic-bezier(0.33, 1, 0.68, 1), background 280ms ease',
             }}
           />
-          <button
-            type="button"
-            onClick={() => setViewMode('macro')}
-            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-            style={{
-              color: viewMode === 'macro' ? '#fff' : 'var(--text-muted)',
-              transition: 'color 250ms ease',
-            }}
-          >
-            宏观
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewMode('micro')}
-            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-            style={{
-              color: viewMode === 'micro' ? '#fff' : 'var(--text-muted)',
-              transition: 'color 250ms ease',
-            }}
-          >
-            轨道
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewMode('interlocking')}
-            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-            style={{
-              color: viewMode === 'interlocking' ? '#fff' : 'var(--text-muted)',
-              transition: 'color 250ms ease',
-            }}
-          >
-            联锁
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewMode('fullLine')}
-            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-            style={{
-              color: viewMode === 'fullLine' ? '#fff' : 'var(--text-muted)',
-              transition: 'color 250ms ease',
-            }}
-          >
-            全线
-          </button>
-          <button
-            type="button"
-            onClick={() => setViewMode('driver')}
-            className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center"
-            style={{
-              color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)',
-              transition: 'color 250ms ease',
-            }}
-          >
-            驾驶
-          </button>
+          <button type="button" onClick={() => setViewMode('macro')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'macro' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>宏观</button>
+          <button type="button" onClick={() => setViewMode('micro')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'micro' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>轨道</button>
+          <button type="button" onClick={() => setViewMode('interlocking')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'interlocking' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>联锁</button>
+          <button type="button" onClick={() => setViewMode('fullLine')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'fullLine' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>全线</button>
+          <button type="button" onClick={() => setViewMode('driver')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>驾驶</button>
+          <button type="button" onClick={() => setViewMode('power')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'power' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>供电</button>
         </div>
         </div>
 
@@ -301,10 +266,12 @@ export default function App() {
           }}>
             {viewMode === 'driver'
               ? <DriverConsole fullPage />
-              : viewMode === 'interlocking'
-                ? <StationInterlockingView />
-                : viewMode === 'fullLine'
-                  ? <FullLineInterlockingView />
+              : viewMode === 'power'
+                ? <PowerSystemView />
+                : viewMode === 'interlocking'
+                  ? <StationInterlockingView />
+                  : viewMode === 'fullLine'
+                    ? <FullLineInterlockingView />
                   : viewMode === 'micro'
                     ? <MicroTrackView />
                     : null}

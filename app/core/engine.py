@@ -247,6 +247,13 @@ class SimulationEngine:
         self.clock.resume()
         self._snapshot = self._build_snapshot()
 
+    def reset_power_network(self) -> None:
+        """Restore traction-power topology and clear transient power states."""
+        self.power_service = self._build_power_service()
+        self._last_power_states = self._empty_power_states()
+        self.power_service.update([], dt_sec=0.0)
+        self._snapshot = self._build_snapshot()
+
     def stop(self) -> None:
         self._stop_event.set()
         if self.clock.state.value not in ("STOPPED", "IDLE"):

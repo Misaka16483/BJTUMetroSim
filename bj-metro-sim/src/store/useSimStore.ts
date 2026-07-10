@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { MetroLineData } from '../data/amapMetroApi';
 import type {
   PowerNetworkState,
+  PowerTopology,
   SimDispatchDecision,
   SimPowerState,
   SimStateResponse,
@@ -12,7 +13,7 @@ import type {
 } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop } from '../data/backendApi';
 
-type ViewMode = 'macro' | 'micro' | 'interlocking' | 'driver' | 'fullLine';
+type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power';
 
 /** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {
@@ -35,6 +36,7 @@ interface SimState {
   hiddenLines: Set<string>;
   line9Stations: string[];
   trackMap: TrackMapData | null;
+  powerTopology: PowerTopology | null;
   viewMode: ViewMode;
 
   // KPI
@@ -127,6 +129,7 @@ interface SimState {
   setLinesError: (error: string | null) => void;
   setBackendStatus: (status: 'idle' | 'connected' | 'fallback' | 'error') => void;
   setTrackMap: (trackMap: TrackMapData | null) => void;
+  setPowerTopology: (powerTopology: PowerTopology | null) => void;
   setViewMode: (viewMode: ViewMode) => void;
   toggleLineVisibility: (lineId: string) => void;
   showAllLines: () => void;
@@ -259,6 +262,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   line9Stations: [],
   viewMode: 'macro' as ViewMode,
   trackMap: null as TrackMapData | null,
+  powerTopology: null as PowerTopology | null,
   punctuality: 98.5,
   avgWaitTime: 145,
   avgLoadRate: 68,
@@ -336,6 +340,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   setLinesError: (error) => set({ linesError: error, linesLoading: false }),
   setBackendStatus: (status) => set({ backendStatus: status }),
   setTrackMap: (trackMap) => set({ trackMap }),
+  setPowerTopology: (powerTopology) => set({ powerTopology }),
   setViewMode: (viewMode) => set({ viewMode }),
 
   toggleLineVisibility: (lineId) => set((s) => {

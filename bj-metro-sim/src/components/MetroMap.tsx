@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useRef, useMemo, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import darkStyle from '../data/darkStyle';
@@ -23,6 +23,7 @@ export default function MetroMap() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const styleLoaded = useRef(false);
+  const [styleLoadTick, setStyleLoadTick] = useState(0);
 
   const metroLines = useSimStore((s) => s.metroLines);
   const hiddenLines = useSimStore((s) => s.hiddenLines);
@@ -31,6 +32,7 @@ export default function MetroMap() {
   const trainPositions = useSimStore((s) => s.trainPositions);
   const isRunning = useSimStore((s) => s.isRunning);
   const simPowerNetwork = useSimStore((s) => s.simPowerNetwork);
+  const powerTopology = useSimStore((s) => s.powerTopology);
 
   // ── 初始化地图 ──
   useEffect(() => {
@@ -51,6 +53,7 @@ export default function MetroMap() {
 
     map.on('style.load', () => {
       styleLoaded.current = true;
+      setStyleLoadTick((tick) => tick + 1);
 
       // 隐藏底图 POI 符号 — 避免与地铁站点白色圆点混淆
       const layers = map.getStyle()?.layers ?? [];
@@ -315,7 +318,18 @@ export default function MetroMap() {
     if (!map || !styleLoaded.current) return;
 
     const line9 = metroLines.find((line) => line.id === '9');
-    const substations = simPowerNetwork?.substations ?? [];
+    const runtimeById = new Map((simPowerNetwork?.substations ?? []).map((item) => [item.substationId, item]));
+    const topologySubstations = powerTopology?.substations ?? [];
+    const substations = topologySubstations.map((item) => {
+      const runtime = runtimeById.get(item.substationId);
+      return {
+        substationId: item.substationId,
+        name: item.name,
+        mileageM: item.mileageM,
+        status: runtime?.status ?? item.status ?? 'NORMAL',
+        loadRatio: runtime?.loadRatio ?? 0,
+      };
+    });
     if (!line9 || hiddenLines.has('9') || substations.length === 0) {
       powerMarkers.forEach((marker) => marker.remove());
       powerMarkers.clear();
@@ -334,43 +348,28 @@ export default function MetroMap() {
       const point = interpolateLinePointByMileage(line9, substation.mileageM);
       if (!point) continue;
       const lngLat: [number, number] = [point.lng, point.lat];
+      const warning = (
+        substation.status !== 'NORMAL' && substation.status !== 'IN_SERVICE'
+      ) || substation.loadRatio >= 0.85;
+      const color = warning ? '#ffb454' : '#58a6ff';
+      const html = buildPowerMarkerHtml(substation.substationId, substation.name, warning, color);
       const existing = powerMarkers.get(substation.substationId);
       if (existing) {
         existing.setLngLat(lngLat);
+        existing.getElement().innerHTML = html;
         continue;
       }
 
-      const warning = substation.status !== 'NORMAL' || substation.loadRatio >= 0.85;
-      const color = warning ? '#ffb454' : '#58a6ff';
       const el = document.createElement('div');
       el.className = 'power-marker';
-      el.innerHTML = `
-        <div title="${substation.name}" style="
-          width: 15px; height: 15px;
-          transform: rotate(45deg);
-          background: ${warning ? 'rgba(255,180,84,0.35)' : 'rgba(88,166,255,0.35)'};
-          border: 1.5px solid ${color};
-          box-shadow: 0 0 12px ${color}80;
-        "></div>
-        <div style="
-          margin-top: 5px;
-          padding: 1px 4px;
-          background: rgba(4,8,16,0.82);
-          border: 1px solid rgba(255,255,255,0.08);
-          color: ${color};
-          font-size: 9px;
-          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-          white-space: nowrap;
-          transform: translateX(-35%);
-        ">${substation.substationId.replace('TS-', '')}</div>
-      `;
+      el.innerHTML = html;
 
       const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
         .setLngLat(lngLat)
         .addTo(map);
       powerMarkers.set(substation.substationId, marker);
     }
-  }, [simPowerNetwork, metroLines, hiddenLines]);
+  }, [simPowerNetwork, powerTopology, metroLines, hiddenLines, styleLoadTick]);
 
   return (
     <div className="relative w-full h-full">
@@ -423,6 +422,34 @@ function interpolateLinePointByMileage(
     };
   }
   return null;
+}
+
+function buildPowerMarkerHtml(
+  substationId: string,
+  name: string,
+  warning: boolean,
+  color: string,
+): string {
+  return `
+    <div title="${name}" style="
+      width: 15px; height: 15px;
+      transform: rotate(45deg);
+      background: ${warning ? 'rgba(255,180,84,0.35)' : 'rgba(88,166,255,0.35)'};
+      border: 1.5px solid ${color};
+      box-shadow: 0 0 12px ${color}80;
+    "></div>
+    <div style="
+      margin-top: 5px;
+      padding: 1px 4px;
+      background: rgba(4,8,16,0.82);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: ${color};
+      font-size: 9px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: nowrap;
+      transform: translateX(-35%);
+    ">${substationId.replace('TS-', '')}</div>
+  `;
 }
 
 function renderMetroLines(

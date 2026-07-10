@@ -95,15 +95,21 @@ export function fetchBackendTrackMap(): Promise<TrackMapData> {
   return getJson<TrackMapData>('/api/lines/9/track-map');
 }
 
+export function fetchBackendPowerTopology(): Promise<PowerTopology> {
+  return getJson<PowerTopology>('/api/lines/9/power-topology');
+}
+
 export async function fetchBackendBundle(): Promise<{
   line: MetroLineData;
   trackMap: TrackMapData;
+  powerTopology: PowerTopology;
 }> {
-  const [line, trackMap] = await Promise.all([
+  const [line, trackMap, powerTopology] = await Promise.all([
     fetchBackendLine9(),
     fetchBackendTrackMap(),
+    fetchBackendPowerTopology(),
   ]);
-  return { line, trackMap };
+  return { line, trackMap, powerTopology };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -188,6 +194,29 @@ export interface PowerSubstationState {
   energyKwh: number;
   loadRatio: number;
   status: string;
+}
+
+export interface PowerTopologySubstation {
+  substationId: string;
+  name: string;
+  mileageM: number;
+  noLoadVoltageV: number;
+  internalResistanceOhm: number;
+  ratedCurrentA: number;
+  overloadCurrentA: number;
+  efsCapacityKw: number;
+  status: string;
+}
+
+export interface PowerTopology {
+  lineId: string;
+  nominalVoltageV: number;
+  quality: string;
+  substations: PowerTopologySubstation[];
+  feeders: unknown[];
+  contactRailSections: unknown[];
+  returnRailSections?: unknown[];
+  switches: unknown[];
 }
 
 export interface PowerFeederState {

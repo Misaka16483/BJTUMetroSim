@@ -473,6 +473,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/power/faults":
                 payload = self._read_json_body()
                 self._send_json(self._apply_power_fault(payload))
+            elif path == "/api/sim/power/reset":
+                self._send_json(self._reset_power_network())
             elif match := re.fullmatch(r"/api/sim/power/switches/([^/]+)/operate", path):
                 payload = self._read_json_body()
                 self._send_json(self._operate_power_switch(match.group(1), payload))
@@ -567,6 +569,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         )
         self.engine._last_power_states = self.engine._empty_power_states()
         return {"ok": True, "data": {"faultId": f"PF-{target_id}", **result}}
+
+    def _reset_power_network(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        self.engine.reset_power_network()
+        return {"ok": True, "action": "power_reset"}
 
     def _operate_power_switch(self, switch_id: str, payload: JsonDict) -> JsonDict:
         if self.engine is None or self.engine.power_service.network is None:
