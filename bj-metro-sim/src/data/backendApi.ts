@@ -379,3 +379,66 @@ export function simResume(): Promise<unknown> {
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
 }
+
+export interface VehicleConfigPayload {
+  formation: string;
+  carMassesKg: number[];
+  headCarLengthM: number;
+  middleCarLengthM: number;
+  wheelRadiusM: number;
+  maxSpeedMps?: number;
+  maxTractionForceN?: number;
+  maxServiceBrakeForceN?: number;
+  emergencyBrakeForceN?: number;
+}
+
+export interface VehicleConfigResponse {
+  ok: boolean;
+  vehicleConfig: {
+    trainId: string;
+    formation: string;
+    carMassesKg: number[] | null;
+    headCarLengthM: number;
+    middleCarLengthM: number;
+    wheelRadiusM: number;
+    massKg: number;
+    trainLengthM: number;
+    maxSpeedMps: number;
+    maxTractionForceN: number;
+    maxServiceBrakeForceN: number;
+    emergencyBrakeForceN: number;
+  };
+}
+
+export function simSetVehicleConfig(payload: VehicleConfigPayload): Promise<VehicleConfigResponse> {
+  return fetch('/api/sim/vehicle-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<VehicleConfigResponse>;
+  });
+}
+
+export function simSetManualMode(enabled: boolean): Promise<{ ok: boolean; manualMode: boolean }> {
+  return fetch('/api/sim/manual-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+  });
+}
+
+export function simSendManualCommand(tractionPercent: number, brakePercent: number): Promise<unknown> {
+  return fetch('/api/sim/manual-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tractionPercent, brakePercent }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json();
+  });
+}

@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useSimStore } from '../store/useSimStore';
 import { lineColor } from './LineSelector';
+import MasterController from './MasterController';
 import type { MetroLineData } from '../data/amapMetroApi';
 
 /* ═══════════════════════ CBTC 驾驶台 · 北京地铁 9 号线 ═══════════════════════ */
@@ -98,6 +99,7 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
     speedTimeHistory, estimatedRunTimeS, pathPositionM, pathTotalLengthM,
     currentSegmentId, localSpeedLimitMps, gradeRatio,
     startBackendSim, pauseBackendSim, resumeBackendSim, stopBackendSim,
+    manualMode, manualTraction, manualBrake, setManualMode,
   } = useSimStore();
   const color = lineColor(line9.id);
 
@@ -180,11 +182,46 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
 
           {isBackend && <ControlButtons state={engineClockState} onStart={startBackendSim} onPause={pauseBackendSim} onResume={resumeBackendSim} onStop={stopBackendSim} />}
 
-          {/* ── 牵引 / 制动条 ── */}
-          <div className="flex flex-col" style={{ gap: 8 }}>
-            <DriveBar label="TRACTION" value={tractionPercent} color="#22c55e" />
-            <DriveBar label="BRAKE" value={brakePercent} color="#ef4444" />
+          {/* ── ATO / 手动 切换 ── */}
+          <div
+            className="flex items-center rounded cursor-pointer"
+            style={{ border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)' }}
+            onClick={() => setManualMode(!manualMode)}
+          >
+            <div
+              className="flex-1 text-center py-1.5 rounded text-[9px] font-bold uppercase tracking-[0.1em] transition-colors duration-150"
+              style={{
+                color: !manualMode ? '#e2e8f0' : '#6b7280',
+                background: !manualMode ? 'rgba(100,210,255,0.12)' : 'transparent',
+              }}
+            >
+              ATO
+            </div>
+            <div
+              className="flex-1 text-center py-1.5 rounded text-[9px] font-bold uppercase tracking-[0.1em] transition-colors duration-150"
+              style={{
+                color: manualMode ? '#fbbf24' : '#6b7280',
+                background: manualMode ? 'rgba(251,191,36,0.12)' : 'transparent',
+              }}
+            >
+              CM
+            </div>
           </div>
+
+          {/* ── 手动驾驶：操纵杆 ── */}
+          {manualMode ? (
+            <div className="flex justify-center py-2"
+              style={{ border: '1px solid rgba(251,191,36,0.08)', borderRadius: 8, background: 'rgba(251,191,36,0.02)' }}>
+              <MasterController />
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-col" style={{ gap: 8 }}>
+                <DriveBar label="TRACTION" value={tractionPercent} color="#22c55e" />
+                <DriveBar label="BRAKE" value={brakePercent} color="#ef4444" />
+              </div>
+            </>
+          )}
 
           {/* ── 运行信息 ── */}
           <div className="flex flex-col" style={{ gap: 3 }}>
@@ -200,10 +237,10 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
             <StateIndicator state={engineClockState} />
             <div className="flex justify-center gap-4 pt-2">
               <span className="text-[8px] font-medium uppercase tracking-[0.12em] text-[#6b7280] flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: '#8FC31F', opacity: 0.6 }} />ATP
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: manualMode ? '#f59e0b' : '#8FC31F', opacity: 0.6 }} />ATP
               </span>
               <span className="text-[8px] font-medium uppercase tracking-[0.12em] text-[#6b7280] flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: '#8FC31F', opacity: 0.6 }} />ATO
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: manualMode ? '#6b7280' : '#8FC31F', opacity: 0.6 }} />{manualMode ? 'CM' : 'ATO'}
               </span>
             </div>
           </div>

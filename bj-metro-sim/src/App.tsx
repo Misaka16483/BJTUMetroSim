@@ -9,6 +9,7 @@ import FullLineInterlockingView from './components/FullLineInterlockingView';
 import OperationalLoopPanel from './components/OperationalLoopPanel';
 import PowerNetworkPanel from './components/PowerNetworkPanel';
 import PowerSystemView from './components/PowerSystemView';
+import VehicleConfigPanel from './components/VehicleConfigPanel';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -35,6 +36,8 @@ export default function App() {
   const speedProfile = useSimStore((s) => s.speedProfile);
   const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
+  const showVehicleConfig = useSimStore((s) => s.showVehicleConfig);
+  const setShowVehicleConfig = useSimStore((s) => s.setShowVehicleConfig);
   const [collapsed, setCollapsed] = useState(false);
   const modeIndex = viewMode === 'macro'
     ? 0
@@ -222,6 +225,26 @@ export default function App() {
         </div>
         </div>
 
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowVehicleConfig(true)}
+            className="flex items-center gap-1.5 cursor-pointer label text-[10px] rounded-lg"
+            style={{
+              padding: '5px 10px',
+              color: 'var(--cyan)',
+              border: '1px solid rgba(100,210,255,0.15)',
+              background: 'rgba(100,210,255,0.04)',
+            }}
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <circle cx="5" cy="2" r="1.2" stroke="currentColor" strokeWidth="0.8" />
+              <rect x="2.5" y="3.8" width="5" height="5" rx="0.6" stroke="currentColor" strokeWidth="0.8" />
+              <circle cx="5" cy="6.3" r="0.8" stroke="currentColor" strokeWidth="0.8" />
+            </svg>
+            车辆参数
+          </button>
+        </div>
+
         <div className="flex items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
           <span className="led led-online" /> SYS ONLINE
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
@@ -353,6 +376,8 @@ export default function App() {
         </div>
         <span style={{ color: 'rgba(255,255,255,0.04)' }}>v0.2.0</span>
       </footer>
+
+      {showVehicleConfig && <VehicleConfigPanel />}
     </div>
   );
 }

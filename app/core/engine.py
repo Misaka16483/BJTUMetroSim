@@ -243,6 +243,13 @@ class SimulationEngine:
         self._dcdp_curve_meta: dict[str, dict[str, Any]] = {}
         self._profile_run_times: dict[str, float] = {}                  # 预计区间运行时间
 
+        # ── 用户配置的车辆参数 ──
+        self._user_vehicle_config: VehicleConfig | None = None
+
+        # ── 手动驾驶模式 ──
+        self._manual_mode: bool = False
+        self._manual_command: ControlCommand | None = None
+
         # ── 线程安全 ──
         self._lock = threading.Lock()
         self._power_lock = threading.RLock()
@@ -253,6 +260,70 @@ class SimulationEngine:
     # ═══════════════════════════════════════════════════════════
     #  公共接口
     # ═══════════════════════════════════════════════════════════
+
+    def set_vehicle_config(self, data: JsonDict) -> VehicleConfig:
+        """接收前端传来的车辆参数并保存."""
+        train_id = self.trains[0].train_id if self.trains else "T0901"
+        vcfg = VehicleConfig.from_user_config(train_id, data)
+        self._user_vehicle_config = vcfg
+        return vcfg
+
+    def set_manual_mode(self, enabled: bool) -> dict:
+        """切换手动/ATO模式."""
+        self._manual_mode = enabled
+        if not enabled:
+            self._manual_command = None
+        return {"ok": True, "manualMode": enabled}
+
+    def set_manual_command(self, traction_percent: float, brake_percent: float) -> dict:
+        """接收手动驾驶指令."""
+        if not self._manual_mode:
+            return {"ok": False, "error": "NOT_IN_MANUAL_MODE"}
+        train_id = self.trains[0].train_id if self.trains else "T0901"
+        self._manual_command = ControlCommand(
+            train_id=train_id,
+            traction_percent=max(0.0, min(100.0, traction_percent)),
+            brake_percent=max(0.0, min(100.0, brake_percent)),
+            source=CommandSource.MANUAL,
+        )
+        return {"ok": True, "tractionPercent": self._manual_command.traction_percent, "brakePercent": self._manual_command.brake_percent}
+
+    def _make_vehicle_config(self, train_id: str) -> VehicleConfig:
+        """构建当前应使用的车辆配置."""
+        if self._user_vehicle_config is not None:
+            uc = self._user_vehicle_config
+            return VehicleConfig(
+                train_id=train_id,
+                formation=uc.formation,
+                car_masses_kg=uc.car_masses_kg,
+                head_car_length_m=uc.head_car_length_m,
+                middle_car_length_m=uc.middle_car_length_m,
+                wheel_radius_m=uc.wheel_radius_m,
+                max_speed_mps=uc.max_speed_mps,
+                max_traction_force_n=uc.max_traction_force_n,
+                max_service_brake_force_n=uc.max_service_brake_force_n,
+                emergency_brake_force_n=uc.emergency_brake_force_n,
+                basic_resistance_n=uc.basic_resistance_n,
+                motor_count=uc.motor_count,
+                gear_ratio=uc.gear_ratio,
+                drivetrain_efficiency=uc.drivetrain_efficiency,
+                regen_efficiency=uc.regen_efficiency,
+                auxiliary_power_kw=uc.auxiliary_power_kw,
+                nominal_line_voltage_v=uc.nominal_line_voltage_v,
+            )
+        return VehicleConfig(train_id=train_id)
+
+    def _manual_override(self, ato_cmd: ControlCommand, train_id: str) -> ControlCommand:
+        """如果处于手动模式，用前端指令替代 ATO 指令."""
+        if not self._manual_mode or self._manual_command is None:
+            return ato_cmd
+        mc = self._manual_command
+        return ControlCommand(
+            train_id=train_id,
+            traction_percent=mc.traction_percent,
+            brake_percent=mc.brake_percent,
+            source=CommandSource.MANUAL,
+        )
 
     def load(self) -> None:
         """加载场景，初始化列车状态."""
@@ -659,7 +730,8 @@ class SimulationEngine:
         )
         ato = self._ato_for_train(train.train_id)
         command = ato.decide(state, target)
-        vehicle_config = VehicleConfig.for_load(train.train_id, train.onboard_pax)
+        command = self._manual_override(command, train.train_id)
+        vehicle_config = self._make_vehicle_config(train.train_id)
         demand = TractionDriveModel(vehicle_config).demand(command, train.speed_mps)
         gradient_force_n = vehicle_config.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
         return True, PreparedTrainStep(
@@ -833,15 +905,17 @@ class SimulationEngine:
             )
             cmd = self.ato.decide(state, target)
 
-            # ── Profile feedforward：加速段全牵引 ──
-            if profile_mode == "MAX_TRACTION" and train.speed_mps < effective_limit - 0.2:
-                cmd = ControlCommand(
-                    train_id=train.train_id,
-                    traction_percent=100.0,
-                    source=CommandSource.ATO,
-                )
+            if not self._manual_mode:
+                if profile_mode == "MAX_TRACTION" and train.speed_mps < effective_limit - 0.2:
+                    cmd = ControlCommand(
+                        train_id=train.train_id,
+                        traction_percent=100.0,
+                        source=CommandSource.ATO,
+                    )
+            else:
+                cmd = self._manual_override(cmd, train.train_id)
 
-            vcfg = VehicleConfig(train_id=train.train_id)
+            vcfg = self._make_vehicle_config(train.train_id)
             vm = SimpleVehicleModel(vcfg)
             result = vm.step(state, cmd, dt)
 
@@ -971,8 +1045,8 @@ class SimulationEngine:
             )
             ato = self._ato_for_train(train.train_id)
             cmd = ato.decide(state, target)
-
-            vcfg = VehicleConfig(train_id=train.train_id)
+            cmd = self._manual_override(cmd, train.train_id)
+            vcfg = self._make_vehicle_config(train.train_id)
             vm = SimpleVehicleModel(vcfg)
             gradient_force_n = vcfg.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
             result = vm.step(

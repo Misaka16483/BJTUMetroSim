@@ -10,8 +10,10 @@ import type {
   TrackMapData,
   SpeedProfilePoint,
   SpeedProfileMeta,
+  VehicleConfigPayload,
+  VehicleConfigResponse,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSetManualMode, simSendManualCommand } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power';
 
@@ -122,6 +124,22 @@ interface SimState {
   pauseBackendSim: () => Promise<void>;
   resumeBackendSim: () => Promise<void>;
   stopBackendSim: () => Promise<void>;
+
+  // 车辆参数配置
+  vehicleConfig: VehicleConfigPayload;
+  vehicleConfigResponse: VehicleConfigResponse | null;
+  showVehicleConfig: boolean;
+  setVehicleConfig: (config: Partial<VehicleConfigPayload>) => void;
+  submitVehicleConfig: () => Promise<void>;
+  setShowVehicleConfig: (show: boolean) => void;
+
+  // 手动驾驶
+  manualMode: boolean;
+  manualTraction: number;
+  manualBrake: number;
+  setManualMode: (enabled: boolean) => Promise<void>;
+  sendManualCommand: (traction: number, brake: number) => void;
+  _lastManualSend: number;
 
   // 线路管理
   setMetroLines: (lines: MetroLineData[]) => void;
@@ -314,6 +332,25 @@ export const useSimStore = create<SimState>((set, get) => ({
   trainPositions: {},
   segmentProgress: 0,
   engineClockState: 'IDLE',
+
+  vehicleConfig: {
+    formation: 'Tc-M-M-M-M-Tc',
+    carMassesKg: [34500, 39000, 39000, 39000, 39000, 34500],
+    headCarLengthM: 20.2,
+    middleCarLengthM: 19.4,
+    wheelRadiusM: 0.46,
+    maxSpeedMps: 22.22,
+    maxTractionForceN: 300000,
+    maxServiceBrakeForceN: 300000,
+    emergencyBrakeForceN: 337500,
+  },
+  vehicleConfigResponse: null,
+  showVehicleConfig: false,
+
+  manualMode: false,
+  manualTraction: 0,
+  manualBrake: 0,
+  _lastManualSend: 0,
 
   toggleRunning: () => {
     const state = get();
@@ -681,5 +718,29 @@ export const useSimStore = create<SimState>((set, get) => ({
       speedHistory: [],
       speedTimeHistory: [],
     });
+  },
+
+  setVehicleConfig: (partial) =>
+    set((s) => ({ vehicleConfig: { ...s.vehicleConfig, ...partial } })),
+
+  submitVehicleConfig: async () => {
+    const cfg = get().vehicleConfig;
+    const resp = await simSetVehicleConfig(cfg);
+    set({ vehicleConfigResponse: resp, showVehicleConfig: false });
+  },
+
+  setShowVehicleConfig: (show) => set({ showVehicleConfig: show }),
+
+  setManualMode: async (enabled) => {
+    await simSetManualMode(enabled);
+    set({ manualMode: enabled, manualTraction: 0, manualBrake: 0 });
+  },
+
+  sendManualCommand: (traction, brake) => {
+    const now = Date.now();
+    const s = get();
+    if (now - s._lastManualSend < 100) return;
+    set({ _lastManualSend: now, manualTraction: traction, manualBrake: brake });
+    simSendManualCommand(traction, brake).catch(() => {});
   },
 }));

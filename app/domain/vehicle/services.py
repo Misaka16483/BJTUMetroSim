@@ -49,6 +49,24 @@ BRAKE_NET_CURRENT_A = (
     3497.2, 3570.0, 3642.9, 3642.9,
 )
 
+ENERGY_CONSUMPTION_TRACTION_KW = (
+    0.0, 9.1, 18.2, 27.3, 36.3, 45.4, 54.5, 63.6, 72.7, 81.8, 90.9,
+    99.9, 109.0, 118.1, 127.2, 136.3, 145.4, 154.5, 163.5, 172.6, 181.7,
+    190.8, 199.9, 209.0, 218.1, 227.1, 236.2, 245.3, 254.4, 263.5, 271.0,
+    262.2, 254.0, 246.3, 239.1, 232.3, 225.8, 219.7, 213.9, 208.4, 203.2,
+    198.3, 193.6, 189.1, 184.8, 180.7, 176.7, 173.0, 169.4, 165.9, 162.6,
+    162.6,
+)
+
+ENERGY_CONSUMPTION_BRAKE_KW = (
+    0.0, 0.0, 17.0, 25.6, 34.1, 42.6, 51.1, 59.6, 68.1, 76.7, 85.2,
+    93.7, 102.2, 110.7, 119.3, 127.8, 136.3, 144.8, 153.3, 161.8, 170.4,
+    178.9, 187.4, 195.9, 204.4, 212.9, 221.5, 230.0, 238.5, 247.0, 255.5,
+    264.1, 272.6, 281.1, 289.6, 298.1, 306.6, 315.2, 323.7, 332.2, 340.7,
+    349.2, 357.8, 366.3, 374.8, 383.3, 391.8, 400.3, 408.9, 417.4, 425.9,
+    425.9,
+)
+
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return min(max(value, lower), upper)
@@ -146,6 +164,12 @@ class TractionDriveModel:
         )
         return VehicleForceDemand(traction, total_brake, electric)
 
+    def traction_energy_rate_kw(self, speed_mps: float) -> float:
+        return _interpolate(MOTOR_SPEED_RPM, ENERGY_CONSUMPTION_TRACTION_KW, self.motor_speed_rpm(speed_mps))
+
+    def brake_energy_rate_kw(self, speed_mps: float) -> float:
+        return _interpolate(MOTOR_SPEED_RPM, ENERGY_CONSUMPTION_BRAKE_KW, self.motor_speed_rpm(speed_mps))
+
 
 class BrakeBlendService:
     """Allocate the requested service brake between electric and pneumatic braking."""
@@ -212,7 +236,20 @@ class SimpleVehicleModel:
         acceleration_mps2 = (next_speed_mps - state.speed_mps) / dt_s
         average_speed_mps = (state.speed_mps + next_speed_mps) / 2.0
         next_position_m = state.position_m + average_speed_mps * dt_s
-        traction_energy_kwh = traction_force_n * average_speed_mps * dt_s / 3_600_000.0
+
+        drive_model = TractionDriveModel(self.config)
+        avg_speed = average_speed_mps
+        traction_energy_kwh = 0.0
+        regen_energy_kwh = 0.0
+        if traction_force_n > 0:
+            energy_rate_kw = drive_model.traction_energy_rate_kw(avg_speed)
+            factor = min(traction_force_n / max(drive_model.traction_capacity_n(avg_speed), 1.0), 1.0)
+            traction_energy_kwh = energy_rate_kw * self.config.motor_count * factor * dt_s / 3600.0
+        if brake_force_n > 0:
+            energy_rate_kw = drive_model.brake_energy_rate_kw(avg_speed)
+            electric_cap = drive_model.electric_brake_capacity_n(avg_speed)
+            elec_factor = min(brake_force_n / max(electric_cap, 1.0), 1.0) if electric_cap > 0 else 0.0
+            regen_energy_kwh = energy_rate_kw * self.config.motor_count * elec_factor * dt_s / 3600.0
 
         return TrainState(
             train_id=state.train_id,
@@ -221,7 +258,7 @@ class SimpleVehicleModel:
             acceleration_mps2=acceleration_mps2,
             sim_time_s=state.sim_time_s + dt_s,
             segment_id=state.segment_id,
-            net_energy_kwh=state.net_energy_kwh + traction_energy_kwh,
+            net_energy_kwh=state.net_energy_kwh + traction_energy_kwh - regen_energy_kwh * self.config.regen_efficiency,
         )
 
     def running_resistance_n(self, speed_mps: float, traction_force_n: float = 0.0, brake_force_n: float = 0.0) -> float:

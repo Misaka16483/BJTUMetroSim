@@ -475,6 +475,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/vehicle-config":
+                payload = self._read_json_body()
+                vcfg = self.engine.set_vehicle_config(payload)
+                self._send_json({"ok": True, "vehicleConfig": vcfg.to_dict()})
+            elif path == "/api/sim/manual-mode":
+                payload = self._read_json_body()
+                enabled = bool(payload.get("enabled", False))
+                self._send_json(self.engine.set_manual_mode(enabled))
+            elif path == "/api/sim/manual-command":
+                payload = self._read_json_body()
+                self._send_json(self.engine.set_manual_command(
+                    float(payload.get("tractionPercent", 0)),
+                    float(payload.get("brakePercent", 0)),
+                ))
             elif path == "/api/sim/power/faults":
                 payload = self._read_json_body()
                 self._send_json(self._apply_power_fault(payload))
