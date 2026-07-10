@@ -1,5 +1,6 @@
 import { useEffect, useRef, useMemo, useState } from 'react';
 import maplibregl from 'maplibre-gl';
+import { substationDisplayName } from '../data/powerLabels';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import darkStyle from '../data/darkStyle';
 import MAPTILER_KEY, { MAPTILER_STYLE } from '../data/maptilerKey';
@@ -352,7 +353,12 @@ export default function MetroMap() {
         substation.status !== 'NORMAL' && substation.status !== 'IN_SERVICE'
       ) || substation.loadRatio >= 0.85;
       const color = warning ? '#ffb454' : '#58a6ff';
-      const html = buildPowerMarkerHtml(substation.substationId, substation.name, warning, color);
+      const html = buildPowerMarkerHtml(
+        substation.substationId,
+        substationDisplayName(substation.substationId, substation.name),
+        warning,
+        color,
+      );
       const existing = powerMarkers.get(substation.substationId);
       if (existing) {
         existing.setLngLat(lngLat);

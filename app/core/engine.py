@@ -196,6 +196,7 @@ class SimulationEngine:
 
         # ── 线程安全 ──
         self._lock = threading.Lock()
+        self._power_lock = threading.RLock()
         self._snapshot: TickSnapshot | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -249,10 +250,40 @@ class SimulationEngine:
 
     def reset_power_network(self) -> None:
         """Restore traction-power topology and clear transient power states."""
-        self.power_service = self._build_power_service()
-        self._last_power_states = self._empty_power_states()
-        self.power_service.update([], dt_sec=0.0)
-        self._snapshot = self._build_snapshot()
+        with self._power_lock:
+            self.power_service = self._build_power_service()
+            self._last_power_states = self._empty_power_states()
+            self._snapshot = self._build_snapshot()
+
+    def apply_power_substation_outage(
+        self,
+        substation_id: str,
+        *,
+        big_bilateral: bool = True,
+    ) -> dict[str, list[str] | str]:
+        """Apply a topology fault atomically with respect to the power-flow tick."""
+        with self._power_lock:
+            network = self.power_service.network
+            if network is None:
+                raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
+            result = network.apply_substation_outage(
+                substation_id,
+                big_bilateral=big_bilateral,
+            )
+            self._last_power_states = self._empty_power_states()
+            self._snapshot = self._build_snapshot()
+            return result
+
+    def operate_power_switch(self, switch_id: str, state: str):
+        """Operate a power switch atomically with respect to the power-flow tick."""
+        with self._power_lock:
+            network = self.power_service.network
+            if network is None:
+                raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
+            switch = network.operate_switch(switch_id, state)
+            self._last_power_states = self._empty_power_states()
+            self._snapshot = self._build_snapshot()
+            return switch
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -671,9 +702,10 @@ class SimulationEngine:
                 return
 
             cruise_threshold = min(self.CRUISE_SPEED_MPS, train.local_speed_limit_mps) * 0.95
+            braking_profile = ato.last_profile_mode == "MAX_BRAKE" or ato.last_profile_mode.startswith("BRAKE_")
             if train.speed_mps >= cruise_threshold:
                 train.phase = CRUISING
-            elif cmd.brake_percent > 5 and train.speed_mps > 0.5:
+            elif (cmd.brake_percent > 5 or braking_profile) and train.speed_mps > 0.5:
                 train.phase = APPROACHING
             else:
                 train.phase = DEPARTING
@@ -988,14 +1020,9 @@ class SimulationEngine:
             return {}
         requests: list[TrainPowerRequest] = []
         for train in self.trains:
-            traction_force_n = 0.0
-            brake_force_n = 0.0
-            if train.phase == DEPARTING:
-                traction_force_n = 95_000.0
-            elif train.phase == CRUISING:
-                traction_force_n = 35_000.0
-            elif train.phase == APPROACHING:
-                brake_force_n = 45_000.0
+            vehicle = VehicleConfig(train_id=train.train_id)
+            traction_force_n = vehicle.max_traction_force_n * train.traction_percent / 100.0
+            brake_force_n = vehicle.max_service_brake_force_n * train.brake_percent / 100.0
             requests.append(
                 TrainPowerRequest(
                     train_id=train.train_id,
@@ -1008,7 +1035,12 @@ class SimulationEngine:
                     aux_power_kw=150.0,
                 )
             )
-        return self.power_service.update(requests, dt_sec=self.clock.tick_seconds)
+        with self._power_lock:
+            return self.power_service.update(
+                requests,
+                dt_sec=self.clock.tick_seconds,
+                sim_time_ms=sim_time_ms,
+            )
 
     def _make_dispatch_decisions(
         self, sim_time_ms: int, power_states: dict[str, Any]
@@ -1234,7 +1266,11 @@ class SimulationEngine:
         )
 
     def _empty_power_states(self) -> dict[str, Any]:
-        return self.power_service.update([], dt_sec=0.0)
+        return self.power_service.update(
+            [],
+            dt_sec=0.0,
+            sim_time_ms=self._absolute_sim_time_ms(),
+        )
 
     def _power_section_for_train(self, train: SimTrainState) -> str:
         return "PWR-09-UP" if train.direction == "UP" else "PWR-09-DOWN"
@@ -1299,8 +1335,9 @@ class SimulationEngine:
         }
 
     def _power_network_snapshot(self) -> JsonDict:
-        snapshot = self.power_service.last_network_snapshot
-        return snapshot.to_dict() if snapshot is not None else {}
+        with self._power_lock:
+            snapshot = self.power_service.last_network_snapshot
+            return snapshot.to_dict() if snapshot is not None else {}
 
     @staticmethod
     def _dispatch_snapshot(decision: DispatchDecision) -> JsonDict:

@@ -56,7 +56,9 @@ class ATOController:
         target_speed_mps = self.target_speed_mps(state, target)
         brake_distance_m = state.speed_mps * state.speed_mps / (2.0 * self.config.expected_deceleration_mps2)
         if (
-            state.speed_mps > target_speed_mps + self.config.pid_deadband_mps
+            state.speed_mps
+            > target_speed_mps
+            + max(self.config.pid_deadband_mps, self.config.service_brake_trigger_margin_mps)
             and distance_to_target_m <= brake_distance_m + self.config.brake_margin_m
         ):
             brake_percent = self._brake_percent(state.speed_mps, distance_to_target_m)

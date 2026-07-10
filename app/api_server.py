@@ -563,11 +563,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         target_id = str(payload.get("targetId", ""))
         if fault_type != "SUBSTATION_OUTAGE" or not target_id:
             return {"ok": False, "error": "UNSUPPORTED_POWER_FAULT"}
-        result = self.engine.power_service.network.apply_substation_outage(
+        result = self.engine.apply_power_substation_outage(
             target_id,
             big_bilateral=str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
         )
-        self.engine._last_power_states = self.engine._empty_power_states()
         return {"ok": True, "data": {"faultId": f"PF-{target_id}", **result}}
 
     def _reset_power_network(self) -> JsonDict:
@@ -582,8 +581,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         state = str(payload.get("state", "")).upper()
         if state not in {"OPEN", "CLOSED"}:
             return {"ok": False, "error": "INVALID_SWITCH_STATE"}
-        switch = self.engine.power_service.network.operate_switch(switch_id, state)
-        self.engine._last_power_states = self.engine._empty_power_states()
+        switch = self.engine.operate_power_switch(switch_id, state)
         return {
             "ok": True,
             "data": {

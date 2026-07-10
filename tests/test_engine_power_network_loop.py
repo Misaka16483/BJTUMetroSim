@@ -13,6 +13,42 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EnginePowerNetworkLoopTests(unittest.TestCase):
+    def test_power_request_uses_actual_vehicle_command_during_braking(self) -> None:
+        engine = SimulationEngine.load_from_files(
+            scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
+            line_map_path=ROOT / "data" / "cache" / "line_map.json",
+            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+        )
+        engine.load()
+        train = engine.trains[0]
+        train.phase = "DEPARTING"
+        train.speed_mps = 10.0
+        train.traction_percent = 0.0
+        train.brake_percent = 80.0
+
+        engine._update_power(sim_time_ms=12_345)
+        snapshot = engine.power_service.last_network_snapshot
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.sim_time_ms, 12_345)
+        self.assertLess(snapshot.trains[0].requested_power_kw, 0.0)
+        self.assertGreater(snapshot.generated_regen_kw, 0.0)
+
+    def test_fault_and_reset_restore_topology_atomically(self) -> None:
+        engine = SimulationEngine.load_from_files(
+            scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
+            line_map_path=ROOT / "data" / "cache" / "line_map.json",
+            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+        )
+        engine.load()
+
+        engine.apply_power_substation_outage("TS-0901")
+        self.assertEqual(engine.power_service.network.substations["TS-0901"].status, "OUTAGE")
+
+        engine.reset_power_network()
+        self.assertEqual(engine.power_service.network.substations["TS-0901"].status, "IN_SERVICE")
+
     def test_engine_snapshot_and_recorder_include_power_network(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             db_path = Path(tmp) / "engine_power.sqlite"

@@ -75,9 +75,15 @@ class PowerService:
         self._energy_kwh_by_section: dict[str, float] = {section.power_section_id: 0.0 for section in sections}
         self._regen_kwh_by_section: dict[str, float] = {section.power_section_id: 0.0 for section in sections}
 
-    def update(self, requests: list[TrainPowerRequest], dt_sec: float) -> dict[str, PowerState]:
+    def update(
+        self,
+        requests: list[TrainPowerRequest],
+        dt_sec: float,
+        *,
+        sim_time_ms: int = 0,
+    ) -> dict[str, PowerState]:
         if self.solver is not None and all(request.position_m is not None for request in requests):
-            return self._update_network(requests, dt_sec)
+            return self._update_network(requests, dt_sec, sim_time_ms)
         self.last_network_snapshot = None
         return self._update_legacy(requests, dt_sec)
 
@@ -112,7 +118,12 @@ class PowerService:
             )
         return states
 
-    def _update_network(self, requests: list[TrainPowerRequest], dt_sec: float) -> dict[str, PowerState]:
+    def _update_network(
+        self,
+        requests: list[TrainPowerRequest],
+        dt_sec: float,
+        sim_time_ms: int,
+    ) -> dict[str, PowerState]:
         loads = [
             TrainElectricalLoad(
                 train_id=request.train_id,
@@ -127,7 +138,7 @@ class PowerService:
             )
             for request in requests
         ]
-        snapshot = self.solver.solve(loads, dt_sec=dt_sec) if self.solver else None
+        snapshot = self.solver.solve(loads, dt_sec=dt_sec, sim_time_ms=sim_time_ms) if self.solver else None
         self.last_network_snapshot = snapshot
         if snapshot is None:
             return self._update_legacy(requests, dt_sec)

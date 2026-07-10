@@ -73,6 +73,7 @@ class AtoConfig:
     pid_integral_limit: float = 25.0
     pid_derivative_filter_ratio: float = 0.65
     pid_deadband_mps: float = 0.08
+    service_brake_trigger_margin_mps: float = 0.35
     use_dynamic_programming_profile: bool = True
     profile_run_time_s: float | None = None
     profile_runtime_margin_ratio: float = 1.18
@@ -112,6 +113,8 @@ class AtoConfig:
             raise ValueError("pid_derivative_filter_ratio must be in [0, 1)")
         if self.pid_deadband_mps < 0:
             raise ValueError("pid_deadband_mps must be non-negative")
+        if self.service_brake_trigger_margin_mps < 0:
+            raise ValueError("service_brake_trigger_margin_mps must be non-negative")
         if self.profile_run_time_s is not None and self.profile_run_time_s <= 0:
             raise ValueError("profile_run_time_s must be positive when provided")
         if self.profile_runtime_margin_ratio <= 0:

@@ -44,10 +44,12 @@ class PowerServiceNetworkTests(unittest.TestCase):
                 direction="UP",
                 aux_power_kw=60.0,
             ),
-        ], dt_sec=1.0)
+        ], dt_sec=1.0, sim_time_ms=12_345)
 
         state = states["PWR-09-UP"]
         self.assertIsNotNone(service.last_network_snapshot)
+        assert service.last_network_snapshot is not None
+        self.assertEqual(service.last_network_snapshot.sim_time_ms, 12_345)
         self.assertGreater(state.min_train_voltage_v, 650.0)
         self.assertGreater(state.max_train_current_a, 0.0)
         self.assertGreaterEqual(state.substation_count, 10)

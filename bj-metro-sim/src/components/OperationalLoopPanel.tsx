@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useSimStore } from '../store/useSimStore';
+import { powerStatusLabel } from '../data/powerLabels';
 
 const CROWD_COLORS: Record<string, string> = {
   LOW: 'var(--green)',
@@ -90,7 +91,7 @@ export default function OperationalLoopPanel() {
           <div className="flex items-center justify-between mb-2">
             <span className="label" style={{ color: 'var(--text-muted)' }}>供电约束</span>
             <span className="board-num text-[9px]" style={{ color: primaryPower ? VOLTAGE_COLORS[primaryPower.voltageLevel] ?? 'var(--text-muted)' : 'var(--text-muted)' }}>
-              {primaryPower?.voltageLevel ?? 'N/A'}
+              {powerStatusLabel(primaryPower?.voltageLevel)}
             </span>
           </div>
           <div className="space-y-1.5">

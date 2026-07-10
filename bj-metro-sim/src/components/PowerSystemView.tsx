@@ -2,6 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSimStore } from '../store/useSimStore';
 import type { PowerSubstationState, PowerTopologySubstation, TrainVoltageState } from '../data/backendApi';
+import {
+  powerAlertLabel,
+  powerQualityLabel,
+  powerStatusLabel,
+  simulationStateLabel,
+  substationDisplayName,
+  switchTypeLabel,
+} from '../data/powerLabels';
 
 type HistoryPoint = {
   tick: number;
@@ -32,6 +40,15 @@ function fmt(value: number | undefined | null, digits = 0) {
   return Number.isFinite(value as number) ? Number(value).toFixed(digits) : '-';
 }
 
+function formatAlertDetail(alert: Record<string, unknown>) {
+  const parts: string[] = [];
+  if (alert.targetId) parts.push(`设备：${String(alert.targetId)}`);
+  if (typeof alert.voltageV === 'number') parts.push(`电压：${fmt(alert.voltageV, 0)} V`);
+  if (typeof alert.currentA === 'number') parts.push(`电流：${fmt(alert.currentA, 0)} A`);
+  if (typeof alert.powerKw === 'number') parts.push(`功率：${fmt(alert.powerKw, 1)} kW`);
+  return parts.join(' · ') || '请检查供电网络状态';
+}
+
 function postJson(url: string, payload: unknown) {
   return fetch(url, {
     method: 'POST',
@@ -53,7 +70,8 @@ export default function PowerSystemView() {
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [events, setEvents] = useState<EventPoint[]>([]);
   const [feederFilter, setFeederFilter] = useState<'ALL' | 'SELECTED' | 'ABNORMAL'>('ABNORMAL');
-  const [actionStatus, setActionStatus] = useState<string>('READY');
+  const [actionStatus, setActionStatus] = useState<string>('就绪');
+  const [actionPending, setActionPending] = useState(false);
 
   const substations = useMemo(
     () => mergeSubstations(powerTopology?.substations ?? [], simPowerNetwork?.substations ?? []),
@@ -94,18 +112,21 @@ export default function PowerSystemView() {
     const minVoltage = Math.min(...trainVoltages.map((item) => item.voltageV), 750);
     const totalPower = substations.reduce((sum, item) => sum + Math.max(item.powerKw ?? 0, 0), 0);
     const maxLoadRatio = Math.max(...substations.map((item) => item.loadRatio ?? 0), 0);
-    setHistory((items) => [
-      ...items.slice(-179),
-      {
-        tick: simPowerNetwork.simTimeMs ?? items.length,
+    setHistory((items) => {
+      const previous = items[items.length - 1];
+      const point: HistoryPoint = {
+        tick: simPowerNetwork.simTimeMs ?? (previous?.tick ?? -1) + 1,
         minVoltageV: minVoltage,
         totalSubstationPowerKw: totalPower,
         maxLoadRatio,
         lossesKw: simPowerNetwork.lossesKw ?? 0,
         absorbedRegenKw: regen?.absorbedKw ?? 0,
         wastedRegenKw: regen?.wastedKw ?? 0,
-      },
-    ]);
+      };
+      if (previous && point.tick < previous.tick) return items;
+      if (previous?.tick === point.tick) return [...items.slice(0, -1), point];
+      return [...items.slice(-179), point];
+    });
   }, [simPowerNetwork, trainVoltages, substations, regen]);
 
   const minVoltageTrain = useMemo(
@@ -118,39 +139,46 @@ export default function PowerSystemView() {
   );
 
   const injectOutage = () => {
-    if (!selectedSubstationId) return;
-    setActionStatus('POSTING FAULT');
+    if (!selectedSubstationId || actionPending) return;
+    setActionPending(true);
+    setActionStatus('正在注入故障');
     postJson('/api/sim/power/faults', {
       faultType: 'SUBSTATION_OUTAGE',
       targetId: selectedSubstationId,
       mode: 'N_MINUS_1_BIG_BILATERAL',
     })
       .then(() => {
-        setActionStatus(`OUTAGE ${selectedSubstationId}`);
+        setActionStatus(`${selectedSubstationId} 已停运`);
         addEvent(latestTick, `N-1 ${selectedSubstationId}`, '#ff453a');
       })
-      .catch((error) => setActionStatus(error instanceof Error ? error.message : 'FAULT FAILED'));
+      .catch((error) => setActionStatus(error instanceof Error ? `故障注入失败：${error.message}` : '故障注入失败'))
+      .finally(() => setActionPending(false));
   };
 
   const resetPower = () => {
-    setActionStatus('RESETTING');
+    if (actionPending) return;
+    setActionPending(true);
+    setActionStatus('正在恢复供电网络');
     postJson('/api/sim/power/reset', {})
       .then(() => {
-        setActionStatus('NORMAL RESTORED');
-        addEvent(latestTick, 'RESET', '#58a6ff');
+        setActionStatus('正常供电已恢复');
+        addEvent(latestTick, '网络复位', '#58a6ff');
       })
-      .catch((error) => setActionStatus(error instanceof Error ? error.message : 'RESET FAILED'));
+      .catch((error) => setActionStatus(error instanceof Error ? `恢复失败：${error.message}` : '恢复失败'))
+      .finally(() => setActionPending(false));
   };
 
   const operateSwitch = (state: 'OPEN' | 'CLOSED') => {
-    if (!selectedSwitchId) return;
-    setActionStatus(`${state} ${selectedSwitchId}`);
+    if (!selectedSwitchId || actionPending) return;
+    setActionPending(true);
+    setActionStatus(`正在${state === 'CLOSED' ? '闭合' : '断开'} ${selectedSwitchId}`);
     postJson(`/api/sim/power/switches/${selectedSwitchId}/operate`, { state })
       .then(() => {
-        setActionStatus(`${selectedSwitchId} ${state}`);
-        addEvent(latestTick, `${state} ${selectedSwitchId.replace('SW-TIE-', '')}`, state === 'CLOSED' ? '#8FC31F' : '#8ba0bb');
+        setActionStatus(`${selectedSwitchId} 已${state === 'CLOSED' ? '闭合' : '断开'}`);
+        addEvent(latestTick, `${state === 'CLOSED' ? '闭合' : '断开'} ${selectedSwitchId.replace('SW-TIE-', '')}`, state === 'CLOSED' ? '#8FC31F' : '#8ba0bb');
       })
-      .catch((error) => setActionStatus(error instanceof Error ? error.message : 'SWITCH FAILED'));
+      .catch((error) => setActionStatus(error instanceof Error ? `开关操作失败：${error.message}` : '开关操作失败'))
+      .finally(() => setActionPending(false));
   };
 
   const addEvent = (tick: number, label: string, color: string) => {
@@ -164,13 +192,13 @@ export default function PowerSystemView() {
           <section className="glass p-5">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <div className="label" style={{ color: 'var(--text-muted)' }}>TRACTION POWER SYSTEM</div>
-                <h2 className="mt-1 text-[20px] font-semibold text-[#dce8f8]">Line 9 DC750V Power Flow</h2>
+                <div className="label" style={{ color: 'var(--text-muted)' }}>牵引供电系统</div>
+                <h2 className="mt-1 text-[20px] font-semibold text-[#dce8f8]">9号线 DC750V 牵引供电潮流</h2>
               </div>
               <div className="flex items-center gap-4 text-right">
-                <Readout label="SIM" value={engineClockState} color={engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)'} />
-                <Readout label="TIME" value={simTime} color="var(--cyan)" />
-                <Readout label="QUALITY" value={powerTopology?.quality ?? '-'} color="var(--text-muted)" />
+                <Readout label="仿真状态" value={simulationStateLabel(engineClockState)} color={engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)'} />
+                <Readout label="仿真时间" value={simTime} color="var(--cyan)" />
+                <Readout label="数据质量" value={powerQualityLabel(powerTopology?.quality)} color="var(--text-muted)" />
               </div>
             </div>
 
@@ -183,31 +211,31 @@ export default function PowerSystemView() {
           </section>
 
           <section className="grid grid-cols-4 gap-3">
-            <Metric label="MIN TRAIN U" value={fmt(minVoltageTrain?.voltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? 750) < 650 ? 'var(--amber)' : 'var(--green)'} />
-            <Metric label="PEAK TS LOAD" value={fmt((busiestSubstation?.loadRatio ?? 0) * 100, 1)} unit="%" color={(busiestSubstation?.loadRatio ?? 0) >= 0.85 ? 'var(--amber)' : 'var(--cyan)'} />
-            <Metric label="LOSS" value={fmt(simPowerNetwork?.lossesKw, 1)} unit="kW" color="var(--text-dim)" />
-            <Metric label="REGEN WASTE" value={fmt(regen?.wastedKw, 0)} unit="kW" color={(regen?.wastedKw ?? 0) > 0 ? 'var(--amber)' : 'var(--green)'} />
+            <Metric label="最低列车电压" value={fmt(minVoltageTrain?.voltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? 750) < 650 ? 'var(--amber)' : 'var(--green)'} />
+            <Metric label="最大牵引所负载" value={fmt((busiestSubstation?.loadRatio ?? 0) * 100, 1)} unit="%" color={(busiestSubstation?.loadRatio ?? 0) >= 0.85 ? 'var(--amber)' : 'var(--cyan)'} />
+            <Metric label="线路损耗" value={fmt(simPowerNetwork?.lossesKw, 1)} unit="kW" color="var(--text-dim)" />
+            <Metric label="再生浪费" value={fmt(regen?.wastedKw, 0)} unit="kW" color={(regen?.wastedKw ?? 0) > 0 ? 'var(--amber)' : 'var(--green)'} />
           </section>
 
           <section className="grid grid-cols-2 gap-3">
-            <TrendPanel title="Voltage / Load" subtitle="min train voltage and max substation load">
+            <TrendPanel title="电压与负载" subtitle="最低列车电压 / 最大牵引所负载">
               <TrendChart
                 points={history}
                 events={events}
                 series={[
-                  { key: 'minVoltageV', label: 'MIN U', color: '#8FC31F', min: 500, max: 900 },
-                  { key: 'maxLoadRatio', label: 'LOAD', color: '#ffb454', min: 0, max: 1 },
+                  { key: 'minVoltageV', label: '最低电压', color: '#8FC31F', min: 500, max: 900 },
+                  { key: 'maxLoadRatio', label: '最大负载', color: '#ffb454', min: 0, max: 1 },
                 ]}
               />
             </TrendPanel>
-            <TrendPanel title="Power / Energy" subtitle="traction power, losses and regen split">
+            <TrendPanel title="功率与能量" subtitle="牵引功率 / 线路损耗 / 再生浪费">
               <TrendChart
                 points={history}
                 events={events}
                 series={[
-                  { key: 'totalSubstationPowerKw', label: 'PWR', color: '#58a6ff' },
-                  { key: 'lossesKw', label: 'LOSS', color: '#8ba0bb' },
-                  { key: 'wastedRegenKw', label: 'WASTE', color: '#ff453a' },
+                  { key: 'totalSubstationPowerKw', label: '牵引功率', color: '#58a6ff' },
+                  { key: 'lossesKw', label: '线路损耗', color: '#8ba0bb' },
+                  { key: 'wastedRegenKw', label: '再生浪费', color: '#ff453a' },
                 ]}
               />
             </TrendPanel>
@@ -215,8 +243,8 @@ export default function PowerSystemView() {
 
           <section className="grid grid-cols-[1.2fr_1fr] gap-3">
             <DataTable
-              title="Substation Flow"
-              columns={['ID', 'U/V', 'I/A', 'P/kW', 'LOAD', 'STATUS']}
+              title="牵引所潮流"
+              columns={['设备编号', '电压/V', '电流/A', '功率/kW', '负载率', '状态']}
               rows={substations.map((item) => [
                 item.substationId,
                 fmt(item.voltageV, 0),
@@ -228,8 +256,8 @@ export default function PowerSystemView() {
               statusColumn={5}
             />
             <DataTable
-              title="Train Voltage"
-              columns={['TRAIN', 'K', 'U/V', 'I/A', 'LIMIT', 'LEVEL']}
+              title="列车受电状态"
+              columns={['列车', '公里标', '电压/V', '电流/A', '限牵系数', '电压等级']}
               rows={trainVoltages.map((item) => [
                 item.trainId,
                 fmt((item.mileageM ?? 0) / 1000, 3),
@@ -246,12 +274,12 @@ export default function PowerSystemView() {
         <aside className="min-w-0 space-y-3">
           <section className="glass p-4">
             <div className="flex items-center justify-between mb-3">
-              <span className="label" style={{ color: 'var(--text-muted)' }}>SCENARIO CONTROL</span>
+              <span className="label" style={{ color: 'var(--text-muted)' }}>工况控制</span>
               <span className="board-num text-[9px]" style={{ color: 'var(--cyan)' }}>{actionStatus}</span>
             </div>
             <div className="space-y-3">
               <label className="block">
-                <span className="label block mb-1" style={{ color: 'var(--text-muted)' }}>SUBSTATION</span>
+                <span className="label block mb-1" style={{ color: 'var(--text-muted)' }}>牵引变电所</span>
                 <select
                   value={selectedSubstationId}
                   onChange={(event) => setSelectedSubstationId(event.target.value)}
@@ -259,7 +287,7 @@ export default function PowerSystemView() {
                 >
                   {substations.map((item) => (
                     <option key={item.substationId} value={item.substationId}>
-                      {item.substationId} {item.name}
+                      {item.substationId} {substationDisplayName(item.substationId, item.name)}
                     </option>
                   ))}
                 </select>
@@ -267,21 +295,23 @@ export default function PowerSystemView() {
               <button
                 type="button"
                 onClick={injectOutage}
-                className="w-full px-3 py-2 text-[12px] font-semibold cursor-pointer"
+                disabled={actionPending}
+                className="w-full px-3 py-2 text-[12px] font-semibold cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                 style={{ background: 'rgba(255,69,58,0.16)', border: '1px solid rgba(255,69,58,0.35)', color: '#ff8a82' }}
               >
-                Inject N-1 Outage
+                注入 N-1 牵引所故障
               </button>
               <button
                 type="button"
                 onClick={resetPower}
-                className="w-full px-3 py-2 text-[12px] font-semibold cursor-pointer"
+                disabled={actionPending}
+                className="w-full px-3 py-2 text-[12px] font-semibold cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                 style={{ background: 'rgba(88,166,255,0.12)', border: '1px solid rgba(88,166,255,0.32)', color: '#58a6ff' }}
               >
-                Restore Normal Network
+                恢复正常供电网络
               </button>
               <label className="block">
-                <span className="label block mb-1" style={{ color: 'var(--text-muted)' }}>TIE SWITCH</span>
+                <span className="label block mb-1" style={{ color: 'var(--text-muted)' }}>联络开关</span>
                 <select
                   value={selectedSwitchId}
                   onChange={(event) => setSelectedSwitchId(event.target.value)}
@@ -291,33 +321,33 @@ export default function PowerSystemView() {
                     const sw = item as { switchId?: string; switchType?: string; currentState?: string };
                     return (
                       <option key={sw.switchId} value={sw.switchId}>
-                        {sw.switchId} {sw.switchType} {sw.currentState ?? ''}
+                        {sw.switchId} {switchTypeLabel(sw.switchType)} {powerStatusLabel(sw.currentState)}
                       </option>
                     );
                   })}
                 </select>
               </label>
               <div className="grid grid-cols-2 gap-2">
-                <button type="button" onClick={() => operateSwitch('CLOSED')} className="px-3 py-2 text-[12px] cursor-pointer" style={{ background: 'rgba(143,195,31,0.12)', border: '1px solid rgba(143,195,31,0.28)', color: 'var(--green)' }}>Close</button>
-                <button type="button" onClick={() => operateSwitch('OPEN')} className="px-3 py-2 text-[12px] cursor-pointer" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.10)', color: 'var(--text-muted)' }}>Open</button>
+                <button type="button" disabled={actionPending} onClick={() => operateSwitch('CLOSED')} className="px-3 py-2 text-[12px] cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" style={{ background: 'rgba(143,195,31,0.12)', border: '1px solid rgba(143,195,31,0.28)', color: 'var(--green)' }}>闭合</button>
+                <button type="button" disabled={actionPending} onClick={() => operateSwitch('OPEN')} className="px-3 py-2 text-[12px] cursor-pointer disabled:cursor-not-allowed disabled:opacity-50" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.10)', color: 'var(--text-muted)' }}>断开</button>
               </div>
             </div>
           </section>
 
           <DataTable
-            title="Feeder Arms"
+            title="馈电臂"
             toolbar={(
               <select
                 value={feederFilter}
                 onChange={(event) => setFeederFilter(event.target.value as 'ALL' | 'SELECTED' | 'ABNORMAL')}
                 className="bg-[#081321] border border-[#172436] text-[#8ba0bb] px-2 py-1 text-[10px] outline-none"
               >
-                <option value="ABNORMAL">active</option>
-                <option value="SELECTED">selected TS</option>
-                <option value="ALL">all</option>
+                <option value="ABNORMAL">异常或有负载</option>
+                <option value="SELECTED">当前牵引所</option>
+                <option value="ALL">全部</option>
               </select>
             )}
-            columns={['FEEDER', 'I/A', 'LOAD', 'STATUS']}
+            columns={['馈电臂编号', '电流/A', '负载率', '状态']}
             rows={visibleFeeders.map((item) => [
               item.feederId,
               fmt(item.currentA, 0),
@@ -329,16 +359,16 @@ export default function PowerSystemView() {
 
           <section className="glass p-4">
             <div className="flex items-center justify-between mb-3">
-              <span className="label" style={{ color: 'var(--text-muted)' }}>ALERTS</span>
+              <span className="label" style={{ color: 'var(--text-muted)' }}>供电告警</span>
               <span className="board-num text-[9px]" style={{ color: alerts.length ? 'var(--amber)' : 'var(--green)' }}>{alerts.length}</span>
             </div>
             <div className="space-y-2 max-h-[210px] overflow-auto">
               {alerts.length === 0 ? (
-                <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>No active power-flow alerts.</div>
+                <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>当前无供电潮流告警</div>
               ) : alerts.map((alert, index) => (
                 <div key={index} className="bg-[#081321] border border-[#172436] px-2 py-2 text-[11px]">
-                  <div className="font-mono" style={{ color: 'var(--amber)' }}>{String(alert.type ?? 'ALERT')}</div>
-                  <div className="mt-1 font-mono" style={{ color: 'var(--text-muted)' }}>{JSON.stringify(alert)}</div>
+                  <div className="font-mono" style={{ color: 'var(--amber)' }}>{powerAlertLabel(alert.type)}</div>
+                  <div className="mt-1 font-mono" style={{ color: 'var(--text-muted)' }}>{formatAlertDetail(alert)}</div>
                 </div>
               ))}
             </div>
@@ -467,7 +497,7 @@ function TrendChart({
         const max = item.max ?? Math.max(...values, 1);
         const range = Math.max(max - min, 1e-6);
         const path = points.map((point, index) => {
-          const x = pad + (points.length <= 1 ? 0 : index / (points.length - 1)) * (width - pad * 2);
+          const x = pad + ((point.tick - firstTick) / tickRange) * (width - pad * 2);
           const y = height - pad - ((Number(point[item.key] ?? 0) - min) / range) * (height - pad * 2);
           return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
         }).join(' ');
@@ -523,7 +553,7 @@ function DataTable({
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan={columns.length} className="py-4" style={{ color: 'var(--text-muted)' }}>Waiting for data.</td></tr>
+              <tr><td colSpan={columns.length} className="py-4" style={{ color: 'var(--text-muted)' }}>等待后端数据</td></tr>
             ) : rows.map((row, index) => (
               <tr key={`${row[0]}-${index}`} className="border-t border-[#101d2d]">
                 {row.map((cell, cellIndex) => (
@@ -534,7 +564,7 @@ function DataTable({
                       color: cellIndex === statusColumn ? (STATUS_COLOR[cell] ?? 'var(--text-muted)') : '#c7d5e8',
                     }}
                   >
-                    {cell}
+                    {cellIndex === statusColumn ? powerStatusLabel(cell) : cell}
                   </td>
                 ))}
               </tr>
