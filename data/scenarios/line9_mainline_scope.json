@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "line-scope.v1",
+  "scopeId": "line9-mainline-v1",
+  "lineId": "9",
+  "description": "9号线13个运营车站之间的正线运行Seg白名单；车辆段和库线数据仍保留在全量line_map.json中。",
+  "source": "data/cache/line_map.json + MetroDynamicsJavaDemo/data/stations.csv",
+  "selectionRule": "按13个运营站台公里标匹配站台，对每个相邻站选取可连通的最短Seg路径，将路径并集固化为正线运行范围。",
+  "segmentIds": [
+    39, 40, 41, 43, 45, 46, 48, 49, 50, 51, 52, 55, 56, 57, 58,
+    68, 69, 72, 73, 74, 75, 76, 77, 78, 79, 81, 97, 98, 99, 100,
+    101, 102, 103, 104, 105, 106, 108, 109, 111, 112, 113, 115, 116,
+    126, 127, 128, 129, 135, 136, 139, 140, 141, 142, 144, 145, 146,
+    170, 171, 172, 173, 174, 179, 180, 185, 186, 187, 188, 190, 191,
+    192, 194, 195, 204, 205, 206, 207, 217
+  ],
+  "stationPairPaths": [
+    {"from": "GGZ", "to": "FSP", "segmentIds": [39, 40, 41, 43, 45, 46, 48, 49, 50, 51]},
+    {"from": "FSP", "to": "KYL", "segmentIds": [51, 52, 68, 69]},
+    {"from": "KYL", "to": "FTN", "segmentIds": [55, 56, 57, 58]},
+    {"from": "FTN", "to": "FTD", "segmentIds": [72, 73, 74, 75, 76, 77]},
+    {"from": "FTD", "to": "QLZ", "segmentIds": [77, 78, 79, 81, 97, 98]},
+    {"from": "QLZ", "to": "LLQ", "segmentIds": [98, 99, 100, 101, 102, 103]},
+    {"from": "LLQ", "to": "LLE", "segmentIds": [103, 104, 105, 106, 108, 109, 111, 112, 113, 115, 116, 135, 136]},
+    {"from": "LLE", "to": "BWR", "segmentIds": [126, 127, 128, 129]},
+    {"from": "BWR", "to": "JBG", "segmentIds": [139, 140, 141, 142, 144, 145, 146, 179, 180]},
+    {"from": "JBG", "to": "BDZ", "segmentIds": [170, 171, 172, 173, 174]},
+    {"from": "BDZ", "to": "BQS", "segmentIds": [185, 186, 187, 188, 190, 191, 192, 194, 195, 217]},
+    {"from": "BQS", "to": "GTG", "segmentIds": [204, 205, 206, 207]}
+  ]
+}

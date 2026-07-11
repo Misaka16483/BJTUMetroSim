@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.core.engine import SimulationEngine
-from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.line.services import LineMapRepository, LineScope, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.operations.member_c_demo import MemberCDemoRunner
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
@@ -37,6 +37,7 @@ WORKSPACE_STATIONS = (
 )
 DEFAULT_STATIONS = REPO_STATIONS if REPO_STATIONS.exists() else WORKSPACE_STATIONS
 DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_single.json"
+DEFAULT_MAINLINE_SCOPE = ROOT / "data" / "scenarios" / "line9_mainline_scope.json"
 DEFAULT_POWER_TOPOLOGY = ROOT / "data" / "scenarios" / "line9_power_topology.json"
 
 LINE9_COLOR = "#8FC31F"
@@ -65,12 +66,15 @@ class Line9DataService:
         cache_path: Path = DEFAULT_CACHE,
         stations_path: Path = DEFAULT_STATIONS,
         run_dir: Path = DEFAULT_RUN_DIR,
+        mainline_scope_path: Path = DEFAULT_MAINLINE_SCOPE,
     ) -> None:
         self.cache_path = cache_path
         self.stations_path = stations_path
         self.run_dir = run_dir
+        self.mainline_scope_path = mainline_scope_path
         self._line_map: JsonDict | None = None
         self._stations: list[JsonDict] | None = None
+        self._mainline_scope: LineScope | None = None
         self._sim_runner: MemberCDemoRunner | None = None
         self._power_topology: JsonDict | None = None
 
@@ -86,6 +90,12 @@ class Line9DataService:
             self._stations = self._load_station_catalog()
         return self._stations
 
+    @property
+    def mainline_scope(self) -> LineScope:
+        if self._mainline_scope is None:
+            self._mainline_scope = LineScope.load(self.mainline_scope_path)
+        return self._mainline_scope
+
     def health(self) -> JsonDict:
         validation = self.line_map.get("validation", {})
         return {
@@ -95,6 +105,8 @@ class Line9DataService:
             "cache": str(self.cache_path),
             "cacheExists": self.cache_path.exists(),
             "validationOk": validation.get("ok"),
+            "mainlineScopeId": self.mainline_scope.scope_id,
+            "mainlineSegmentCount": len(self.mainline_scope.segment_ids),
             "generatedAt": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -181,6 +193,12 @@ class Line9DataService:
         return {
             "lineId": "9",
             "name": "9号线轨道级视图",
+            "scope": {
+                "activeForSimulation": self.mainline_scope.scope_id,
+                "mainlineSegmentCount": len(self.mainline_scope.segment_ids),
+                "fullMapRetained": True,
+                "segmentIds": sorted(self.mainline_scope.segment_ids),
+            },
             "lengthM": self.stations[-1]["mileageM"] - self.stations[0]["mileageM"],
             "counts": {
                 "segments": len(self.line_map.get("segments", [])),

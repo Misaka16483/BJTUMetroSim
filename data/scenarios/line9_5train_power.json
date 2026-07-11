@@ -5,6 +5,7 @@
   "tickSeconds": 0.25,
   "useDynamicProgrammingProfile": false,
   "autoSpawnTrains": true,
+  "lineScopeFile": "line9_mainline_scope.json",
   "trains": [
     {
       "trainId": "T0901",

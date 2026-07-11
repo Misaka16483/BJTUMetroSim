@@ -17,7 +17,7 @@ from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
 from app.domain.control.services import ATOController
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, RuleBasedDispatchService
 from app.domain.power.line9_topology import load_line9_power_network
-from app.domain.line.services import LineMapRepository, PathPlan, PathPlanner, TrackQueryService
+from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.services import (
     BoardingResult,
@@ -200,17 +200,27 @@ class SimulationEngine:
         line_map: JsonDict,
         station_catalog: list[JsonDict],  # [{code, name, mileageM, ...}, ...]
         recorder: RunRecorder | None = None,
+        line_scope: LineScope | None = None,
     ) -> None:
         self.scenario = scenario
         self.line_map = line_map
         self.station_catalog = station_catalog
         self.recorder = recorder
+        self.line_scope = line_scope
+        if line_scope is not None and line_scope.line_id != scenario.line_id:
+            raise ValueError(
+                f"line scope {line_scope.scope_id} belongs to line {line_scope.line_id}, "
+                f"but scenario uses line {scenario.line_id}"
+            )
 
         # 核心组件
         self.clock = SimulationClock(tick_seconds=scenario.tick_seconds)
         self.bus = MessageBus()
         self.track_query = TrackQueryService(line_map)
-        self.path_planner = PathPlanner(line_map)
+        self.path_planner = PathPlanner(
+            line_map,
+            allowed_segment_ids=line_scope.segment_ids if line_scope is not None else None,
+        )
 
         # ── 构建车站运行索引 ──
         self._station_list: list[JsonDict] = self._build_station_list()
@@ -1332,6 +1342,11 @@ class SimulationEngine:
                 continue
         if plans:
             return min(plans, key=lambda item: item.total_length_m)
+        if self.line_scope is not None:
+            raise ValueError(
+                f"no path inside line scope {self.line_scope.scope_id} "
+                f"for station indexes {origin_idx}->{destination_idx}"
+            )
         return None
 
     def _prime_path_profile(self, train: SimTrainState, path_plan: PathPlan) -> None:
@@ -1645,6 +1660,9 @@ class SimulationEngine:
                 "maxPowerLimitedDurationSec": round(max((t.power_limited_duration_sec for t in self.trains), default=0.0), 3),
                 "lastDispatchAction": self._last_dispatch_decisions[-1].action
                 if self._last_dispatch_decisions else "FOLLOW_TIMETABLE",
+                "lineScopeEnforced": self.line_scope is not None,
+                "lineScopeId": self.line_scope.scope_id if self.line_scope is not None else None,
+                "lineScopeSegmentCount": len(self.line_scope.segment_ids) if self.line_scope is not None else 0,
             },
         )
 
@@ -1882,6 +1900,7 @@ class SimulationEngine:
         recorder: RunRecorder | None = None,
     ) -> SimulationEngine:
         """便捷工厂: 从文件构建引擎."""
+        scenario_path = Path(scenario_path)
         scenario = ScenarioConfig.load(scenario_path)
         line_map = LineMapRepository(line_map_path).load()
         with Path(stations_csv_path).open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1896,4 +1915,13 @@ class SimulationEngine:
                 }
                 for row in csv.DictReader(handle)
             ]
-        return cls(scenario, line_map, station_catalog, recorder)
+        line_scope = None
+        if scenario.line_scope_file:
+            line_scope = LineScope.load(scenario_path.parent / scenario.line_scope_file)
+        return cls(
+            scenario,
+            line_map,
+            station_catalog,
+            recorder=recorder,
+            line_scope=line_scope,
+        )

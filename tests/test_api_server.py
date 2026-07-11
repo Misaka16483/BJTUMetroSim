@@ -25,6 +25,9 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(track_map["counts"]["signals"], 157)
         self.assertEqual(track_map["counts"]["platforms"], 56)
         self.assertEqual(track_map["counts"]["routes"], 249)
+        self.assertEqual(track_map["scope"]["activeForSimulation"], "line9-mainline-v1")
+        self.assertEqual(track_map["scope"]["mainlineSegmentCount"], 77)
+        self.assertTrue(track_map["scope"]["fullMapRetained"])
 
     def test_power_topology_shape(self) -> None:
         topology = self.service.power_topology()

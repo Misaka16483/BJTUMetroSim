@@ -29,6 +29,7 @@ class ScenarioConfig:
     tick_seconds: float = 1.0
     use_dynamic_programming_profile: bool = True
     auto_spawn_trains: bool = False
+    line_scope_file: str | None = None
     trains: list[TrainConfig] = field(default_factory=list)
 
     @classmethod
@@ -40,6 +41,7 @@ class ScenarioConfig:
             tick_seconds=data.get("tickSeconds", 1.0),
             use_dynamic_programming_profile=bool(data.get("useDynamicProgrammingProfile", True)),
             auto_spawn_trains=bool(data.get("autoSpawnTrains", False)),
+            line_scope_file=data.get("lineScopeFile"),
             trains=[
                 TrainConfig(
                     train_id=item["trainId"],
