@@ -2,15 +2,39 @@ from __future__ import annotations
 
 import unittest
 
-from app.domain.vehicle import CommandSource, ControlCommand, SimpleVehicleModel, TrainState, VehicleConfig
+from app.domain.vehicle import (
+    BrakeBlendService,
+    CommandSource,
+    ControlCommand,
+    SimpleVehicleModel,
+    TractionDriveModel,
+    TrainState,
+    VehicleConfig,
+)
 
 
 class VehicleModelDataTests(unittest.TestCase):
     def test_vehicle_config_defaults(self) -> None:
         config = VehicleConfig()
         self.assertEqual(config.train_id, "T001")
-        self.assertEqual(config.max_traction_force_n, 100_000.0)
-        self.assertGreater(config.mass_kg, 0)
+        self.assertEqual(config.mass_kg, 225_000.0)
+        self.assertEqual(config.train_length_m, 118.0)
+        self.assertEqual(config.motor_count, 16)
+
+    def test_passenger_load_updates_total_mass(self) -> None:
+        config = VehicleConfig.for_load("T001", onboard_pax=500)
+        self.assertEqual(config.mass_kg, 225_000.0 + 500 * 65.0)
+
+    def test_teacher_curve_reduces_traction_capacity_at_high_speed(self) -> None:
+        drive = TractionDriveModel(VehicleConfig())
+        self.assertGreater(drive.traction_capacity_n(2.0), drive.traction_capacity_n(22.22))
+
+    def test_regen_limit_is_filled_by_pneumatic_brake(self) -> None:
+        drive = TractionDriveModel(VehicleConfig())
+        demand = drive.demand(ControlCommand("T001", brake_percent=80.0), speed_mps=15.0)
+        blend = BrakeBlendService.blend(demand, regen_limit_ratio=0.25)
+        self.assertAlmostEqual(blend.total_brake_force_n, demand.total_brake_force_n)
+        self.assertGreater(blend.pneumatic_brake_force_n, blend.electric_brake_force_n)
 
     def test_train_state_rejects_negative_speed(self) -> None:
         with self.assertRaises(ValueError):

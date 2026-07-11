@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections import deque
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,7 +23,6 @@ from app.domain.interlocking.section_occupation import SectionOccupationService
 from app.domain.interlocking.signal_resolver import SignalAspectResolver
 from app.domain.interlocking.switch_lock import SwitchLockService
 from app.domain.interlocking.models import RouteRequest, SwitchDef
-from app.domain.line.services import LineMapRepository, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
@@ -37,7 +37,12 @@ from app.domain.station.services import (
     TrainLoadState,
 )
 from app.domain.vehicle.models import ControlCommand, TrainState, VehicleConfig, CommandSource
-from app.domain.vehicle.services import SimpleVehicleModel
+from app.domain.vehicle.services import (
+    BrakeBlendService,
+    SimpleVehicleModel,
+    TractionDriveModel,
+    VehicleForceDemand,
+)
 from app.infra.recorder import RunRecorder
 
 
@@ -75,6 +80,8 @@ class SimTrainState:
     last_dispatch_action: str = "FOLLOW_TIMETABLE"
     last_dispatch_reason: str = "NO_ADJUSTMENT_NEEDED"
     dispatch_hold_applied_station_index: int | None = None
+    # ── 驾驶模式 ──
+    operation_mode: str = "ATO"  # "ATO" or "MANUAL"
     # ── 驾驶台反馈字段 ──
     traction_percent: float = 0.0
     brake_percent: float = 0.0
@@ -88,11 +95,23 @@ class SimTrainState:
     grade_ratio: float = 0.0
     path_segment_count: int = 0
     path_constraint_count: int = 0
+    mass_kg: float = 225_000.0
+    traction_force_n: float = 0.0
+    electric_brake_force_n: float = 0.0
+    pneumatic_brake_force_n: float = 0.0
+    requested_power_kw: float = 0.0
+    pantograph_voltage_v: float = 750.0
+    traction_limit_ratio: float = 1.0
+    regen_limit_ratio: float = 1.0
+    power_limited_duration_sec: float = 0.0
+    power_constraint_delay_sec: float = 0.0
     # ── profile 触发控制 ──
     _profile_triggered: bool = False
     _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
     _path_origin_station_index: int | None = field(default=None, repr=False, compare=False)
     _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
+    # ── 手动驾驶 per-train 指令 ──
+    _manual_command: ControlCommand | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> JsonDict:
         return {
@@ -128,7 +147,38 @@ class SimTrainState:
             "gradeRatio": round(self.grade_ratio, 7),
             "pathSegmentCount": self.path_segment_count,
             "pathConstraintCount": self.path_constraint_count,
+            "massKg": round(self.mass_kg, 1),
+            "tractionForceN": round(self.traction_force_n, 1),
+            "electricBrakeForceN": round(self.electric_brake_force_n, 1),
+            "pneumaticBrakeForceN": round(self.pneumatic_brake_force_n, 1),
+            "requestedPowerKw": round(self.requested_power_kw, 3),
+            "pantographVoltageV": round(self.pantograph_voltage_v, 2),
+            "tractionLimitRatio": round(self.traction_limit_ratio, 4),
+            "regenLimitRatio": round(self.regen_limit_ratio, 4),
+            "powerLimitedDurationSec": round(self.power_limited_duration_sec, 3),
+            "powerConstraintDelaySec": round(self.power_constraint_delay_sec, 3),
+            "operationMode": self.operation_mode,
         }
+
+
+@dataclass(frozen=True)
+class PreparedTrainStep:
+    train: SimTrainState
+    next_idx: int
+    next_station: JsonDict
+    path_plan: PathPlan
+    state: TrainState
+    command: ControlCommand
+    vehicle_config: VehicleConfig
+    demand: VehicleForceDemand
+    gradient_force_n: float
+
+
+@dataclass(frozen=True)
+class PowerCommand:
+    command_id: str
+    command_type: str
+    payload: JsonDict
 
 
 @dataclass
@@ -192,12 +242,16 @@ class SimulationEngine:
         self._last_arrivals_by_platform: dict[tuple[str, str], int] = {}
         self._last_power_states: dict[str, Any] = {}
         self._last_dispatch_decisions: list[DispatchDecision] = []
+        self._power_commands: deque[PowerCommand] = deque()
+        self._power_command_sequence = 0
+        self._power_command_results: list[JsonDict] = []
+        self._recorded_power_command_ids: set[str] = set()
 
         # ── 物理模型：PathPlan-aware ATO + DCDP 规划曲线 ──
         self._ato_config = AtoConfig(
             target_cruise_speed_mps=self.CRUISE_SPEED_MPS,
             expected_deceleration_mps2=0.6,
-            use_dynamic_programming_profile=True,
+            use_dynamic_programming_profile=scenario.use_dynamic_programming_profile,
             profile_position_step_m=10.0,
             profile_speed_step_mps=1.0,
             profile_max_states_per_stage=700,
@@ -208,8 +262,15 @@ class SimulationEngine:
         self._dcdp_curve_meta: dict[str, dict[str, Any]] = {}
         self._profile_run_times: dict[str, float] = {}                  # 预计区间运行时间
 
+        # ── 用户配置的车辆参数（per-train） ──
+        self._vehicle_config_by_train: dict[str, VehicleConfig] = {}
+
+        # ── 手动驾驶模式（per-train） ──
+        self._manual_mode_by_train: dict[str, bool] = {}
+
         # ── 线程安全 ──
         self._lock = threading.Lock()
+        self._power_lock = threading.RLock()
         self._snapshot: TickSnapshot | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -218,8 +279,148 @@ class SimulationEngine:
     #  公共接口
     # ═══════════════════════════════════════════════════════════
 
+    def set_vehicle_config(self, data: JsonDict) -> VehicleConfig:
+        """接收前端传来的车辆参数并保存（默认用于所有新车）."""
+        train_id = data.get("trainId", self.trains[0].train_id if self.trains else "T0901")
+        vcfg = VehicleConfig.from_user_config(train_id, data)
+        self._vehicle_config_by_train[train_id] = vcfg
+        for train in self.trains:
+            if train.train_id == train_id:
+                train.mass_kg = vcfg.mass_kg
+                train.capacity_pax = 600
+        return vcfg
+
+    def set_train_vehicle_config(self, train_id: str, data: JsonDict) -> VehicleConfig:
+        """为指定列车设置车辆参数."""
+        vcfg = VehicleConfig.from_user_config(train_id, data)
+        self._vehicle_config_by_train[train_id] = vcfg
+        for train in self.trains:
+            if train.train_id == train_id:
+                train.mass_kg = vcfg.mass_kg
+        return vcfg
+
+    def set_manual_mode(self, train_id: str, enabled: bool) -> dict:
+        """切换指定列车的 MANUAL/ATO 模式."""
+        for train in self.trains:
+            if train.train_id == train_id:
+                train.operation_mode = "MANUAL" if enabled else "ATO"
+                if not enabled:
+                    train._manual_command = None
+                self._manual_mode_by_train[train_id] = enabled
+                return {"ok": True, "trainId": train_id, "manualMode": enabled}
+        return {"ok": False, "error": "TRAIN_NOT_FOUND"}
+
+    def set_manual_command(self, train_id: str, traction_percent: float, brake_percent: float) -> dict:
+        """接收指定列车的手动驾驶指令."""
+        for train in self.trains:
+            if train.train_id == train_id:
+                if train.operation_mode != "MANUAL":
+                    return {"ok": False, "error": "NOT_IN_MANUAL_MODE"}
+                train._manual_command = ControlCommand(
+                    train_id=train_id,
+                    traction_percent=max(0.0, min(100.0, traction_percent)),
+                    brake_percent=max(0.0, min(100.0, brake_percent)),
+                    source=CommandSource.MANUAL,
+                )
+                return {"ok": True, "trainId": train_id, "tractionPercent": train._manual_command.traction_percent, "brakePercent": train._manual_command.brake_percent}
+        return {"ok": False, "error": "TRAIN_NOT_FOUND"}
+
+    def _make_vehicle_config(self, train_id: str) -> VehicleConfig:
+        """构建当前应使用的车辆配置."""
+        vcfg = self._vehicle_config_by_train.get(train_id)
+        if vcfg is not None:
+            return VehicleConfig(
+                train_id=train_id,
+                formation=vcfg.formation,
+                car_masses_kg=vcfg.car_masses_kg,
+                head_car_length_m=vcfg.head_car_length_m,
+                middle_car_length_m=vcfg.middle_car_length_m,
+                wheel_radius_m=vcfg.wheel_radius_m,
+                max_speed_mps=vcfg.max_speed_mps,
+                max_traction_force_n=vcfg.max_traction_force_n,
+                max_service_brake_force_n=vcfg.max_service_brake_force_n,
+                emergency_brake_force_n=vcfg.emergency_brake_force_n,
+                basic_resistance_n=vcfg.basic_resistance_n,
+                motor_count=vcfg.motor_count,
+                gear_ratio=vcfg.gear_ratio,
+                drivetrain_efficiency=vcfg.drivetrain_efficiency,
+                regen_efficiency=vcfg.regen_efficiency,
+                auxiliary_power_kw=vcfg.auxiliary_power_kw,
+                nominal_line_voltage_v=vcfg.nominal_line_voltage_v,
+            )
+        return VehicleConfig(train_id=train_id)
+
+    def _manual_override(self, ato_cmd: ControlCommand, train_id: str) -> ControlCommand:
+        """如果该列车处于手动模式，用其手动指令替代 ATO 指令."""
+        for train in self.trains:
+            if train.train_id == train_id:
+                if train.operation_mode != "MANUAL" or train._manual_command is None:
+                    return ato_cmd
+                mc = train._manual_command
+                return ControlCommand(
+                    train_id=train_id,
+                    traction_percent=mc.traction_percent,
+                    brake_percent=mc.brake_percent,
+                    source=CommandSource.MANUAL,
+                )
+        return ato_cmd
+
+    def add_train(self, payload: JsonDict) -> JsonDict:
+        """动态添加一列车."""
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        for t in self.trains:
+            if t.train_id == train_id:
+                return {"ok": False, "error": "TRAIN_ID_EXISTS"}
+
+        initial_station_code = str(payload.get("initialStationCode", self._station_list[0].get("code", "GGZ")))
+        direction = str(payload.get("direction", "UP"))
+        operation_mode = str(payload.get("operationMode", "ATO"))
+        if operation_mode not in ("ATO", "MANUAL"):
+            operation_mode = "ATO"
+
+        cfg = TrainConfig(
+            train_id=train_id,
+            line_id="9",
+            initial_station_code=initial_station_code,
+            direction=direction,
+            capacity_pax=int(payload.get("capacityPax", 600)),
+            initial_load_pax=int(payload.get("initialLoadPax", 0)),
+        )
+        train = self._create_train(cfg)
+        train.operation_mode = operation_mode
+        if operation_mode == "MANUAL":
+            self._manual_mode_by_train[train_id] = True
+
+        # 如有用户车辆参数，应用之
+        vehicle_data = payload.get("vehicleConfig")
+        if vehicle_data and isinstance(vehicle_data, dict):
+            vcfg = VehicleConfig.from_user_config(train_id, vehicle_data)
+            self._vehicle_config_by_train[train_id] = vcfg
+            train.mass_kg = vcfg.mass_kg
+
+        self.trains.append(train)
+        self._snapshot = self._build_snapshot()
+        return {"ok": True, "train": train.to_dict()}
+
+    def remove_train(self, train_id: str) -> JsonDict:
+        """动态删除一列车."""
+        before = len(self.trains)
+        self.trains = [t for t in self.trains if t.train_id != train_id]
+        self._vehicle_config_by_train.pop(train_id, None)
+        self._manual_mode_by_train.pop(train_id, None)
+        self._dcdp_curve_data.pop(train_id, None)
+        self._dcdp_curve_meta.pop(train_id, None)
+        self._profile_run_times.pop(train_id, None)
+        self._ato_by_train.pop(train_id, None)
+        if len(self.trains) == before:
+            return {"ok": False, "error": "TRAIN_NOT_FOUND"}
+        self._snapshot = self._build_snapshot()
+        return {"ok": True, "removed": train_id}
+
     def load(self) -> None:
-        """加载场景，初始化列车状态."""
+        """加载场景，初始化仿真（初始无车，由前端动态加车）."""
         self.clock.load()
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
@@ -228,7 +429,13 @@ class SimulationEngine:
         self._dcdp_curve_data = {}
         self._dcdp_curve_meta = {}
         self._profile_run_times = {}
-        self.trains = [self._create_train(cfg) for cfg in self.scenario.trains]
+        self._power_commands.clear()
+        self._power_command_results = []
+        self._power_command_sequence = 0
+        self._recorded_power_command_ids = set()
+        self._manual_mode_by_train = {}
+        self._vehicle_config_by_train = {}
+        self.trains = []  # 初始无车，由前端动态加车
         self._snapshot = self._build_snapshot()
 
         if self.recorder is not None:
@@ -263,10 +470,89 @@ class SimulationEngine:
 
     def reset_power_network(self) -> None:
         """Restore traction-power topology and clear transient power states."""
-        self.power_service = self._build_power_service()
-        self._last_power_states = self._empty_power_states()
-        self.power_service.update([], dt_sec=0.0)
-        self._snapshot = self._build_snapshot()
+        with self._power_lock:
+            self.power_service = self._build_power_service()
+            self._last_power_states = self._empty_power_states()
+            self._snapshot = self._build_snapshot()
+
+    def queue_power_command(self, command_type: str, payload: JsonDict) -> JsonDict:
+        """Queue an external topology operation for deterministic application at a tick boundary."""
+        with self._power_lock:
+            self._power_command_sequence += 1
+            command = PowerCommand(
+                command_id=f"PWR-CMD-{self._power_command_sequence:06d}",
+                command_type=command_type,
+                payload=dict(payload),
+            )
+            self._power_commands.append(command)
+            return {"commandId": command.command_id, "status": "QUEUED"}
+
+    def _apply_power_commands(self, sim_time_ms: int) -> None:
+        with self._power_lock:
+            while self._power_commands:
+                command = self._power_commands.popleft()
+                result: JsonDict = {
+                    "commandId": command.command_id,
+                    "commandType": command.command_type,
+                    "simTimeMs": sim_time_ms,
+                }
+                try:
+                    if command.command_type == "SUBSTATION_OUTAGE":
+                        result["data"] = self.apply_power_substation_outage(
+                            str(command.payload["targetId"]),
+                            big_bilateral=bool(command.payload.get("bigBilateral", True)),
+                        )
+                    elif command.command_type == "OPERATE_SWITCH":
+                        switch = self.operate_power_switch(
+                            str(command.payload["switchId"]),
+                            str(command.payload["state"]),
+                        )
+                        result["data"] = {
+                            "switchId": switch.switch_id,
+                            "currentState": switch.current_state,
+                        }
+                    elif command.command_type == "RESET_NETWORK":
+                        self.power_service = self._build_power_service()
+                        self._last_power_states = self._empty_power_states()
+                        result["data"] = {"action": "power_reset"}
+                    else:
+                        raise ValueError("UNSUPPORTED_POWER_COMMAND")
+                    result["status"] = "APPLIED"
+                except Exception as exc:
+                    result["status"] = "REJECTED"
+                    result["error"] = str(exc)
+                self._power_command_results.append(result)
+            self._power_command_results = self._power_command_results[-20:]
+
+    def apply_power_substation_outage(
+        self,
+        substation_id: str,
+        *,
+        big_bilateral: bool = True,
+    ) -> dict[str, list[str] | str]:
+        """Apply a topology fault atomically with respect to the power-flow tick."""
+        with self._power_lock:
+            network = self.power_service.network
+            if network is None:
+                raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
+            result = network.apply_substation_outage(
+                substation_id,
+                big_bilateral=big_bilateral,
+            )
+            self._last_power_states = self._empty_power_states()
+            self._snapshot = self._build_snapshot()
+            return result
+
+    def operate_power_switch(self, switch_id: str, state: str):
+        """Operate a power switch atomically with respect to the power-flow tick."""
+        with self._power_lock:
+            network = self.power_service.network
+            if network is None:
+                raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
+            switch = network.operate_switch(switch_id, state)
+            self._last_power_states = self._empty_power_states()
+            self._snapshot = self._build_snapshot()
+            return switch
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -307,25 +593,46 @@ class SimulationEngine:
         tick = self.clock.current_tick
         sim_time_ms = self._absolute_sim_time_ms()
 
-        # 1) 更新列车位置与速度 (ATO + 物理模型驱动)
-        for train in self.trains:
-            self._advance_train(train, sim_time_ms)
+        # External topology operations are serialized at the tick boundary.
+        self._apply_power_commands(sim_time_ms)
 
-        # 2) 客流到达（每 tick 累积）
+        # 1) 客流先到达，停站处理生成的载荷供本tick车辆请求使用。
         self._last_arrivals_by_platform = self.station_service.update_arrivals(
             sim_time_ms,
             dt_sec=self.clock.tick_seconds,
         )
 
-        # 3) 供电更新
-        power_states = self._update_power(sim_time_ms)
+        # 2) 生成全部列车控制与候选牵引/再生请求，不推进位置。
+        prepared_steps: dict[str, PreparedTrainStep] = {}
+        handled_train_ids: set[str] = set()
+        for train in self.trains:
+            handled, prepared = self._prepare_train_step(train, sim_time_ms)
+            if handled:
+                handled_train_ids.add(train.train_id)
+            if prepared is not None:
+                prepared_steps[train.train_id] = prepared
+
+        # 3) 同时求解全部列车负荷，得到本tick电压、限牵和再生能力。
+        power_states = self._update_power(sim_time_ms, prepared_steps)
         self._last_power_states = power_states
 
-        # 4) 调度决策
+        train_power_flows = {
+            item.train_id: item
+            for item in (self.power_service.last_network_snapshot.trains if self.power_service.last_network_snapshot else [])
+        }
+
+        # 4) 使用本tick供电反馈分配实际牵引/电制动/空气制动并推进动力学。
+        for prepared in prepared_steps.values():
+            self._apply_prepared_train_step(prepared, train_power_flows.get(prepared.train.train_id), sim_time_ms)
+        for train in self.trains:
+            if train.train_id not in handled_train_ids:
+                self._advance_train(train, sim_time_ms)
+
+        # 5) 调度决策
         decisions = self._make_dispatch_decisions(sim_time_ms, power_states)
         self._last_dispatch_decisions = decisions
 
-        # 5) 发布事件
+        # 6) 发布事件
         for train in self.trains:
             self.bus.publish(
                 "train.state",
@@ -335,7 +642,7 @@ class SimulationEngine:
             )
         self.bus.publish("clock.tick", {"tick": tick, "simTimeMs": sim_time_ms}, source="engine", tick=tick)
 
-        # 6) 记录到 SQLite
+        # 7) 记录到 SQLite
         if self.recorder is not None and self._run_id is not None:
             for train in self.trains:
                 self.recorder.record_event(
@@ -414,13 +721,194 @@ class SimulationEngine:
                     wasted_regen_kw=network_snapshot.wasted_regen_kw,
                     detail={"tick": tick, "alerts": network_snapshot.alerts},
                 )
+                self.recorder.record_power_solver(
+                    self._run_id,
+                    sim_time_ms=sim_time_ms,
+                    converged=network_snapshot.converged,
+                    iterations=network_snapshot.iterations,
+                    solve_time_ms=network_snapshot.solve_time_ms,
+                    power_balance_error_kw=network_snapshot.power_balance_error_kw,
+                    power_balance_error_ratio=network_snapshot.power_balance_error_ratio,
+                    detail={"tick": tick},
+                )
+            for command_result in self._power_command_results:
+                command_id = str(command_result["commandId"])
+                if command_id in self._recorded_power_command_ids:
+                    continue
+                self.recorder.record_power_command(
+                    self._run_id,
+                    command_id=command_id,
+                    sim_time_ms=int(command_result["simTimeMs"]),
+                    command_type=str(command_result["commandType"]),
+                    status=str(command_result["status"]),
+                    payload=command_result.get("data", {}),
+                    error=command_result.get("error"),
+                )
+                self._recorded_power_command_ids.add(command_id)
 
-        # 7) 更新快照
+        # 8) 更新快照
         self._snapshot = self._build_snapshot()
 
     # ═══════════════════════════════════════════════════════════
     #  列车推进逻辑
     # ═══════════════════════════════════════════════════════════
+
+    def _prepare_train_step(
+        self,
+        train: SimTrainState,
+        sim_time_ms: int,
+    ) -> tuple[bool, PreparedTrainStep | None]:
+        """Prepare a PathPlan train without advancing physics; return whether the train was handled."""
+        stations = self._station_list
+        n = len(stations)
+        if (train.direction == "UP" and train.station_index >= n - 1) or (
+            train.direction == "DOWN" and train.station_index <= 0
+        ):
+            train.phase = IDLE
+            train.speed_mps = 0.0
+            train.traction_percent = 0.0
+            train.brake_percent = 0.0
+            return True, None
+
+        next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
+        if next_idx < 0 or next_idx >= n:
+            return True, None
+        path_plan = self._ensure_interval_path(train, next_idx)
+        if path_plan is None:
+            return False, None
+
+        dt = self.clock.tick_seconds
+        if train.phase in (DWELLING, IDLE):
+            train.speed_mps = 0.0
+            train.path_position_m = 0.0
+            train.path_total_length_m = path_plan.total_length_m
+            train.distance_to_next_m = path_plan.total_length_m
+            train.target_distance_m = path_plan.total_length_m
+            train.segment_progress = 0.0
+            train.traction_percent = 0.0
+            train.brake_percent = 0.0 if train.phase == IDLE else 20.0
+            train.target_speed_mps = 0.0
+            train.traction_force_n = 0.0
+            train.electric_brake_force_n = 0.0
+            train.pneumatic_brake_force_n = 0.0
+            self._update_train_path_context(train)
+
+            limit_source_idx = train.station_index if train.direction == "UP" else next_idx
+            limit_kmh = int(self._station_list[limit_source_idx].get("speedLimitToNextKmh", 80))
+            if limit_kmh <= 0:
+                limit_kmh = 80
+            train.permitted_speed_mps = limit_kmh / 3.6
+            train.local_speed_limit_mps = path_plan.speed_limit_at(0.0, train.permitted_speed_mps)
+            if not train._profile_triggered:
+                train._profile_triggered = True
+                self._prime_path_profile(train, path_plan)
+            if train.dwell_remaining_sec > 0:
+                train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - dt)
+                return True, None
+            train.dwell_remaining_sec = 0.0
+            train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
+            train.phase = DEPARTING
+
+        path_position_m = min(max(0.0, train.path_position_m), path_plan.total_length_m)
+        self._update_train_path_context(train)
+        state = TrainState(
+            train_id=train.train_id,
+            position_m=path_position_m,
+            speed_mps=train.speed_mps,
+            sim_time_s=self.clock.sim_time_seconds,
+            segment_id=train.current_segment_id,
+            net_energy_kwh=train.energy_kwh,
+        )
+        target = AtoTarget(
+            target_position_m=path_plan.total_length_m,
+            permitted_speed_mps=train.permitted_speed_mps,
+            path_plan=path_plan,
+        )
+        ato = self._ato_for_train(train.train_id)
+        command = ato.decide(state, target)
+        command = self._manual_override(command, train.train_id)
+        vehicle_config = self._make_vehicle_config(train.train_id)
+        demand = TractionDriveModel(vehicle_config).demand(command, train.speed_mps)
+        gradient_force_n = vehicle_config.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
+        return True, PreparedTrainStep(
+            train=train,
+            next_idx=next_idx,
+            next_station=stations[next_idx],
+            path_plan=path_plan,
+            state=state,
+            command=command,
+            vehicle_config=vehicle_config,
+            demand=demand,
+            gradient_force_n=gradient_force_n,
+        )
+
+    def _apply_prepared_train_step(self, prepared: PreparedTrainStep, flow: Any, sim_time_ms: int) -> None:
+        train = prepared.train
+        try:
+            traction_limit = float(flow.traction_limit_ratio) if flow is not None else 1.0
+            regen_limit = float(flow.regen_limit_ratio) if flow is not None else 1.0
+            blend = BrakeBlendService.blend(prepared.demand, regen_limit)
+            traction_force_n = prepared.demand.traction_force_n * max(0.0, min(1.0, traction_limit))
+            model = SimpleVehicleModel(prepared.vehicle_config)
+            result = model.step_with_forces(
+                prepared.state,
+                traction_force_n=traction_force_n,
+                brake_force_n=blend.total_brake_force_n,
+                dt_s=self.clock.tick_seconds,
+                gradient_force_n=prepared.gradient_force_n,
+            )
+
+            path_plan = prepared.path_plan
+            new_position_m = min(max(0.0, result.position_m), path_plan.total_length_m)
+            next_limit_mps = path_plan.speed_limit_at(new_position_m, train.permitted_speed_mps)
+            train.speed_mps = min(max(0.0, result.speed_mps), next_limit_mps)
+            train.path_position_m = new_position_m
+            train.path_total_length_m = path_plan.total_length_m
+            train.segment_progress = min(1.0, new_position_m / path_plan.total_length_m) if path_plan.total_length_m else 1.0
+            train.distance_to_next_m = max(0.0, path_plan.total_length_m - new_position_m)
+            train.target_distance_m = path_plan.total_length_m
+            train.traction_percent = prepared.command.traction_percent
+            train.brake_percent = prepared.command.brake_percent
+            train.target_speed_mps = self._ato_for_train(train.train_id).last_target_speed_mps
+            train.energy_kwh = result.net_energy_kwh
+            train.mass_kg = prepared.vehicle_config.mass_kg
+            train.traction_force_n = traction_force_n
+            train.electric_brake_force_n = blend.electric_brake_force_n
+            train.pneumatic_brake_force_n = blend.pneumatic_brake_force_n
+            train.traction_limit_ratio = max(0.0, min(1.0, traction_limit))
+            train.regen_limit_ratio = max(0.0, min(1.0, regen_limit))
+            if prepared.command.traction_percent > 0 and train.traction_limit_ratio < 0.999:
+                train.power_limited_duration_sec += self.clock.tick_seconds
+                train.power_constraint_delay_sec += self.clock.tick_seconds * (
+                    1.0 / max(train.traction_limit_ratio, 0.1) - 1.0
+                )
+            if flow is not None:
+                train.requested_power_kw = float(flow.requested_power_kw)
+                train.pantograph_voltage_v = float(flow.voltage_v)
+            self._update_train_path_context(train)
+
+            arrived = train.distance_to_next_m <= self._ato_config.stop_tolerance_m and train.speed_mps <= 0.2
+            if arrived:
+                self._complete_path_arrival(train, prepared.next_idx, prepared.next_station, sim_time_ms)
+                return
+
+            ato = self._ato_for_train(train.train_id)
+            cruise_threshold = min(self.CRUISE_SPEED_MPS, train.local_speed_limit_mps) * 0.95
+            braking_profile = ato.last_profile_mode == "MAX_BRAKE" or ato.last_profile_mode.startswith("BRAKE_")
+            if train.speed_mps >= cruise_threshold:
+                train.phase = CRUISING
+            elif (prepared.command.brake_percent > 5 or braking_profile) and train.speed_mps > 0.5:
+                train.phase = APPROACHING
+            else:
+                train.phase = DEPARTING
+        except Exception as exc:
+            print(f"[Engine] Prepared advancement failed for {train.train_id}: {exc}")
+            train.traction_percent = 0.0
+            train.brake_percent = 0.0
+            train.traction_force_n = 0.0
+            train.electric_brake_force_n = 0.0
+            train.pneumatic_brake_force_n = 0.0
+            train.speed_mps = max(0.0, train.speed_mps - 0.8 * self.clock.tick_seconds)
 
     def _advance_train(self, train: SimTrainState, sim_time_ms: int) -> None:
         """每 tick 推进一辆列车 — ATO 决策 + 牛顿物理模型."""
@@ -465,7 +953,10 @@ class SimulationEngine:
             train.target_speed_mps = 0.0
 
             # 从 CSV 读取当前区间线路限速
-            limit_kmh = int(self._station_list[train.station_index].get("speedLimitToNextKmh", 80))
+            limit_source_idx = train.station_index if train.direction == "UP" else next_idx
+            limit_kmh = int(self._station_list[limit_source_idx].get("speedLimitToNextKmh", 80))
+            if limit_kmh <= 0:
+                limit_kmh = 80
             train.permitted_speed_mps = limit_kmh / 3.6
 
             if train.dwell_remaining_sec > 0:
@@ -510,15 +1001,17 @@ class SimulationEngine:
             )
             cmd = self.ato.decide(state, target)
 
-            # ── Profile feedforward：加速段全牵引 ──
-            if profile_mode == "MAX_TRACTION" and train.speed_mps < effective_limit - 0.2:
-                cmd = ControlCommand(
-                    train_id=train.train_id,
-                    traction_percent=100.0,
-                    source=CommandSource.ATO,
-                )
+            if train.operation_mode != "MANUAL":
+                if profile_mode == "MAX_TRACTION" and train.speed_mps < effective_limit - 0.2:
+                    cmd = ControlCommand(
+                        train_id=train.train_id,
+                        traction_percent=100.0,
+                        source=CommandSource.ATO,
+                    )
+            else:
+                cmd = self._manual_override(cmd, train.train_id)
 
-            vcfg = VehicleConfig(train_id=train.train_id)
+            vcfg = self._make_vehicle_config(train.train_id)
             vm = SimpleVehicleModel(vcfg)
             result = vm.step(state, cmd, dt)
 
@@ -610,7 +1103,10 @@ class SimulationEngine:
             train.target_speed_mps = 0.0
             self._update_train_path_context(train)
 
-            limit_kmh = int(self._station_list[train.station_index].get("speedLimitToNextKmh", 80))
+            limit_source_idx = train.station_index if train.direction == "UP" else next_idx
+            limit_kmh = int(self._station_list[limit_source_idx].get("speedLimitToNextKmh", 80))
+            if limit_kmh <= 0:
+                limit_kmh = 80
             train.permitted_speed_mps = limit_kmh / 3.6
             train.local_speed_limit_mps = path_plan.speed_limit_at(train.path_position_m, train.permitted_speed_mps)
 
@@ -645,8 +1141,8 @@ class SimulationEngine:
             )
             ato = self._ato_for_train(train.train_id)
             cmd = ato.decide(state, target)
-
-            vcfg = VehicleConfig(train_id=train.train_id)
+            cmd = self._manual_override(cmd, train.train_id)
+            vcfg = self._make_vehicle_config(train.train_id)
             vm = SimpleVehicleModel(vcfg)
             gradient_force_n = vcfg.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
             result = vm.step(
@@ -685,9 +1181,10 @@ class SimulationEngine:
                 return
 
             cruise_threshold = min(self.CRUISE_SPEED_MPS, train.local_speed_limit_mps) * 0.95
+            braking_profile = ato.last_profile_mode == "MAX_BRAKE" or ato.last_profile_mode.startswith("BRAKE_")
             if train.speed_mps >= cruise_threshold:
                 train.phase = CRUISING
-            elif cmd.brake_percent > 5 and train.speed_mps > 0.5:
+            elif (cmd.brake_percent > 5 or braking_profile) and train.speed_mps > 0.5:
                 train.phase = APPROACHING
             else:
                 train.phase = DEPARTING
@@ -996,20 +1493,34 @@ class SimulationEngine:
             # 客流服务失败时使用默认停站时间
             train.dwell_remaining_sec = 30.0
 
-    def _update_power(self, sim_time_ms: int) -> dict[str, Any]:
+    def _update_power(
+        self,
+        sim_time_ms: int,
+        prepared_steps: dict[str, PreparedTrainStep] | None = None,
+    ) -> dict[str, Any]:
         """更新供电状态."""
         if not self.power_service.sections:
             return {}
         requests: list[TrainPowerRequest] = []
+        prepared_steps = prepared_steps or {}
         for train in self.trains:
-            traction_force_n = 0.0
-            brake_force_n = 0.0
-            if train.phase == DEPARTING:
-                traction_force_n = 95_000.0
-            elif train.phase == CRUISING:
-                traction_force_n = 35_000.0
-            elif train.phase == APPROACHING:
-                brake_force_n = 45_000.0
+            prepared = prepared_steps.get(train.train_id)
+            if prepared is not None:
+                traction_force_n = prepared.demand.traction_force_n
+                brake_force_n = prepared.demand.candidate_electric_brake_force_n
+                train.mass_kg = prepared.vehicle_config.mass_kg
+            else:
+                vehicle = VehicleConfig.for_load(train.train_id, train.onboard_pax)
+                command = ControlCommand(
+                    train_id=train.train_id,
+                    traction_percent=train.traction_percent if train.speed_mps > 0 else 0.0,
+                    brake_percent=train.brake_percent if train.speed_mps > 0 else 0.0,
+                    source=CommandSource.ATO,
+                )
+                demand = TractionDriveModel(vehicle).demand(command, train.speed_mps)
+                traction_force_n = demand.traction_force_n
+                brake_force_n = demand.candidate_electric_brake_force_n
+                train.mass_kg = vehicle.mass_kg
             requests.append(
                 TrainPowerRequest(
                     train_id=train.train_id,
@@ -1019,10 +1530,15 @@ class SimulationEngine:
                     brake_force_n=brake_force_n,
                     position_m=self._train_mileage_m(train),
                     direction=train.direction,
-                    aux_power_kw=150.0,
+                    aux_power_kw=150.0 if train.phase not in {IDLE, DWELLING} else 80.0,
                 )
             )
-        return self.power_service.update(requests, dt_sec=self.clock.tick_seconds)
+        with self._power_lock:
+            return self.power_service.update(
+                requests,
+                dt_sec=self.clock.tick_seconds,
+                sim_time_ms=sim_time_ms,
+            )
 
     def _make_dispatch_decisions(
         self, sim_time_ms: int, power_states: dict[str, Any]
@@ -1119,6 +1635,8 @@ class SimulationEngine:
                     max((state.losses_kw for state in self._last_power_states.values()), default=0.0),
                     3,
                 ),
+                "totalPowerConstraintDelaySec": round(sum(t.power_constraint_delay_sec for t in self.trains), 3),
+                "maxPowerLimitedDurationSec": round(max((t.power_limited_duration_sec for t in self.trains), default=0.0), 3),
                 "lastDispatchAction": self._last_dispatch_decisions[-1].action
                 if self._last_dispatch_decisions else "FOLLOW_TIMETABLE",
             },
@@ -1195,6 +1713,8 @@ class SimulationEngine:
             distance_to_next_m=dist,
             onboard_pax=cfg.initial_load_pax,
             capacity_pax=cfg.capacity_pax,
+            load_factor=(cfg.initial_load_pax / cfg.capacity_pax) if cfg.capacity_pax > 0 else 0.0,
+            mass_kg=225_000.0 + cfg.initial_load_pax * 65.0,
             current_station_name=stn.get("name", ""),
             next_station_name=next_stn.get("name", ""),
         )
@@ -1248,7 +1768,11 @@ class SimulationEngine:
         )
 
     def _empty_power_states(self) -> dict[str, Any]:
-        return self.power_service.update([], dt_sec=0.0)
+        return self.power_service.update(
+            [],
+            dt_sec=0.0,
+            sim_time_ms=self._absolute_sim_time_ms(),
+        )
 
     def _init_interlocking(self) -> None:
         """联锁服务初始化桩——当前引擎尚未集成联锁，预留空实现。"""
@@ -1317,8 +1841,21 @@ class SimulationEngine:
         }
 
     def _power_network_snapshot(self) -> JsonDict:
-        snapshot = self.power_service.last_network_snapshot
-        return snapshot.to_dict() if snapshot is not None else {}
+        with self._power_lock:
+            snapshot = self.power_service.last_network_snapshot
+            result = snapshot.to_dict() if snapshot is not None else {}
+            if self.power_service.network is not None:
+                topology = self.power_service.network.topology_dict()
+                result["switches"] = topology["switches"]
+                result["contactRailSections"] = topology["contactRailSections"]
+                result["returnRailSections"] = topology["returnRailSections"]
+            result["commandResults"] = list(self._power_command_results)
+            return result
+
+    def export_current_run(self) -> JsonDict:
+        if self.recorder is None or self._run_id is None:
+            raise RuntimeError("RUN_RECORDER_NOT_AVAILABLE")
+        return self.recorder.export_run(self._run_id)
 
     @staticmethod
     def _dispatch_snapshot(decision: DispatchDecision) -> JsonDict:

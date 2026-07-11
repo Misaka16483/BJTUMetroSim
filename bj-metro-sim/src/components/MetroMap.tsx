@@ -1,5 +1,6 @@
 import { useEffect, useRef, useMemo, useState } from 'react';
 import maplibregl from 'maplibre-gl';
+import { substationDisplayName } from '../data/powerLabels';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import darkStyle from '../data/darkStyle';
 import MAPTILER_KEY, { MAPTILER_STYLE } from '../data/maptilerKey';
@@ -31,6 +32,10 @@ export default function MetroMap() {
   const linesError = useSimStore((s) => s.linesError);
   const trainPositions = useSimStore((s) => s.trainPositions);
   const isRunning = useSimStore((s) => s.isRunning);
+  const trainColors = useSimStore((s) => s.trainColors);
+  const trains = useSimStore((s) => s.trains);
+  const selectTrain = useSimStore((s) => s.selectTrain);
+  const setViewMode = useSimStore((s) => s.setViewMode);
   const simPowerNetwork = useSimStore((s) => s.simPowerNetwork);
   const powerTopology = useSimStore((s) => s.powerTopology);
 
@@ -262,56 +267,62 @@ export default function MetroMap() {
     return set;
   }, [metroLines, hiddenLines]);
 
-  // ── 多线路列车位置标记（实时更新） ──
+  // ── 多车位置标记（实时更新） ──
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoaded.current) return;
 
-    // 引擎停止 → 移除所有标记
     if (!isRunning) {
       lineMarkers.forEach((m) => m.remove());
       lineMarkers.clear();
       return;
     }
 
-    const activeLines = new Set(Object.keys(trainPositions));
+    const activeIds = new Set(Object.keys(trainPositions));
 
-    // 移除已消失线路的标记
-    lineMarkers.forEach((m, lineId) => {
-      if (!activeLines.has(lineId)) { m.remove(); lineMarkers.delete(lineId); }
+    lineMarkers.forEach((m, trainId) => {
+      if (!activeIds.has(trainId)) { m.remove(); lineMarkers.delete(trainId); }
     });
 
-    // 创建 / 更新各路线的标记
-    Object.entries(trainPositions).forEach(([lineId, pos]) => {
+    Object.entries(trainPositions).forEach(([trainId, pos]) => {
       const lngLat: [number, number] = [pos.lng, pos.lat];
-      const existing = lineMarkers.get(lineId);
+      const existing = lineMarkers.get(trainId);
       if (existing) {
         existing.setLngLat(lngLat);
         return;
       }
 
-      const line = metroLines.find((l) => l.id === lineId);
-      const lineColor = line?.color || '#8FC31F';
+      const color = trainColors[trainId] || '#8FC31F';
 
       const el = document.createElement('div');
       el.className = 'train-marker';
+      el.style.cursor = 'pointer';
+      const label = trainId.replace('T', '');
       el.innerHTML = `
         <div style="
           width: 18px; height: 18px;
-          background: ${lineColor};
+          background: ${color};
           border-radius: 50% 50% 50% 0;
           transform: rotate(-45deg);
-          box-shadow: 0 0 12px ${lineColor}80, 0 0 24px ${lineColor}33;
+          box-shadow: 0 0 12px ${color}80, 0 0 24px ${color}33;
           border: 2px solid rgba(255,255,255,0.5);
         "></div>
+        <div style="
+          position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+          font-size: 9px; font-weight: 600; color: #e2e8f0;
+          text-shadow: 0 0 6px rgba(0,0,0,0.7); white-space: nowrap;
+          pointer-events: none;
+        ">${label}</div>
       `;
+      el.onclick = () => { selectTrain(trainId); setViewMode('driver'); };
+      el.title = `${trainId} — ${trains.find((t) => t.trainId === trainId)?.currentStation ?? ''} → ${trains.find((t) => t.trainId === trainId)?.nextStation ?? ''}`;
 
       const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
         .setLngLat(lngLat)
         .addTo(map);
-      lineMarkers.set(lineId, marker);
+      lineMarkers.set(trainId, marker);
     });
-  }, [trainPositions, isRunning, metroLines]);
+  }, [trainPositions, isRunning, metroLines, trainColors, trains, selectTrain, setViewMode]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -352,7 +363,12 @@ export default function MetroMap() {
         substation.status !== 'NORMAL' && substation.status !== 'IN_SERVICE'
       ) || substation.loadRatio >= 0.85;
       const color = warning ? '#ffb454' : '#58a6ff';
-      const html = buildPowerMarkerHtml(substation.substationId, substation.name, warning, color);
+      const html = buildPowerMarkerHtml(
+        substation.substationId,
+        substationDisplayName(substation.substationId, substation.name),
+        warning,
+        color,
+      );
       const existing = powerMarkers.get(substation.substationId);
       if (existing) {
         existing.setLngLat(lngLat);

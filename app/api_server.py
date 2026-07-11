@@ -692,6 +692,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self._sim_power_state())
             elif path == "/api/sim/speed-profile":
                 self._send_json(self._speed_profile())
+            elif path == "/api/sim/run/export":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json({"ok": True, "data": self.engine.export_current_run()})
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
@@ -725,12 +730,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
-            if not self.engine:
-                self._send_json(
-                    {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                )
-                return
+            if path == "/api/sim/start" or path == "/api/sim/pause" or path == "/api/sim/resume" or path == "/api/sim/stop":
+                if not self.engine:
+                    self._send_json(
+                        {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
 
             if path == "/api/sim/start":
                 self.engine.start()
@@ -749,6 +755,33 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/train/add":
+                self._send_json(self._add_train())
+            elif path == "/api/sim/train/remove":
+                self._send_json(self._remove_train())
+            elif path == "/api/sim/train/vehicle-config":
+                self._send_json(self._set_train_vehicle_config())
+            elif path == "/api/sim/train/manual-mode":
+                self._send_json(self._set_train_manual_mode())
+            elif path == "/api/sim/train/manual-command":
+                self._send_json(self._send_train_manual_command())
+            elif path == "/api/sim/vehicle-config":
+                payload = self._read_json_body()
+                vcfg = self.engine.set_vehicle_config(payload)
+                self._send_json({"ok": True, "vehicleConfig": vcfg.to_dict()})
+            elif path == "/api/sim/manual-mode":
+                payload = self._read_json_body()
+                enabled = bool(payload.get("enabled", False))
+                train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
+                self._send_json(self.engine.set_manual_mode(train_id, enabled))
+            elif path == "/api/sim/manual-command":
+                payload = self._read_json_body()
+                train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
+                self._send_json(self.engine.set_manual_command(
+                    train_id,
+                    float(payload.get("tractionPercent", 0)),
+                    float(payload.get("brakePercent", 0)),
+                ))
             elif path == "/api/sim/power/faults":
                 payload = self._read_json_body()
                 self._send_json(self._apply_power_fault(payload))
@@ -842,18 +875,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         target_id = str(payload.get("targetId", ""))
         if fault_type != "SUBSTATION_OUTAGE" or not target_id:
             return {"ok": False, "error": "UNSUPPORTED_POWER_FAULT"}
-        result = self.engine.power_service.network.apply_substation_outage(
-            target_id,
-            big_bilateral=str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
+        result = self.engine.queue_power_command(
+            "SUBSTATION_OUTAGE",
+            {
+                "targetId": target_id,
+                "bigBilateral": str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
+            },
         )
-        self.engine._last_power_states = self.engine._empty_power_states()
         return {"ok": True, "data": {"faultId": f"PF-{target_id}", **result}}
 
     def _reset_power_network(self) -> JsonDict:
         if self.engine is None:
             return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
-        self.engine.reset_power_network()
-        return {"ok": True, "action": "power_reset"}
+        return {"ok": True, "data": self.engine.queue_power_command("RESET_NETWORK", {})}
 
     def _operate_power_switch(self, switch_id: str, payload: JsonDict) -> JsonDict:
         if self.engine is None or self.engine.power_service.network is None:
@@ -861,8 +895,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         state = str(payload.get("state", "")).upper()
         if state not in {"OPEN", "CLOSED"}:
             return {"ok": False, "error": "INVALID_SWITCH_STATE"}
-        switch = self.engine.power_service.network.operate_switch(switch_id, state)
-        self.engine._last_power_states = self.engine._empty_power_states()
+        result = self.engine.queue_power_command(
+            "OPERATE_SWITCH",
+            {"switchId": switch_id, "state": state},
+        )
+        switch = self.engine.power_service.network.switches[switch_id]
         return {
             "ok": True,
             "data": {
@@ -874,6 +911,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "normalState": switch.normal_state,
                 "currentState": switch.current_state,
                 "remoteControllable": switch.remote_controllable,
+                **result,
             },
         }
 
@@ -883,6 +921,50 @@ class ApiHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
+
+    def _add_train(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        return self.engine.add_train(payload)
+
+    def _remove_train(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        return self.engine.remove_train(str(payload.get("trainId", "")))
+
+    def _set_train_vehicle_config(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        vcfg = self.engine.set_train_vehicle_config(train_id, payload)
+        return {"ok": True, "vehicleConfig": vcfg.to_dict()}
+
+    def _set_train_manual_mode(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        return self.engine.set_manual_mode(train_id, bool(payload.get("enabled", False)))
+
+    def _send_train_manual_command(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        return self.engine.set_manual_command(
+            train_id,
+            float(payload.get("tractionPercent", 0)),
+            float(payload.get("brakePercent", 0)),
+        )
 
     def _speed_profile(self) -> JsonDict:
         if self.engine is None:

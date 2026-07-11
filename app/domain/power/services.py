@@ -74,10 +74,18 @@ class PowerService:
         self.last_network_snapshot: PowerFlowSnapshot | None = None
         self._energy_kwh_by_section: dict[str, float] = {section.power_section_id: 0.0 for section in sections}
         self._regen_kwh_by_section: dict[str, float] = {section.power_section_id: 0.0 for section in sections}
+        self._overload_duration_sec: dict[str, float] = {}
+        self.protection_trip_delay_sec = 2.0
 
-    def update(self, requests: list[TrainPowerRequest], dt_sec: float) -> dict[str, PowerState]:
+    def update(
+        self,
+        requests: list[TrainPowerRequest],
+        dt_sec: float,
+        *,
+        sim_time_ms: int = 0,
+    ) -> dict[str, PowerState]:
         if self.solver is not None and all(request.position_m is not None for request in requests):
-            return self._update_network(requests, dt_sec)
+            return self._update_network(requests, dt_sec, sim_time_ms)
         self.last_network_snapshot = None
         return self._update_legacy(requests, dt_sec)
 
@@ -112,7 +120,12 @@ class PowerService:
             )
         return states
 
-    def _update_network(self, requests: list[TrainPowerRequest], dt_sec: float) -> dict[str, PowerState]:
+    def _update_network(
+        self,
+        requests: list[TrainPowerRequest],
+        dt_sec: float,
+        sim_time_ms: int,
+    ) -> dict[str, PowerState]:
         loads = [
             TrainElectricalLoad(
                 train_id=request.train_id,
@@ -127,10 +140,11 @@ class PowerService:
             )
             for request in requests
         ]
-        snapshot = self.solver.solve(loads, dt_sec=dt_sec) if self.solver else None
+        snapshot = self.solver.solve(loads, dt_sec=dt_sec, sim_time_ms=sim_time_ms) if self.solver else None
         self.last_network_snapshot = snapshot
         if snapshot is None:
             return self._update_legacy(requests, dt_sec)
+        self._apply_protection(snapshot, dt_sec)
 
         request_section_by_train = {request.train_id: request.power_section_id for request in requests}
         flows_by_section: dict[str, list] = {section_id: [] for section_id in self.sections}
@@ -178,6 +192,40 @@ class PowerService:
                 alerts=tuple(snapshot.alerts),
             )
         return states
+
+    def _apply_protection(self, snapshot: PowerFlowSnapshot, dt_sec: float) -> None:
+        if self.network is None:
+            return
+        active_overloads: set[str] = set()
+        for feeder in snapshot.feeders:
+            if feeder.status != "OVERLOAD":
+                continue
+            active_overloads.add(feeder.feeder_id)
+            duration = self._overload_duration_sec.get(feeder.feeder_id, 0.0) + max(dt_sec, 0.0)
+            self._overload_duration_sec[feeder.feeder_id] = duration
+            if duration >= self.protection_trip_delay_sec:
+                self.network.set_feeder_status(feeder.feeder_id, "OPEN")
+                snapshot.alerts.append({
+                    "type": "FEEDER_PROTECTION_TRIP",
+                    "targetId": feeder.feeder_id,
+                    "durationSec": round(duration, 3),
+                })
+        for substation in snapshot.substations:
+            if substation.status != "OVERLOAD":
+                continue
+            active_overloads.add(substation.substation_id)
+            duration = self._overload_duration_sec.get(substation.substation_id, 0.0) + max(dt_sec, 0.0)
+            self._overload_duration_sec[substation.substation_id] = duration
+            if duration >= self.protection_trip_delay_sec and self.network.substations[substation.substation_id].in_service:
+                self.network.apply_substation_outage(substation.substation_id, big_bilateral=True)
+                snapshot.alerts.append({
+                    "type": "SUBSTATION_PROTECTION_TRIP",
+                    "targetId": substation.substation_id,
+                    "durationSec": round(duration, 3),
+                })
+        for target_id in list(self._overload_duration_sec):
+            if target_id not in active_overloads:
+                self._overload_duration_sec.pop(target_id, None)
 
     def _traction_power_kw(self, request: TrainPowerRequest) -> float:
         if request.traction_force_n <= 0 or request.speed_mps <= 0:

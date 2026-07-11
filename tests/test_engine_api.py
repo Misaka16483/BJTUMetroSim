@@ -1,37 +1,32 @@
-"""测试仿真引擎启动和状态查询."""
-import json
-import time
-import urllib.request
+from __future__ import annotations
 
-def get(path):
-    r = urllib.request.urlopen(f"http://127.0.0.1:8000{path}")
-    return json.loads(r.read())
+import unittest
+from pathlib import Path
 
-def post(path):
-    req = urllib.request.Request(f"http://127.0.0.1:8000{path}", method="POST")
-    r = urllib.request.urlopen(req)
-    return json.loads(r.read())
+from app.core.engine import SimulationEngine
 
-# Start sim
-print(">>> POST /api/sim/start")
-result = post("/api/sim/start")
-print(json.dumps(result, indent=2))
 
-# Wait 5 seconds
-print("\n>>> Waiting 5 seconds...")
-time.sleep(5)
+ROOT = Path(__file__).resolve().parents[1]
 
-# Get state  
-print(">>> GET /api/sim/state")
-state = get("/api/sim/state")
-print("clock:", json.dumps(state["clock"], indent=2))
-for t in state["trains"]:
-    print(f"  Train {t['trainId']}: phase={t['phase']} speed={t['speedMps']}m/s "
-          f"station={t['currentStation']} next={t['nextStation']} "
-          f"pax={t['onboardPax']} progress={t['segmentProgress']}")
 
-# Stop
-print("\n>>> POST /api/sim/stop")
-result = post("/api/sim/stop")
-print(json.dumps(result, indent=2))
-print("DONE")
+class EngineStateContractTests(unittest.TestCase):
+    def test_engine_start_and_state_contract_without_external_server(self) -> None:
+        engine = SimulationEngine.load_from_files(
+            scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
+            line_map_path=ROOT / "data" / "cache" / "line_map.json",
+            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+        )
+        engine.load()
+        engine.clock.start()
+        for _tick in range(24):
+            engine._tick()
+        snapshot = engine.snapshot()
+        assert snapshot is not None
+        self.assertEqual(snapshot.clock_state, "RUNNING")
+        self.assertEqual(len(snapshot.trains), 5)
+        self.assertTrue(all("pantographVoltageV" in item for item in snapshot.trains))
+        self.assertIn("solver", snapshot.power_network)
+
+
+if __name__ == "__main__":
+    unittest.main()

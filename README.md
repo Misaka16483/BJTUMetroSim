@@ -32,6 +32,20 @@ python -m app.api_server --host 127.0.0.1 --port 8000
 
 前端默认通过后端 API 获取 9 号线静态数据和仿真状态。
 
+### 五车供电闭环场景
+
+```bash
+python -m app.api_server --scenario data/scenarios/line9_5train_power.json --host 127.0.0.1 --port 8000
+```
+
+### 供电模块量化验收
+
+```bash
+python tools/run_power_acceptance.py
+```
+
+运行记录可通过`GET /api/sim/run/export`导出为结构化JSON。
+
 ## 主要文档
 
 - `docs/设计文档/轨道交通仿真系统软件设计文档.md`
@@ -39,6 +53,7 @@ python -m app.api_server --host 127.0.0.1 --port 8000
 - `docs/设计文档/数据库设计文档.md`
 - `docs/设计文档/前端接入与双层界面设计.md`
 - `docs/设计文档/成员B车辆动力学与ATO说明.md`
+- `docs/测试与验收/供电仿真模块量化验收报告.md`
 - `docs/项目管理/五人分工与执行规范.md`
 
 ## 技术栈

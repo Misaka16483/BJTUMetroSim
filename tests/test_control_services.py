@@ -37,6 +37,24 @@ class ATOControllerTests(unittest.TestCase):
         self.assertGreater(command.brake_percent, 0)
         self.assertEqual(command.traction_percent, 0)
 
+    def test_ato_uses_pid_instead_of_full_brake_for_minor_overspeed(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        state = TrainState(
+            "T001",
+            position_m=890.0,
+            speed_mps=12.15,
+            acceleration_mps2=0.0,
+            sim_time_s=10.0,
+        )
+
+        command = controller.decide(
+            state,
+            AtoTarget(target_position_m=1000.0, permitted_speed_mps=12.0),
+        )
+
+        self.assertGreater(command.brake_percent, 0.0)
+        self.assertLess(command.brake_percent, 30.0)
+
     def test_ato_holds_brake_when_stopped_at_target(self) -> None:
         controller = ATOController()
         state = TrainState("T001", position_m=1000.0, speed_mps=0.0, acceleration_mps2=0.0, sim_time_s=0.0)

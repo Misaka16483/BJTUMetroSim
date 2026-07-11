@@ -38,23 +38,23 @@ export default function PowerNetworkPanel() {
   return (
     <div className="glass flex flex-col h-full min-h-[300px]">
       <div className="flex items-center justify-between px-5 py-3 shrink-0">
-        <span className="label" style={{ color: 'var(--text-muted)' }}>TRACTION POWER</span>
+        <span className="label" style={{ color: 'var(--text-muted)' }}>牵引供电</span>
         <span className="board-num text-[9px]" style={{ color: alerts.length ? 'var(--amber)' : 'var(--green)' }}>
-          {alerts.length ? `${alerts.length} ALERTS` : 'NORMAL'}
+          {alerts.length ? `${alerts.length} 条告警` : '正常'}
         </span>
       </div>
 
       <div className="px-5 pb-4 space-y-3 overflow-auto">
         <div className="grid grid-cols-2 gap-2">
-          <Metric label="MIN U" value={fmt(minVoltageTrain?.voltageV ?? minTrainVoltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? minTrainVoltageV) < 650 ? 'var(--amber)' : 'var(--green)'} />
-          <Metric label="LOSS" value={fmt(simPowerNetwork?.lossesKw ?? powerLossesKw, 1)} unit="kW" color="var(--text-dim)" />
-          <Metric label="ABSORB" value={fmt(regen?.absorbedKw ?? totalAbsorbedRegenKw, 0)} unit="kW" color="var(--cyan)" />
-          <Metric label="WASTE" value={fmt(regen?.wastedKw ?? totalWastedRegenKw, 0)} unit="kW" color={(regen?.wastedKw ?? totalWastedRegenKw) > 0 ? 'var(--amber)' : 'var(--green)'} />
+          <Metric label="最低电压" value={fmt(minVoltageTrain?.voltageV ?? minTrainVoltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? minTrainVoltageV) < 650 ? 'var(--amber)' : 'var(--green)'} />
+          <Metric label="线路损耗" value={fmt(simPowerNetwork?.lossesKw ?? powerLossesKw, 1)} unit="kW" color="var(--text-dim)" />
+          <Metric label="再生吸收" value={fmt(regen?.absorbedKw ?? totalAbsorbedRegenKw, 0)} unit="kW" color="var(--cyan)" />
+          <Metric label="再生浪费" value={fmt(regen?.wastedKw ?? totalWastedRegenKw, 0)} unit="kW" color={(regen?.wastedKw ?? totalWastedRegenKw) > 0 ? 'var(--amber)' : 'var(--green)'} />
         </div>
 
         <section className="card" style={{ padding: 12 }}>
           <div className="flex items-center justify-between mb-2">
-            <span className="label" style={{ color: 'var(--text-muted)' }}>SUBSTATIONS</span>
+            <span className="label" style={{ color: 'var(--text-muted)' }}>牵引变电所负载</span>
             <span className="board-num text-[9px]" style={{ color: 'var(--text-muted)' }}>{substations.length}</span>
           </div>
           <div className="space-y-1.5">
@@ -78,16 +78,16 @@ export default function PowerNetworkPanel() {
               </div>
             ))}
             {busiest.length === 0 && (
-              <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Waiting for backend power flow.</div>
+              <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>等待后端供电潮流数据</div>
             )}
           </div>
         </section>
 
         <section className="card" style={{ padding: 12 }}>
           <div className="flex items-center justify-between mb-2">
-            <span className="label" style={{ color: 'var(--text-muted)' }}>TRAIN VOLTAGE</span>
+            <span className="label" style={{ color: 'var(--text-muted)' }}>列车受电状态</span>
             <span className="board-num text-[9px]" style={{ color: minVoltageTrain ? 'var(--cyan)' : 'var(--text-muted)' }}>
-              {minVoltageTrain?.trainId ?? 'N/A'}
+              {minVoltageTrain?.trainId ?? '-'}
             </span>
           </div>
           <div className="space-y-1.5">

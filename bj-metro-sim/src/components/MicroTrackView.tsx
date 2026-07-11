@@ -3,6 +3,7 @@ import { useSimStore } from '../store/useSimStore';
 import type { Line9Station } from '../data/backendApi';
 import type { MetroLineData } from '../data/amapMetroApi';
 import LineSelector, { lineColor } from './LineSelector';
+import { powerStatusLabel, substationDisplayName } from '../data/powerLabels';
 
 function fmt(value: number, digits = 1) {
   return value.toLocaleString('zh-CN', {
@@ -208,12 +209,12 @@ function TrackContent({
           <span>K{fmt((firstMileage + trackMap.lengthM) / 1000, 3)}</span>
         </div>
         <div className="absolute left-8 right-8 top-5 flex items-center justify-between text-[10px] font-mono">
-          <span className="text-[#5f7088]">PWR: {substations.length || '-'} TS</span>
+          <span className="text-[#5f7088]">供电：{substations.length || '-'} 座牵引所</span>
           <span className={minVoltage !== null && minVoltage < 650 ? 'text-[#ffb454]' : 'text-[#8FC31F]'}>
-            MIN U {minVoltage !== null ? `${fmt(minVoltage, 0)} V` : '-'}
+            最低电压 {minVoltage !== null ? `${fmt(minVoltage, 0)} V` : '-'}
           </span>
           <span className="text-[#58a6ff]">
-            REGEN {regen ? `${fmt(regen.absorbedKw, 0)}/${fmt(regen.wastedKw, 0)} kW` : '-'}
+            再生吸收/浪费 {regen ? `${fmt(regen.absorbedKw, 0)}/${fmt(regen.wastedKw, 0)} kW` : '-'}
           </span>
         </div>
       </div>
@@ -246,7 +247,7 @@ function PowerSubstationMarker({
     <div
       className="absolute top-[104px] -translate-x-1/2 pointer-events-none"
       style={{ left: `${Math.max(8, Math.min(92, leftPercent))}%` }}
-      title={`${substation.name} ${substation.status}`}
+      title={`${substationDisplayName(substation.substationId, substation.name)} · ${powerStatusLabel(substation.status)}`}
     >
       <div
         className="w-5 h-5 rotate-45 border"
