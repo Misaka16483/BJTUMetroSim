@@ -17,7 +17,7 @@ const DEF_VEHICLE: VehicleConfigPayload = {
 export default function TrainManagementPanel() {
   const trains = useSimStore((s) => s.trains);
   const trainColors = useSimStore((s) => s.trainColors);
-  const line9Stations = useSimStore((s) => s.line9Stations);
+  const trackMap = useSimStore((s) => s.trackMap);
   const addTrain = useSimStore((s) => s.addTrain);
   const removeTrain = useSimStore((s) => s.removeTrain);
   const engineClockState = useSimStore((s) => s.engineClockState);
@@ -35,13 +35,22 @@ export default function TrainManagementPanel() {
   });
   const [showVehicleForm, setShowVehicleForm] = useState(false);
   const [vehicleForm, setVehicleForm] = useState<VehicleConfigPayload>({ ...DEF_VEHICLE });
+  const [addError, setAddError] = useState<string | null>(null);
 
   const connected = backendStatus === 'connected';
-  const trainIdSeq = trains.length + 1;
+  const stationOptions = trackMap?.stations.map((station) => ({
+    code: station.stationCode,
+    name: station.stationName,
+  })) ?? [];
+  let trainIdSeq = 1;
+  while (trains.some((train) => train.trainId === `T09${String(trainIdSeq).padStart(2, '0')}`)) {
+    trainIdSeq += 1;
+  }
 
   const handleAdd = async () => {
+    setAddError(null);
     const id = form.trainId || `T09${String(trainIdSeq).padStart(2, '0')}`;
-    const station = form.initialStationCode || (line9Stations[0] ?? 'GGZ');
+    const station = form.initialStationCode || stationOptions[0]?.code || 'GGZ';
     const payload: AddTrainPayload = {
       trainId: id,
       initialStationCode: station,
@@ -54,13 +63,19 @@ export default function TrainManagementPanel() {
     if (showVehicleForm) {
       payload.vehicleConfig = vehicleForm;
     }
-    const ok = await addTrain(payload);
-    if (ok) {
-      setShowForm(false);
-      setForm((f) => ({
-        ...f,
-        trainId: `T09${String(trainIdSeq + 1).padStart(2, '0')}`,
-      }));
+    try {
+      const ok = await addTrain(payload);
+      if (ok) {
+        setShowForm(false);
+        setForm((f) => ({
+          ...f,
+          trainId: '',
+        }));
+      } else {
+        setAddError('添加失败：请检查列车ID、起点站和载客参数');
+      }
+    } catch (error) {
+      setAddError(error instanceof Error ? `添加失败：${error.message}` : '添加失败：后端不可用');
     }
   };
 
@@ -102,7 +117,7 @@ export default function TrainManagementPanel() {
           </span>
         </div>
         <button
-          onClick={() => { setShowForm((v) => !v); setShowVehicleForm(false); }}
+          onClick={() => { setShowForm((v) => !v); setShowVehicleForm(false); setAddError(null); }}
           disabled={!connected}
           style={{
             fontSize: 10,
@@ -144,8 +159,10 @@ export default function TrainManagementPanel() {
                 onChange={(e) => setForm({ ...form, initialStationCode: e.target.value })}
                 style={inputStyle}
               >
-                {line9Stations.map((s) => (
-                  <option key={s} value={s}>{s}</option>
+                {stationOptions.map((station) => (
+                  <option key={station.code} value={station.code}>
+                    {station.name} ({station.code})
+                  </option>
                 ))}
               </select>
             </Field>
@@ -234,6 +251,12 @@ export default function TrainManagementPanel() {
               <Field label="紧急制动(N)" small>
                 <input type="number" value={vehicleForm.emergencyBrakeForceN} onChange={(e) => setVehicleForm({ ...vehicleForm, emergencyBrakeForceN: Number(e.target.value) })} style={inputStyle} />
               </Field>
+            </div>
+          )}
+
+          {addError && (
+            <div style={{ marginTop: 8, fontSize: 10, color: '#f85149' }}>
+              {addError}
             </div>
           )}
 

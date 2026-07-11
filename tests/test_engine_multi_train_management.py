@@ -61,6 +61,25 @@ class EngineMultiTrainManagementTests(unittest.TestCase):
         self.assertEqual(engine.remove_train("T-DYN-01")["error"], "TRAIN_NOT_FOUND")
         self.assertEqual(engine.snapshot().kpi["totalTrains"], 0)
 
+    def test_add_train_accepts_station_code_and_legacy_chinese_name(self) -> None:
+        engine = load_engine("line9_single.json")
+
+        by_code = engine.add_train({
+            "trainId": "T-CODE",
+            "initialStationCode": "GGZ",
+            "direction": "UP",
+        })
+        by_name = engine.add_train({
+            "trainId": "T-NAME",
+            "initialStationCode": "国家图书馆站",
+            "direction": "DOWN",
+        })
+
+        self.assertTrue(by_code["ok"])
+        self.assertTrue(by_name["ok"])
+        self.assertEqual(engine.trains[0].current_station_code, "GGZ")
+        self.assertEqual(engine.trains[1].current_station_code, "GTG")
+
     def test_manual_commands_and_vehicle_parameters_are_isolated_per_train(self) -> None:
         engine = load_engine("line9_single.json")
         for train_id, load in (("T-DYN-01", 100), ("T-DYN-02", 200)):

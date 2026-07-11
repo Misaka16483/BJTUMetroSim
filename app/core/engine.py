@@ -375,9 +375,22 @@ class SimulationEngine:
             if t.train_id == train_id:
                 return {"ok": False, "error": "TRAIN_ID_EXISTS"}
 
-        initial_station_code = str(payload.get("initialStationCode", self._station_list[0].get("code", "GGZ")))
-        if initial_station_code not in {str(item.get("code", "")) for item in self._station_list}:
+        requested_station = str(
+            payload.get("initialStationCode", self._station_list[0].get("code", "GGZ"))
+        ).strip()
+        normalized_station_name = requested_station.removesuffix("站")
+        station = next(
+            (
+                item
+                for item in self._station_list
+                if requested_station == str(item.get("code", ""))
+                or normalized_station_name == str(item.get("name", "")).removesuffix("站")
+            ),
+            None,
+        )
+        if station is None:
             return {"ok": False, "error": "INVALID_INITIAL_STATION"}
+        initial_station_code = str(station.get("code", ""))
         direction = str(payload.get("direction", "UP")).upper()
         if direction not in {"UP", "DOWN"}:
             return {"ok": False, "error": "INVALID_DIRECTION"}
