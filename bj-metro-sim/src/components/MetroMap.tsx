@@ -20,6 +20,23 @@ let popupRef: maplibregl.Popup | null = null;
 const lineMarkers: Map<string, maplibregl.Marker> = new Map();
 const powerMarkers: Map<string, maplibregl.Marker> = new Map();
 
+/** 高德地图中文站名 → 引擎 stationCode。用于 9号线站台点击跳转客流视图。 */
+const AMAP_NAME_TO_CODE: Record<string, string> = {
+  '郭公庄': 'GGZ',
+  '丰台科技园': 'FSP',
+  '科怡路': 'KYL',
+  '丰台南路': 'FTN',
+  '丰台东大街': 'FTD',
+  '七里庄': 'QLZ',
+  '六里桥': 'LLQ',
+  '六里桥东': 'LLE',
+  '北京西站': 'BWR',
+  '军事博物馆': 'JBG',
+  '白堆子': 'BDZ',
+  '白石桥南': 'BQS',
+  '国家图书馆': 'GTG',
+};
+
 export default function MetroMap() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -654,6 +671,18 @@ function renderMetroLines(
               (s) => s.name.replace(/站$/, '').trim() === clickedNorm
             );
             if (idx !== -1) stationEntries.push({ line: curLine, index: idx });
+          }
+        }
+
+        // ── 9号线站台：跳转到客流视图 ──
+        const { backendStatus: beStatus, setSelectedStationCode, setViewMode } = useSimStore.getState();
+        if (lineId === '9' && beStatus === 'connected') {
+          const code = AMAP_NAME_TO_CODE[clickedNorm];
+          if (code) {
+            if (popupRef) popupRef.remove();
+            setSelectedStationCode(code);
+            setViewMode('stationFlow');
+            return;
           }
         }
 

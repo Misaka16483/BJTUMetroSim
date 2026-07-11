@@ -389,7 +389,7 @@ class PassengerDemandProfile:
 class PassengerFlowGenerator(PoissonPassengerFlowGenerator):
     """
     旧版客流生成器兼容封装。
-    member_d_demo 仍通过此接口创建 StationService，内部转译为 FlowScenario。
+    member_d_demo 仍通过此接口创建 StationService，内部转译为 StationFlowConfig。
     """
 
     def __init__(self, profiles: list[PassengerDemandProfile]) -> None:
