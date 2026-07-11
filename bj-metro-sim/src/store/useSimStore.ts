@@ -92,6 +92,10 @@ interface SimState {
   tractionPercent: number;
   brakePercent: number;
   energyKwh: number;
+  tractionEnergyKwh: number;
+  regenGeneratedKwh: number;
+  regenAcceptedKwh: number;
+  regenWastedKwh: number;
   estimatedRunTimeS: number;
   pathPositionM: number;
   pathTotalLengthM: number;
@@ -317,6 +321,10 @@ function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimSto
     tractionPercent: t.tractionPercent ?? 0,
     brakePercent: t.brakePercent ?? 0,
     energyKwh: t.energyKwh ?? 0,
+    tractionEnergyKwh: t.tractionEnergyKwh ?? 0,
+    regenGeneratedKwh: t.regenGeneratedKwh ?? 0,
+    regenAcceptedKwh: t.regenAcceptedKwh ?? 0,
+    regenWastedKwh: t.regenWastedKwh ?? 0,
     estimatedRunTimeS: t.estimatedRunTimeS ?? 0,
     targetSpeedMps: t.targetSpeedMps ?? 22.22,
     pathPositionM: t.pathPositionM ?? 0,
@@ -402,6 +410,10 @@ export const useSimStore = create<SimState>((set, get) => ({
   tractionPercent: 0,
   brakePercent: 0,
   energyKwh: 0,
+  tractionEnergyKwh: 0,
+  regenGeneratedKwh: 0,
+  regenAcceptedKwh: 0,
+  regenWastedKwh: 0,
   estimatedRunTimeS: 0,
   pathPositionM: 0,
   pathTotalLengthM: 0,

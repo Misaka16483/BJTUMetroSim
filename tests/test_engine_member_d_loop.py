@@ -45,6 +45,13 @@ class EngineMemberDLoopTests(unittest.TestCase):
         self.assertIn("tractionLimitRatio", snapshot.power[0])
         self.assertIn("waitingPax", snapshot.stations[0])
         self.assertIn("lastDispatchAction", snapshot.kpi)
+        train = snapshot.trains[0]
+        self.assertIn("tractionPowerRequestKw", train)
+        self.assertIn("regenPowerAvailableKw", train)
+        self.assertIn("regenAcceptedKwh", train)
+        self.assertIn("regenWastedKwh", train)
+        self.assertIn("selfConsumedKw", snapshot.power_network["regen"])
+        self.assertIn("tractionPowerDeliveredKw", snapshot.power_network["trainVoltages"][0])
 
     def test_engine_exports_path_plan_context_for_interval(self) -> None:
         engine = self._engine()

@@ -70,7 +70,7 @@ class MemberDPhase2Tests(unittest.TestCase):
             [
                 TrainPowerRequest("T1", "PWR-0901", speed_mps=10.0, traction_force_n=70_000.0),
                 TrainPowerRequest("T2", "PWR-0901", speed_mps=10.0, traction_force_n=70_000.0),
-                TrainPowerRequest("T3", "PWR-0901", speed_mps=10.0, brake_force_n=20_000.0),
+                TrainPowerRequest("T3", "PWR-0901", speed_mps=10.0, brake_force_n=50_000.0),
             ],
             dt_sec=1.0,
         )
@@ -80,6 +80,7 @@ class MemberDPhase2Tests(unittest.TestCase):
         self.assertEqual(state.voltage_level, "UNDERVOLTAGE")
         self.assertLess(state.traction_limit_ratio, 1.0)
         self.assertGreater(state.absorbed_regen_kw, 0.0)
+        self.assertGreater(state.self_consumed_regen_kw, 0.0)
         self.assertGreater(state.energy_kwh, 0.0)
         self.assertGreater(state.regen_energy_kwh, 0.0)
 

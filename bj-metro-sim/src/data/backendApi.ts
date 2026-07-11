@@ -140,6 +140,19 @@ export interface SimTrainState {
   tractionPercent?: number;
   brakePercent?: number;
   energyKwh?: number;
+  tractionEnergyKwh?: number;
+  auxiliaryEnergyKwh?: number;
+  regenGeneratedKwh?: number;
+  regenSelfConsumedKwh?: number;
+  regenAcceptedKwh?: number;
+  regenWastedKwh?: number;
+  tractionPowerRequestKw?: number;
+  tractionPowerDeliveredKw?: number;
+  auxiliaryPowerKw?: number;
+  regenPowerAvailableKw?: number;
+  regenPowerSelfConsumedKw?: number;
+  regenPowerAcceptedKw?: number;
+  regenPowerWastedKw?: number;
   targetSpeedMps?: number;
   estimatedRunTimeS?: number;
   pathPositionM?: number;
@@ -178,6 +191,8 @@ export interface SimPowerState {
   regenEnergyKwh: number;
   absorbedRegenKw: number;
   wastedRegenKw: number;
+  generatedRegenKw?: number;
+  selfConsumedRegenKw?: number;
   minTrainVoltageV?: number;
   maxTrainCurrentA?: number;
   substationCount?: number;
@@ -293,6 +308,14 @@ export interface TrainVoltageState {
   voltageV: number;
   currentA: number;
   requestedPowerKw: number;
+  tractionPowerRequestKw: number;
+  tractionPowerDeliveredKw: number;
+  auxiliaryPowerKw: number;
+  regenPowerAvailableKw: number;
+  regenPowerSelfConsumedKw: number;
+  regenPowerExportedKw: number;
+  regenPowerAcceptedKw: number;
+  regenPowerWastedKw: number;
   tractionLimitRatio: number;
   regenLimitRatio: number;
   voltageLevel: string;
@@ -308,13 +331,14 @@ export interface PowerNetworkState {
   trainVoltages: TrainVoltageState[];
   regen: {
     generatedKw: number;
+    selfConsumedKw: number;
     absorbedKw: number;
     feedbackKw: number;
     wastedKw: number;
     transferLossesKw: number;
     paths: Array<{
       sourceTrainId: string;
-      sinkType: 'TRAIN' | 'SUBSTATION_FEEDBACK' | 'WASTE';
+      sinkType: 'TRAIN' | 'TRAIN_AUXILIARY' | 'SUBSTATION_FEEDBACK' | 'WASTE';
       sinkId: string;
       viaSubstationId: string | null;
       sourceFeederId: string | null;

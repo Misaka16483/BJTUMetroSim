@@ -117,6 +117,8 @@ class TrainElectricalLoad:
     head_mileage_m: float | None = None
     tail_mileage_m: float | None = None
     pantograph_mileages_m: tuple[float, ...] = ()
+    traction_power_request_kw: float | None = None
+    regen_power_available_kw: float | None = None
 
     @property
     def electrical_contact_mileages_m(self) -> tuple[float, ...]:
@@ -124,27 +126,35 @@ class TrainElectricalLoad:
 
     @property
     def traction_power_kw(self) -> float:
+        if self.traction_power_request_kw is not None:
+            return max(self.traction_power_request_kw, 0.0)
         if self.traction_force_n <= 0 or self.speed_mps <= 0:
             return 0.0
         return self.traction_force_n * self.speed_mps / 1000.0 / self.traction_efficiency
 
     @property
     def raw_regen_power_kw(self) -> float:
+        if self.regen_power_available_kw is not None:
+            return max(self.regen_power_available_kw, 0.0)
         if self.brake_force_n <= 0 or self.speed_mps <= 0:
             return 0.0
         return self.brake_force_n * self.speed_mps / 1000.0 * self.regen_efficiency
 
     @property
     def regen_power_kw(self) -> float:
-        return max(-self.requested_power_kw, 0.0)
+        return max(self.raw_regen_power_kw - self.aux_power_kw, 0.0)
+
+    @property
+    def self_consumed_regen_kw(self) -> float:
+        return min(self.raw_regen_power_kw, self.aux_power_kw)
 
     @property
     def traction_demand_kw(self) -> float:
-        return max(self.requested_power_kw, 0.0)
+        return self.traction_power_kw + max(self.aux_power_kw - self.raw_regen_power_kw, 0.0)
 
     @property
     def requested_power_kw(self) -> float:
-        return self.traction_power_kw + self.aux_power_kw - self.raw_regen_power_kw
+        return self.traction_demand_kw - self.regen_power_kw
 
 
 @dataclass(frozen=True)
@@ -158,6 +168,14 @@ class TrainPowerFlow:
     traction_limit_ratio: float
     regen_limit_ratio: float
     voltage_level: str
+    traction_power_request_kw: float = 0.0
+    traction_power_delivered_kw: float = 0.0
+    auxiliary_power_kw: float = 0.0
+    regen_power_available_kw: float = 0.0
+    regen_power_self_consumed_kw: float = 0.0
+    regen_power_exported_kw: float = 0.0
+    regen_power_accepted_kw: float = 0.0
+    regen_power_wasted_kw: float = 0.0
     left_substation_id: str | None = None
     right_substation_id: str | None = None
     head_mileage_m: float | None = None
@@ -226,6 +244,7 @@ class PowerFlowSnapshot:
     feeders: list[FeederPowerFlow] = field(default_factory=list)
     contact_rail_flows: list[ContactRailPowerFlow] = field(default_factory=list)
     generated_regen_kw: float = 0.0
+    self_consumed_regen_kw: float = 0.0
     absorbed_regen_kw: float = 0.0
     feedback_regen_kw: float = 0.0
     wasted_regen_kw: float = 0.0
@@ -292,6 +311,14 @@ class PowerFlowSnapshot:
                     "voltageV": round(item.voltage_v, 2),
                     "currentA": round(item.current_a, 2),
                     "requestedPowerKw": round(item.requested_power_kw, 3),
+                    "tractionPowerRequestKw": round(item.traction_power_request_kw, 3),
+                    "tractionPowerDeliveredKw": round(item.traction_power_delivered_kw, 3),
+                    "auxiliaryPowerKw": round(item.auxiliary_power_kw, 3),
+                    "regenPowerAvailableKw": round(item.regen_power_available_kw, 3),
+                    "regenPowerSelfConsumedKw": round(item.regen_power_self_consumed_kw, 3),
+                    "regenPowerExportedKw": round(item.regen_power_exported_kw, 3),
+                    "regenPowerAcceptedKw": round(item.regen_power_accepted_kw, 3),
+                    "regenPowerWastedKw": round(item.regen_power_wasted_kw, 3),
                     "tractionLimitRatio": round(item.traction_limit_ratio, 4),
                     "regenLimitRatio": round(item.regen_limit_ratio, 4),
                     "voltageLevel": item.voltage_level,
@@ -306,6 +333,7 @@ class PowerFlowSnapshot:
             ],
             "regen": {
                 "generatedKw": round(self.generated_regen_kw, 3),
+                "selfConsumedKw": round(self.self_consumed_regen_kw, 3),
                 "absorbedKw": round(self.absorbed_regen_kw, 3),
                 "feedbackKw": round(self.feedback_regen_kw, 3),
                 "wastedKw": round(self.wasted_regen_kw, 3),

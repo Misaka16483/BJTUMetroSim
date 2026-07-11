@@ -1785,6 +1785,28 @@ GET  /api/experiments/{experimentId}/trials
 5. API 响应模型先兼容现有 Phase 0 字段，再逐步切换到统一包裹格式。
 ## 供电网络接口补充
 
+### 车辆功率闭环字段（2.0）
+
+`GET /api/sim/state` 的 `trains[]` 新增以下逐车瞬时与累计字段：
+
+| 字段 | 单位 | 说明 |
+|---|---:|---|
+| `tractionPowerRequestKw` | kW | 老师车辆曲线计算的候选牵引功率 |
+| `tractionPowerDeliveredKw` | kW | 供电约束后的实际牵引功率 |
+| `auxiliaryPowerKw` | kW | 辅助负荷 |
+| `regenPowerAvailableKw` | kW | 候选电制动再生功率 |
+| `regenPowerSelfConsumedKw` | kW | 本车辅助负荷自用 |
+| `regenPowerAcceptedKw` | kW | 自用与接触网接受之和 |
+| `regenPowerWastedKw` | kW | 未被利用的候选再生功率 |
+| `tractionEnergyKwh` | kWh | 累计实际牵引电能 |
+| `auxiliaryEnergyKwh` | kWh | 累计辅助能耗 |
+| `regenGeneratedKwh` | kWh | 累计候选再生电能 |
+| `regenSelfConsumedKwh` | kWh | 累计本车自用再生电能 |
+| `regenAcceptedKwh` | kWh | 累计实际接受再生电能 |
+| `regenWastedKwh` | kWh | 累计未利用再生电能 |
+
+`powerNetwork.trainVoltages[]` 同步提供上述逐车瞬时功率，并增加 `regenPowerExportedKw`。`powerNetwork.regen` 增加 `selfConsumedKw`，`paths[].sinkType` 增加 `TRAIN_AUXILIARY`。兼容字段 `energyKwh` 表示车辆实际净电能，不再表示“牵引候选能量减全部候选再生能量”。
+
 本节对应9号线牵引供电准静态仿真V1，数据来源为自研工程近似模型：
 
 ```text

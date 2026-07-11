@@ -169,6 +169,7 @@ class PowerExperimentRunner:
             scenario_ids.extend(["TS-0903", "TS-0905", "TS-0907"])
         aggregate = {
             "generatedRegenKwh": 0.0,
+            "selfConsumedRegenKwh": 0.0,
             "absorbedRegenKwh": 0.0,
             "feedbackRegenKwh": 0.0,
             "wastedRegenKwh": 0.0,
@@ -197,6 +198,7 @@ class PowerExperimentRunner:
                 snapshot = solver.solve(loads, dt_sec=request.slot_seconds, sim_time_ms=slot * request.slot_seconds * 1000)
                 hours = request.slot_seconds / 3600.0
                 aggregate["generatedRegenKwh"] += snapshot.generated_regen_kw * hours
+                aggregate["selfConsumedRegenKwh"] += snapshot.self_consumed_regen_kw * hours
                 aggregate["absorbedRegenKwh"] += snapshot.absorbed_regen_kw * hours
                 aggregate["feedbackRegenKwh"] += snapshot.feedback_regen_kw * hours
                 aggregate["wastedRegenKwh"] += snapshot.wasted_regen_kw * hours
@@ -221,7 +223,11 @@ class PowerExperimentRunner:
                 if not snapshot.converged or snapshot.power_balance_error_ratio >= 0.01:
                     aggregate["failedSteps"] += 1
         aggregate["regenUtilizationRatio"] = (
-            (aggregate["absorbedRegenKwh"] + aggregate["feedbackRegenKwh"])
+            (
+                aggregate["selfConsumedRegenKwh"]
+                + aggregate["absorbedRegenKwh"]
+                + aggregate["feedbackRegenKwh"]
+            )
             / max(aggregate["generatedRegenKwh"], 1e-9)
         )
         aggregate["scheduleDeviationSec"] = (

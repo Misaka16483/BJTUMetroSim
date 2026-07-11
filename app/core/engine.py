@@ -34,6 +34,7 @@ from app.domain.vehicle.services import (
     SimpleVehicleModel,
     TractionDriveModel,
     VehicleForceDemand,
+    VehiclePowerDemand,
 )
 from app.infra.recorder import RunRecorder
 
@@ -78,6 +79,12 @@ class SimTrainState:
     traction_percent: float = 0.0
     brake_percent: float = 0.0
     energy_kwh: float = 0.0
+    traction_energy_kwh: float = 0.0
+    auxiliary_energy_kwh: float = 0.0
+    regen_generated_kwh: float = 0.0
+    regen_self_consumed_kwh: float = 0.0
+    regen_accepted_kwh: float = 0.0
+    regen_wasted_kwh: float = 0.0
     target_speed_mps: float = 0.0
     estimated_run_time_s: float = 0.0   # 预计区间运行时间，由速度曲线积分得出
     path_position_m: float = 0.0
@@ -92,6 +99,13 @@ class SimTrainState:
     electric_brake_force_n: float = 0.0
     pneumatic_brake_force_n: float = 0.0
     requested_power_kw: float = 0.0
+    traction_power_request_kw: float = 0.0
+    traction_power_delivered_kw: float = 0.0
+    auxiliary_power_kw: float = 0.0
+    regen_power_available_kw: float = 0.0
+    regen_power_self_consumed_kw: float = 0.0
+    regen_power_accepted_kw: float = 0.0
+    regen_power_wasted_kw: float = 0.0
     pantograph_voltage_v: float = 750.0
     traction_limit_ratio: float = 1.0
     regen_limit_ratio: float = 1.0
@@ -135,6 +149,12 @@ class SimTrainState:
             "tractionPercent": round(self.traction_percent, 1),
             "brakePercent": round(self.brake_percent, 1),
             "energyKwh": round(self.energy_kwh, 2),
+            "tractionEnergyKwh": round(self.traction_energy_kwh, 4),
+            "auxiliaryEnergyKwh": round(self.auxiliary_energy_kwh, 4),
+            "regenGeneratedKwh": round(self.regen_generated_kwh, 4),
+            "regenSelfConsumedKwh": round(self.regen_self_consumed_kwh, 4),
+            "regenAcceptedKwh": round(self.regen_accepted_kwh, 4),
+            "regenWastedKwh": round(self.regen_wasted_kwh, 4),
             "targetSpeedMps": round(self.target_speed_mps, 2),
             "estimatedRunTimeS": round(self.estimated_run_time_s, 1),
             "pathPositionM": round(self.path_position_m, 1),
@@ -149,6 +169,13 @@ class SimTrainState:
             "electricBrakeForceN": round(self.electric_brake_force_n, 1),
             "pneumaticBrakeForceN": round(self.pneumatic_brake_force_n, 1),
             "requestedPowerKw": round(self.requested_power_kw, 3),
+            "tractionPowerRequestKw": round(self.traction_power_request_kw, 3),
+            "tractionPowerDeliveredKw": round(self.traction_power_delivered_kw, 3),
+            "auxiliaryPowerKw": round(self.auxiliary_power_kw, 3),
+            "regenPowerAvailableKw": round(self.regen_power_available_kw, 3),
+            "regenPowerSelfConsumedKw": round(self.regen_power_self_consumed_kw, 3),
+            "regenPowerAcceptedKw": round(self.regen_power_accepted_kw, 3),
+            "regenPowerWastedKw": round(self.regen_power_wasted_kw, 3),
             "pantographVoltageV": round(self.pantograph_voltage_v, 2),
             "tractionLimitRatio": round(self.traction_limit_ratio, 4),
             "regenLimitRatio": round(self.regen_limit_ratio, 4),
@@ -173,6 +200,7 @@ class PreparedTrainStep:
     command: ControlCommand
     vehicle_config: VehicleConfig
     demand: VehicleForceDemand
+    power_demand: VehiclePowerDemand
     gradient_force_n: float
 
 
@@ -852,6 +880,14 @@ class SimulationEngine:
                         voltage_level=train_flow.voltage_level,
                         detail={
                             "tick": tick,
+                            "tractionPowerRequestKw": train_flow.traction_power_request_kw,
+                            "tractionPowerDeliveredKw": train_flow.traction_power_delivered_kw,
+                            "auxiliaryPowerKw": train_flow.auxiliary_power_kw,
+                            "regenPowerAvailableKw": train_flow.regen_power_available_kw,
+                            "regenPowerSelfConsumedKw": train_flow.regen_power_self_consumed_kw,
+                            "regenPowerExportedKw": train_flow.regen_power_exported_kw,
+                            "regenPowerAcceptedKw": train_flow.regen_power_accepted_kw,
+                            "regenPowerWastedKw": train_flow.regen_power_wasted_kw,
                             "headMileageM": train_flow.head_mileage_m,
                             "tailMileageM": train_flow.tail_mileage_m,
                             "pantographMileagesM": list(train_flow.pantograph_mileages_m),
@@ -882,6 +918,7 @@ class SimulationEngine:
                         "tick": tick,
                         "alerts": network_snapshot.alerts,
                         "transferLossesKw": network_snapshot.regen_transfer_losses_kw,
+                        "selfConsumedRegenKw": network_snapshot.self_consumed_regen_kw,
                     },
                 )
                 for path in network_snapshot.regen_paths:
@@ -1021,6 +1058,11 @@ class SimulationEngine:
         command = self._manual_override(command, train.train_id)
         vehicle_config = self._make_vehicle_config(train.train_id, train.onboard_pax)
         demand = TractionDriveModel(vehicle_config).demand(command, train.speed_mps)
+        power_demand = TractionDriveModel(vehicle_config).electrical_power_demand(
+            demand,
+            train.speed_mps,
+            auxiliary_power_kw=150.0,
+        )
         gradient_force_n = vehicle_config.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
         return True, PreparedTrainStep(
             train=train,
@@ -1031,6 +1073,7 @@ class SimulationEngine:
             command=command,
             vehicle_config=vehicle_config,
             demand=demand,
+            power_demand=power_demand,
             gradient_force_n=gradient_force_n,
         )
 
@@ -1046,6 +1089,7 @@ class SimulationEngine:
                 prepared.state,
                 traction_force_n=traction_force_n,
                 brake_force_n=blend.total_brake_force_n,
+                electric_brake_force_n=blend.electric_brake_force_n,
                 dt_s=self.clock.tick_seconds,
                 gradient_force_n=prepared.gradient_force_n,
             )
@@ -1062,7 +1106,6 @@ class SimulationEngine:
             train.traction_percent = prepared.command.traction_percent
             train.brake_percent = prepared.command.brake_percent
             train.target_speed_mps = self._ato_for_train(train.train_id).last_target_speed_mps
-            train.energy_kwh = result.net_energy_kwh
             train.mass_kg = prepared.vehicle_config.mass_kg
             train.traction_force_n = traction_force_n
             train.electric_brake_force_n = blend.electric_brake_force_n
@@ -1077,6 +1120,25 @@ class SimulationEngine:
             if flow is not None:
                 train.requested_power_kw = float(flow.requested_power_kw)
                 train.pantograph_voltage_v = float(flow.voltage_v)
+                train.traction_power_request_kw = float(flow.traction_power_request_kw)
+                train.traction_power_delivered_kw = float(flow.traction_power_delivered_kw)
+                train.auxiliary_power_kw = float(flow.auxiliary_power_kw)
+                train.regen_power_available_kw = float(flow.regen_power_available_kw)
+                train.regen_power_self_consumed_kw = float(flow.regen_power_self_consumed_kw)
+                train.regen_power_accepted_kw = float(flow.regen_power_accepted_kw)
+                train.regen_power_wasted_kw = float(flow.regen_power_wasted_kw)
+                dt_h = self.clock.tick_seconds / 3600.0
+                train.traction_energy_kwh += train.traction_power_delivered_kw * dt_h
+                train.auxiliary_energy_kwh += train.auxiliary_power_kw * dt_h
+                train.regen_generated_kwh += train.regen_power_available_kw * dt_h
+                train.regen_self_consumed_kwh += train.regen_power_self_consumed_kw * dt_h
+                train.regen_accepted_kwh += train.regen_power_accepted_kw * dt_h
+                train.regen_wasted_kwh += train.regen_power_wasted_kw * dt_h
+                train.energy_kwh += (
+                    train.traction_power_delivered_kw
+                    + train.auxiliary_power_kw
+                    - train.regen_power_accepted_kw
+                ) * dt_h
             self._update_train_path_context(train)
 
             arrived = train.distance_to_next_m <= self._ato_config.stop_tolerance_m and train.speed_mps <= 0.2
@@ -1706,6 +1768,7 @@ class SimulationEngine:
                 traction_force_n = prepared.demand.traction_force_n
                 brake_force_n = prepared.demand.candidate_electric_brake_force_n
                 train.mass_kg = prepared.vehicle_config.mass_kg
+                power_demand = prepared.power_demand
             else:
                 vehicle = self._make_vehicle_config(train.train_id, train.onboard_pax)
                 command = ControlCommand(
@@ -1718,6 +1781,11 @@ class SimulationEngine:
                 traction_force_n = demand.traction_force_n
                 brake_force_n = demand.candidate_electric_brake_force_n
                 train.mass_kg = vehicle.mass_kg
+                power_demand = TractionDriveModel(vehicle).electrical_power_demand(
+                    demand,
+                    train.speed_mps,
+                    auxiliary_power_kw=150.0 if train.phase not in {IDLE, DWELLING} else 80.0,
+                )
             head_mileage_m, tail_mileage_m, pantograph_mileages_m, spanned_sections = self._train_power_geometry(
                 train,
                 prepared.vehicle_config if prepared is not None else vehicle,
@@ -1732,6 +1800,8 @@ class SimulationEngine:
                     position_m=sum(pantograph_mileages_m) / len(pantograph_mileages_m),
                     direction=train.direction,
                     aux_power_kw=150.0 if train.phase not in {IDLE, DWELLING} else 80.0,
+                    traction_power_request_kw=power_demand.traction_power_request_kw,
+                    regen_power_available_kw=power_demand.regen_power_available_kw,
                     head_mileage_m=head_mileage_m,
                     tail_mileage_m=tail_mileage_m,
                     pantograph_mileages_m=pantograph_mileages_m,
@@ -2068,6 +2138,8 @@ class SimulationEngine:
             "regenEnergyKwh": round(state.regen_energy_kwh, 4),
             "absorbedRegenKw": round(state.absorbed_regen_kw, 3),
             "wastedRegenKw": round(state.wasted_regen_kw, 3),
+            "generatedRegenKw": round(state.generated_regen_kw, 3),
+            "selfConsumedRegenKw": round(state.self_consumed_regen_kw, 3),
             "minTrainVoltageV": round(state.min_train_voltage_v, 2),
             "maxTrainCurrentA": round(state.max_train_current_a, 2),
             "substationCount": state.substation_count,

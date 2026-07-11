@@ -95,7 +95,8 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
     nextStation, distanceToNextStationM, stationIndex, line9Stations,
     runDirection, currentSpeedMps, simTime, avgLoadRate, totalPassengers,
     engineClockState, tractionPercent, brakePercent,
-    energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
+    energyKwh, tractionEnergyKwh, regenGeneratedKwh, regenAcceptedKwh, regenWastedKwh,
+    targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
     speedTimeHistory, estimatedRunTimeS, pathPositionM, pathTotalLengthM,
     currentSegmentId, localSpeedLimitMps, gradeRatio,
     manualMode, setManualMode,
@@ -164,6 +165,9 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
             <MetricBadge label="LOAD" value={`${avgLoadRate}%`} unit="" accent="#8FC31F" />
             <MetricBadge label="PAX" value={String(totalPassengers)} unit="" accent="#94a3b8" />
             <MetricBadge label="ENE" value={energyKwh.toFixed(1)} unit="kWh" accent="#f59e0b" />
+            <MetricBadge label="TRAC" value={tractionEnergyKwh.toFixed(1)} unit="kWh" accent="#58a6ff" />
+            <MetricBadge label="REG" value={`${regenAcceptedKwh.toFixed(1)}/${regenGeneratedKwh.toFixed(1)}`} unit="kWh" accent="#22c55e" />
+            <MetricBadge label="WASTE" value={regenWastedKwh.toFixed(1)} unit="kWh" accent="#ef4444" />
             <MetricBadge label="ETIME" value={estimatedRunTimeS > 0 ? `${estimatedRunTimeS|0}` : '--'} unit="s" accent="#6366f1" />
             <MetricBadge label="MODE" value="AM-CBTC" unit="" accent="#8FC31F" />
           </div>

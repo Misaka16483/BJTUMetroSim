@@ -26,6 +26,8 @@ type HistoryPoint = {
   maxLoadRatio: number;
   lossesKw: number;
   absorbedRegenKw: number;
+  generatedRegenKw: number;
+  selfConsumedRegenKw: number;
   wastedRegenKw: number;
 };
 
@@ -141,6 +143,8 @@ export default function PowerSystemView() {
         maxLoadRatio,
         lossesKw: simPowerNetwork.lossesKw ?? 0,
         absorbedRegenKw: regen?.absorbedKw ?? 0,
+        generatedRegenKw: regen?.generatedKw ?? 0,
+        selfConsumedRegenKw: regen?.selfConsumedKw ?? 0,
         wastedRegenKw: regen?.wastedKw ?? 0,
       };
       if (previous && point.tick < previous.tick) return items;
@@ -170,6 +174,8 @@ export default function PowerSystemView() {
       point.rectifierPowerKw,
       point.feedbackPowerKw,
       point.lossesKw,
+      point.generatedRegenKw,
+      point.selfConsumedRegenKw,
       point.wastedRegenKw,
     ]);
     const min = Math.min(0, ...values);
@@ -259,11 +265,15 @@ export default function PowerSystemView() {
             )}
           </section>
 
-          <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Metric label="最低列车电压" value={fmt(minVoltageTrain?.voltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? 750) < 650 ? 'var(--amber)' : 'var(--green)'} />
             <Metric label="最大牵引所负载" value={fmt((busiestSubstation?.loadRatio ?? 0) * 100, 1)} unit="%" color={(busiestSubstation?.loadRatio ?? 0) >= 0.85 ? 'var(--amber)' : 'var(--cyan)'} />
             <Metric label="线路损耗" value={fmt(simPowerNetwork?.lossesKw, 1)} unit="kW" color="var(--text-dim)" />
             <Metric label="再生浪费" value={fmt(regen?.wastedKw, 0)} unit="kW" color={(regen?.wastedKw ?? 0) > 0 ? 'var(--amber)' : 'var(--green)'} />
+            <Metric label="再生生成" value={fmt(regen?.generatedKw, 0)} unit="kW" color="var(--cyan)" />
+            <Metric label="本车自用" value={fmt(regen?.selfConsumedKw, 0)} unit="kW" color="var(--green)" />
+            <Metric label="跨车吸收" value={fmt(regen?.absorbedKw, 0)} unit="kW" color="var(--cyan)" />
+            <Metric label="变电所反馈" value={fmt(regen?.feedbackKw, 0)} unit="kW" color="#b57cff" />
           </section>
 
           <section className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -287,6 +297,8 @@ export default function PowerSystemView() {
                   { key: 'feedbackPowerKw', label: '回馈输出(-)', color: '#b57cff', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
                   { key: 'lossesKw', label: '线路损耗', color: '#8ba0bb', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
                   { key: 'wastedRegenKw', label: '再生浪费', color: '#ff453a', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'generatedRegenKw', label: '再生生成', color: '#22c55e', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'selfConsumedRegenKw', label: '本车自用', color: '#f59e0b', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
                 ]}
               />
             </TrendPanel>

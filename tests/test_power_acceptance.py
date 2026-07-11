@@ -183,7 +183,8 @@ class PowerAcceptanceTests(unittest.TestCase):
             dt_sec=0.25,
         )
         split = (
-            snapshot.absorbed_regen_kw
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
             + snapshot.feedback_regen_kw
             + snapshot.wasted_regen_kw
             + snapshot.regen_transfer_losses_kw
@@ -205,7 +206,8 @@ class PowerAcceptanceTests(unittest.TestCase):
             dt_sec=0.25,
         )
         split = (
-            snapshot.absorbed_regen_kw
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
             + snapshot.feedback_regen_kw
             + snapshot.wasted_regen_kw
             + snapshot.regen_transfer_losses_kw

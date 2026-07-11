@@ -28,6 +28,7 @@ class _RegenAllocation:
     feeder_currents_a: dict[str, float] = field(default_factory=lambda: defaultdict(float))
     feedback_currents_a: dict[str, float] = field(default_factory=lambda: defaultdict(float))
     accepted_by_source_kw: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    wasted_by_source_kw: dict[str, float] = field(default_factory=lambda: defaultdict(float))
     source_currents_a: dict[str, float] = field(default_factory=lambda: defaultdict(float))
     source_voltages_v: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
     sink_currents_a: dict[str, float] = field(default_factory=lambda: defaultdict(float))
@@ -56,7 +57,25 @@ class DCTractionPowerFlowSolver:
             for load in loads
         }
         regen = self._allocate_regen(loads, source_paths_by_train)
-        generated_regen_kw = regen.generated_kw
+        generated_regen_kw = sum(load.raw_regen_power_kw for load in loads)
+        self_consumed_regen_kw = sum(load.self_consumed_regen_kw for load in loads)
+        self_consumption_paths = [
+            RegenPathFlow(
+                source_train_id=load.train_id,
+                sink_type="TRAIN_AUXILIARY",
+                sink_id=load.train_id,
+                via_substation_id=None,
+                source_feeder_id=None,
+                sink_feeder_id=None,
+                generated_kw=load.self_consumed_regen_kw,
+                delivered_kw=load.self_consumed_regen_kw,
+                losses_kw=0.0,
+                current_a=0.0,
+                path_resistance_ohm=0.0,
+            )
+            for load in loads
+            if load.self_consumed_regen_kw > 1e-9
+        ]
         absorbed_regen_kw = regen.absorbed_kw
         feedback_regen_kw = regen.feedback_kw
         wasted_regen_kw = regen.wasted_kw
@@ -136,7 +155,6 @@ class DCTractionPowerFlowSolver:
                 break
 
         trains: list[TrainPowerFlow] = []
-        accepted_regen_ratio = min(1.0, max(0.0, 1.0 - wasted_regen_kw / generated_regen_kw)) if generated_regen_kw > 0 else 1.0
         for load in loads:
             section = self.network.locate_section(load.mileage_m, load.direction)
             head_mileage_m = load.head_mileage_m if load.head_mileage_m is not None else load.mileage_m
@@ -164,7 +182,13 @@ class DCTractionPowerFlowSolver:
             traction_limit_ratio, regen_limit_ratio, voltage_level = self._limits(voltage_v)
             traction_limit_ratio = min(traction_limit_ratio, delivered_ratio)
             if load.regen_power_kw > 0:
-                regen_limit_ratio = min(regen_limit_ratio, accepted_regen_ratio)
+                accepted_source_kw = regen.accepted_by_source_kw[load.train_id]
+                accepted_vehicle_kw = load.self_consumed_regen_kw + accepted_source_kw
+                source_acceptance_ratio = min(
+                    1.0,
+                    accepted_vehicle_kw / max(load.raw_regen_power_kw, 1e-9),
+                )
+                regen_limit_ratio = min(regen_limit_ratio, source_acceptance_ratio)
                 if regen_limit_ratio < 0.999 and voltage_level == "NORMAL":
                     voltage_level = "REGEN_LIMITED"
             source_ids = [item[0] for item in source_contributions]
@@ -179,6 +203,14 @@ class DCTractionPowerFlowSolver:
                     traction_limit_ratio=traction_limit_ratio,
                     regen_limit_ratio=regen_limit_ratio,
                     voltage_level=voltage_level,
+                    traction_power_request_kw=load.traction_power_kw,
+                    traction_power_delivered_kw=load.traction_power_kw * traction_limit_ratio,
+                    auxiliary_power_kw=load.aux_power_kw,
+                    regen_power_available_kw=load.raw_regen_power_kw,
+                    regen_power_self_consumed_kw=load.self_consumed_regen_kw,
+                    regen_power_exported_kw=load.regen_power_kw,
+                    regen_power_accepted_kw=load.self_consumed_regen_kw + regen.accepted_by_source_kw[load.train_id],
+                    regen_power_wasted_kw=regen.wasted_by_source_kw[load.train_id],
                     left_substation_id=source_ids[0] if source_ids else section.left_substation_id,
                     right_substation_id=source_ids[-1] if source_ids else section.right_substation_id,
                     head_mileage_m=head_mileage_m,
@@ -220,7 +252,7 @@ class DCTractionPowerFlowSolver:
             self.network.substations[sub_id].no_load_voltage_v * current / 1000.0
             for sub_id, current in rectifier_substation_currents.items()
         )
-        accepted_regen_kw = generated_regen_kw - wasted_regen_kw
+        accepted_regen_kw = regen.generated_kw - wasted_regen_kw
         actual_traction_kw = absorbed_regen_kw + delivered_demand_kw
         total_losses_kw = losses_kw + regen.transfer_losses_kw
         balance_error_kw = abs(
@@ -236,11 +268,12 @@ class DCTractionPowerFlowSolver:
             feeders=feeders,
             contact_rail_flows=contact_rail_flows,
             generated_regen_kw=generated_regen_kw,
+            self_consumed_regen_kw=self_consumed_regen_kw,
             absorbed_regen_kw=absorbed_regen_kw,
             feedback_regen_kw=feedback_regen_kw,
             wasted_regen_kw=wasted_regen_kw,
             regen_transfer_losses_kw=regen.transfer_losses_kw,
-            regen_paths=regen.paths,
+            regen_paths=self_consumption_paths + regen.paths,
             losses_kw=total_losses_kw,
             converged=converged,
             iterations=iterations,
@@ -408,6 +441,7 @@ class DCTractionPowerFlowSolver:
             if wasted_kw <= 1e-9:
                 continue
             allocation.wasted_kw += wasted_kw
+            allocation.wasted_by_source_kw[source_id] += wasted_kw
             allocation.paths.append(RegenPathFlow(
                 source_train_id=source_id,
                 sink_type="WASTE",

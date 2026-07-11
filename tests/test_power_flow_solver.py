@@ -118,8 +118,84 @@ class DCTractionPowerFlowSolverTests(unittest.TestCase):
 
         self.assertEqual(snapshot.absorbed_regen_kw, 0.0)
         self.assertEqual(snapshot.feedback_regen_kw, 0.0)
-        self.assertAlmostEqual(snapshot.wasted_regen_kw, snapshot.generated_regen_kw, places=9)
-        self.assertEqual({item.sink_type for item in snapshot.regen_paths}, {"WASTE"})
+        self.assertAlmostEqual(
+            snapshot.generated_regen_kw,
+            snapshot.self_consumed_regen_kw + snapshot.wasted_regen_kw,
+            places=9,
+        )
+        self.assertEqual({item.sink_type for item in snapshot.regen_paths}, {"TRAIN_AUXILIARY", "WASTE"})
+
+    def test_explicit_teacher_curve_power_overrides_force_speed_estimate(self) -> None:
+        load = TrainElectricalLoad(
+            "T1",
+            "UP",
+            2200.0,
+            18.0,
+            traction_force_n=180_000.0,
+            aux_power_kw=100.0,
+            traction_power_request_kw=1234.0,
+        )
+        self.assertEqual(load.traction_power_kw, 1234.0)
+        self.assertEqual(load.traction_demand_kw, 1334.0)
+
+    def test_regen_accounting_includes_self_consumption_and_per_train_acceptance(self) -> None:
+        snapshot = DCTractionPowerFlowSolver(_network()).solve(
+            [
+                TrainElectricalLoad(
+                    "TRACTION",
+                    "UP",
+                    2200.0,
+                    18.0,
+                    aux_power_kw=100.0,
+                    traction_power_request_kw=900.0,
+                ),
+                TrainElectricalLoad(
+                    "REGEN",
+                    "UP",
+                    2600.0,
+                    18.0,
+                    aux_power_kw=120.0,
+                    regen_power_available_kw=800.0,
+                ),
+            ],
+            dt_sec=1.0,
+        )
+        regen_train = next(item for item in snapshot.trains if item.train_id == "REGEN")
+        self.assertEqual(snapshot.generated_regen_kw, 800.0)
+        self.assertEqual(snapshot.self_consumed_regen_kw, 120.0)
+        self.assertAlmostEqual(
+            snapshot.generated_regen_kw,
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
+            + snapshot.feedback_regen_kw
+            + snapshot.regen_transfer_losses_kw
+            + snapshot.wasted_regen_kw,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            regen_train.regen_power_available_kw,
+            regen_train.regen_power_accepted_kw + regen_train.regen_power_wasted_kw,
+            places=6,
+        )
+
+    def test_multitrain_result_is_independent_of_input_order(self) -> None:
+        loads = [
+            TrainElectricalLoad("T1", "UP", 2200.0, 18.0, aux_power_kw=100.0, traction_power_request_kw=900.0),
+            TrainElectricalLoad("T2", "UP", 2600.0, 18.0, aux_power_kw=120.0, regen_power_available_kw=800.0),
+            TrainElectricalLoad("T3", "UP", 3000.0, 16.0, aux_power_kw=100.0, traction_power_request_kw=700.0),
+        ]
+        first = DCTractionPowerFlowSolver(_network()).solve(loads, dt_sec=1.0)
+        second = DCTractionPowerFlowSolver(_network()).solve(list(reversed(loads)), dt_sec=1.0)
+        first_trains = sorted(
+            (item.train_id, round(item.voltage_v, 6), round(item.regen_power_accepted_kw, 6))
+            for item in first.trains
+        )
+        second_trains = sorted(
+            (item.train_id, round(item.voltage_v, 6), round(item.regen_power_accepted_kw, 6))
+            for item in second.trains
+        )
+        self.assertEqual(first_trains, second_trains)
+        self.assertAlmostEqual(first.wasted_regen_kw, second.wasted_regen_kw, places=9)
 
     def test_tie_switch_changes_regen_connectivity(self) -> None:
         network = _network()
