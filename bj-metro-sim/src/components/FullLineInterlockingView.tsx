@@ -19,6 +19,9 @@ const COLORS = {
 
 const SYMBOLS: Record<number, string> = { 1: '◆', 2: '◇', 3: '●' };
 
+const TRAIN_IMG = new Image();
+TRAIN_IMG.src = '/metro_train.png';
+
 type StationConfig = {
   code: string;
   name: string;
@@ -42,6 +45,8 @@ const STATION_CONFIGS: StationConfig[] = [
   { code: 'BQS', name: '白石桥南',      mileage: 14954.01,  width: 580, dataFn: bqsInterlockingData },
   { code: 'GTG', name: '国家图书馆',    mileage: 16048.92,  width: 540, dataFn: gtgInterlockingData },
 ];
+
+let stationMileageAnchorsCache: { mileage: number; x: number }[] | null = null;
 
 /** 合并全部 13 个车站的联锁数据为一张连续联锁图 */
 function getCombinedInterlockingData(): StationInterlockingData {
@@ -325,14 +330,41 @@ export default function FullLineInterlockingView() {
       }
     }
 
+    // 绘制列车（根据 headMileageM 定位）
+    if (simState) {
+      for (const train of simState.trains) {
+        if (!TRAIN_IMG.complete || TRAIN_IMG.naturalWidth <= 0) continue;
+        const cx = mileageToCanvasX(train.headMileageM);
+        const cy = train.direction === 'UP' ? 140 : 220;
+        ctx.save();
+        // 列车逆行时水平翻转图标
+        if (train.direction === 'DOWN') {
+          ctx.translate(cx, cy);
+          ctx.scale(-1, 1);
+          ctx.drawImage(TRAIN_IMG, -30, -15, 60, 30);
+        } else {
+          ctx.drawImage(TRAIN_IMG, cx - 30, cy - 15, 60, 30);
+        }
+        ctx.restore();
+      }
+    }
+
     ctx.restore();
-  }, [scale, interlockingData, trackMap]);
+  }, [scale, interlockingData, trackMap, simState]);
 
   // 事件处理
   const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
     setScale(s => Math.max(0.3, Math.min(3, s * (e.deltaY > 0 ? 0.9 : 1.1))));
   }, []);
+
+  // Canvas DOM 滚轮监听（绕过 React passive 限制）
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     dragRef.current = {
@@ -359,13 +391,6 @@ export default function FullLineInterlockingView() {
   useEffect(() => {
     draw();
   }, [draw]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => el.removeEventListener('wheel', handleWheel);
-  }, [handleWheel]);
 
   const updateSize = useCallback(() => {
     const c = canvasRef.current;
@@ -426,7 +451,8 @@ export default function FullLineInterlockingView() {
         <div ref={containerRef} className="h-full">
           <canvas
             ref={canvasRef}
-            className="block"
+            className="block outline-none"
+            tabIndex={0}
             onMouseDown={handleMouseDown}
           />
         </div>
@@ -455,8 +481,8 @@ export default function FullLineInterlockingView() {
           <span>预告信号</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS.muted }} />
-          <span>列车（待后端对齐）</span>
+          <img src="/metro_train.png" className="w-5 h-3 object-contain" alt="train" />
+          <span>列车</span>
         </div>
         {simState && (
           <div className="flex items-center gap-2 ml-auto">
@@ -471,7 +497,53 @@ export default function FullLineInterlockingView() {
   );
 }
 
-// ===== 连接区间坡度 + 限速绘制 + 区间信号 =====
+// 里程 → 画布 X 坐标：以各站站台中心为锚点，和宏观图的站点里程插值保持一致
+function mileageToCanvasX(mileage: number): number {
+  const anchors = getStationMileageAnchors();
+  const firstMile = STATION_CONFIGS[0].mileage;
+  const lastMile = STATION_CONFIGS[STATION_CONFIGS.length - 1].mileage;
+  const m = Math.max(firstMile, Math.min(lastMile, mileage));
+
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const left = anchors[i];
+    const right = anchors[i + 1];
+    if (m < left.mileage || m > right.mileage) continue;
+    const ratio = right.mileage > left.mileage
+      ? (m - left.mileage) / (right.mileage - left.mileage)
+      : 0;
+    return left.x + (right.x - left.x) * ratio;
+  }
+
+  return anchors[anchors.length - 1].x;
+}
+
+function getStationMileageAnchors(): { mileage: number; x: number }[] {
+  if (stationMileageAnchorsCache) return stationMileageAnchorsCache;
+
+  const totalReal = STATION_CONFIGS[STATION_CONFIGS.length - 1].mileage - STATION_CONFIGS[0].mileage;
+  const totalStationW = STATION_CONFIGS.reduce((s, c) => s + c.width, 0);
+  const targetCanvasW = 12000;
+  const scaleMile = (targetCanvasW - totalStationW) / totalReal;
+
+  const anchors: { mileage: number; x: number }[] = [];
+  let curX = 0;
+
+  for (let i = 0; i < STATION_CONFIGS.length; i++) {
+    const cfg = STATION_CONFIGS[i];
+    const stationData = cfg.dataFn();
+    const platformCenterX = stationData.platforms[0]?.x ?? cfg.width / 2;
+    anchors.push({ mileage: cfg.mileage, x: curX + platformCenterX });
+
+    curX += cfg.width;
+    if (i < STATION_CONFIGS.length - 1) {
+      const mileGap = STATION_CONFIGS[i + 1].mileage - cfg.mileage;
+      curX += Math.max(60, Math.round(mileGap * scaleMile));
+    }
+  }
+
+  stationMileageAnchorsCache = anchors;
+  return stationMileageAnchorsCache;
+}
 function drawConnectionProfile(
   ctx: CanvasRenderingContext2D,
   trackMap: TrackMapData,
@@ -483,7 +555,8 @@ function drawConnectionProfile(
   const gapX1 = connTrack.x;
   const gapW = connTrack.width;
   const segMap = new Map(trackMap.segments.map(s => [s.id, s]));
-  const buildProfile = (ids: number[]) => {
+
+  function buildProfile(ids: number[]) {
     const segs = ids.map(id => segMap.get(id)).filter(Boolean) as { id: number; lengthM: number }[];
     if (segs.length === 0) return null;
     let cum = 0;
