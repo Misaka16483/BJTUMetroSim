@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSimStore } from '../store/useSimStore';
-import type { PowerSubstationState, PowerTopologySubstation, TrainVoltageState } from '../data/backendApi';
+import type {
+  ContactRailPowerFlowState,
+  PowerSubstationState,
+  PowerTopologyContactRailSection,
+  PowerTopologySubstation,
+  TrainVoltageState,
+} from '../data/backendApi';
 import {
   powerAlertLabel,
   powerQualityLabel,
@@ -14,7 +20,9 @@ import {
 type HistoryPoint = {
   tick: number;
   minVoltageV: number;
-  totalSubstationPowerKw: number;
+  netSubstationPowerKw: number;
+  rectifierPowerKw: number;
+  feedbackPowerKw: number;
   maxLoadRatio: number;
   lossesKw: number;
   absorbedRegenKw: number;
@@ -77,10 +85,17 @@ export default function PowerSystemView() {
     () => mergeSubstations(powerTopology?.substations ?? [], simPowerNetwork?.substations ?? []),
     [powerTopology, simPowerNetwork],
   );
-  const trainVoltages = simPowerNetwork?.trainVoltages ?? [];
-  const feeders = simPowerNetwork?.feeders ?? [];
-  const alerts = simPowerNetwork?.alerts ?? [];
-  const switches = simPowerNetwork?.switches ?? powerTopology?.switches ?? [];
+  const trainVoltages = useMemo(() => simPowerNetwork?.trainVoltages ?? [], [simPowerNetwork?.trainVoltages]);
+  const feeders = useMemo(() => simPowerNetwork?.feeders ?? [], [simPowerNetwork?.feeders]);
+  const contactRailFlows = useMemo(
+    () => simPowerNetwork?.contactRailFlows ?? [],
+    [simPowerNetwork?.contactRailFlows],
+  );
+  const alerts = useMemo(() => simPowerNetwork?.alerts ?? [], [simPowerNetwork?.alerts]);
+  const switches = useMemo(
+    () => simPowerNetwork?.switches ?? powerTopology?.switches ?? [],
+    [simPowerNetwork?.switches, powerTopology?.switches],
+  );
   const regen = simPowerNetwork?.regen;
   const solver = simPowerNetwork?.solver;
   const firstMileage = substations[0]?.mileageM ?? 0;
@@ -111,14 +126,18 @@ export default function PowerSystemView() {
   useEffect(() => {
     if (!simPowerNetwork) return;
     const minVoltage = Math.min(...trainVoltages.map((item) => item.voltageV), 750);
-    const totalPower = substations.reduce((sum, item) => sum + Math.max(item.powerKw ?? 0, 0), 0);
+    const netPower = substations.reduce((sum, item) => sum + (item.powerKw ?? 0), 0);
+    const rectifierPower = substations.reduce((sum, item) => sum + Math.max(item.rectifierPowerKw ?? 0, 0), 0);
+    const feedbackPower = substations.reduce((sum, item) => sum - Math.max(item.feedbackPowerKw ?? 0, 0), 0);
     const maxLoadRatio = Math.max(...substations.map((item) => item.loadRatio ?? 0), 0);
     setHistory((items) => {
       const previous = items[items.length - 1];
       const point: HistoryPoint = {
         tick: simPowerNetwork.simTimeMs ?? (previous?.tick ?? -1) + 1,
         minVoltageV: minVoltage,
-        totalSubstationPowerKw: totalPower,
+        netSubstationPowerKw: netPower,
+        rectifierPowerKw: rectifierPower,
+        feedbackPowerKw: feedbackPower,
         maxLoadRatio,
         lossesKw: simPowerNetwork.lossesKw ?? 0,
         absorbedRegenKw: regen?.absorbedKw ?? 0,
@@ -145,6 +164,19 @@ export default function PowerSystemView() {
     () => [...substations].sort((a, b) => (b.loadRatio ?? 0) - (a.loadRatio ?? 0))[0],
     [substations],
   );
+  const powerScale = useMemo(() => {
+    const values = history.flatMap((point) => [
+      point.netSubstationPowerKw,
+      point.rectifierPowerKw,
+      point.feedbackPowerKw,
+      point.lossesKw,
+      point.wastedRegenKw,
+    ]);
+    const min = Math.min(0, ...values);
+    const max = Math.max(1, ...values);
+    const margin = Math.max((max - min) * 0.08, 10);
+    return { min: min - margin, max: max + margin };
+  }, [history]);
 
   const injectOutage = () => {
     if (!selectedSubstationId || actionPending) return;
@@ -194,16 +226,16 @@ export default function PowerSystemView() {
   };
 
   return (
-    <div className="h-full min-h-0 bg-[#040810] p-5 overflow-auto">
-      <div className="grid grid-cols-[minmax(720px,1fr)_400px] gap-4 min-h-full">
+    <div className="h-full min-h-0 min-w-0 bg-[#040810] p-3 lg:p-5 overflow-auto">
+      <div className="grid grid-cols-[minmax(0,1fr)] xl:grid-cols-[minmax(720px,1fr)_400px] gap-4 min-h-full min-w-0">
         <main className="min-w-0 space-y-3">
           <section className="glass p-5">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-4">
               <div>
                 <div className="label" style={{ color: 'var(--text-muted)' }}>牵引供电系统</div>
                 <h2 className="mt-1 text-[20px] font-semibold text-[#dce8f8]">9号线 DC750V 牵引供电潮流</h2>
               </div>
-              <div className="flex items-center gap-4 text-right">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:flex items-center gap-3 lg:gap-4 text-left lg:text-right">
                 <Readout label="仿真状态" value={simulationStateLabel(engineClockState)} color={engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)'} />
                 <Readout label="仿真时间" value={simTime} color="var(--cyan)" />
                 <Readout label="数据质量" value={powerQualityLabel(powerTopology?.quality)} color="var(--text-muted)" />
@@ -215,43 +247,52 @@ export default function PowerSystemView() {
             <TopologyDiagram
               substations={substations}
               trainVoltages={trainVoltages}
+              contactRailSections={powerTopology?.contactRailSections ?? []}
+              contactRailFlows={contactRailFlows}
               firstMileage={firstMileage}
               span={span}
             />
+            {simPowerNetwork?.solverFailure && (
+              <div className="mt-3 border border-[#ff453a66] bg-[#ff453a14] px-3 py-2 text-[11px] text-[#ff8a82]">
+                潮流结果未发布，仿真已暂停。原因：{simPowerNetwork.solverFailure.reasons.join(' / ')}；当前画面保留上一有效快照。
+              </div>
+            )}
           </section>
 
-          <section className="grid grid-cols-4 gap-3">
+          <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <Metric label="最低列车电压" value={fmt(minVoltageTrain?.voltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? 750) < 650 ? 'var(--amber)' : 'var(--green)'} />
             <Metric label="最大牵引所负载" value={fmt((busiestSubstation?.loadRatio ?? 0) * 100, 1)} unit="%" color={(busiestSubstation?.loadRatio ?? 0) >= 0.85 ? 'var(--amber)' : 'var(--cyan)'} />
             <Metric label="线路损耗" value={fmt(simPowerNetwork?.lossesKw, 1)} unit="kW" color="var(--text-dim)" />
             <Metric label="再生浪费" value={fmt(regen?.wastedKw, 0)} unit="kW" color={(regen?.wastedKw ?? 0) > 0 ? 'var(--amber)' : 'var(--green)'} />
           </section>
 
-          <section className="grid grid-cols-2 gap-3">
+          <section className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <TrendPanel title="电压与负载" subtitle="最低列车电压 / 最大牵引所负载">
               <TrendChart
                 points={history}
                 events={events}
                 series={[
-                  { key: 'minVoltageV', label: '最低电压', color: '#8FC31F', min: 500, max: 900 },
-                  { key: 'maxLoadRatio', label: '最大负载', color: '#ffb454', min: 0, max: 1 },
+                  { key: 'minVoltageV', label: '最低电压', color: '#8FC31F', min: 500, max: 900, unit: 'V', axis: 'left' },
+                  { key: 'maxLoadRatio', label: '最大负载', color: '#ffb454', min: 0, max: 1, unit: 'p.u.', axis: 'right' },
                 ]}
               />
             </TrendPanel>
-            <TrendPanel title="功率与能量" subtitle="牵引功率 / 线路损耗 / 再生浪费">
+            <TrendPanel title="功率与能量" subtitle="正值为整流供电，负值为回馈上网（kW）">
               <TrendChart
                 points={history}
                 events={events}
                 series={[
-                  { key: 'totalSubstationPowerKw', label: '牵引功率', color: '#58a6ff' },
-                  { key: 'lossesKw', label: '线路损耗', color: '#8ba0bb' },
-                  { key: 'wastedRegenKw', label: '再生浪费', color: '#ff453a' },
+                  { key: 'netSubstationPowerKw', label: '变电所净功率', color: '#58a6ff', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'rectifierPowerKw', label: '整流输入', color: '#8FC31F', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'feedbackPowerKw', label: '回馈输出(-)', color: '#b57cff', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'lossesKw', label: '线路损耗', color: '#8ba0bb', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'wastedRegenKw', label: '再生浪费', color: '#ff453a', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
                 ]}
               />
             </TrendPanel>
           </section>
 
-          <section className="grid grid-cols-[1.2fr_1fr] gap-3">
+          <section className="grid grid-cols-1 lg:grid-cols-[1.2fr_1fr] gap-3">
             <DataTable
               title="牵引所潮流"
               columns={['设备编号', '电压/V', '电流/A', '功率/kW', '负载率', '状态']}
@@ -277,6 +318,34 @@ export default function PowerSystemView() {
                 item.voltageLevel,
               ])}
               statusColumn={5}
+            />
+          </section>
+          <section className="grid grid-cols-1 lg:grid-cols-[1fr_1.25fr] gap-3">
+            <DataTable
+              title="接触轨分段潮流（正值指向公里标增大方向）"
+              columns={['分段', '方向', '电流/A', '功率/kW', '负载率', '状态']}
+              rows={contactRailFlows.map((item) => [
+                item.sectionId,
+                item.direction,
+                `${item.currentA >= 0 ? '+' : ''}${fmt(item.currentA, 0)}`,
+                `${item.powerKw >= 0 ? '+' : ''}${fmt(item.powerKw, 1)}`,
+                `${fmt(item.loadRatio * 100, 1)}%`,
+                item.status,
+              ])}
+              statusColumn={5}
+            />
+            <DataTable
+              title="再生能量路径"
+              columns={['源列车', '去向', '汇点', '生成/kW', '送达/kW', '损耗/kW', '路径电流/A']}
+              rows={(regen?.paths ?? []).map((item) => [
+                item.sourceTrainId,
+                item.sinkType,
+                item.sinkId,
+                fmt(item.generatedKw, 1),
+                fmt(item.deliveredKw, 1),
+                fmt(item.lossesKw, 2),
+                fmt(item.currentA, 1),
+              ])}
             />
           </section>
         </main>
@@ -423,22 +492,41 @@ function Readout({ label, value, color }: { label: string; value: string; color:
 function TopologyDiagram({
   substations,
   trainVoltages,
+  contactRailSections,
+  contactRailFlows,
   firstMileage,
   span,
 }: {
   substations: MergedSubstation[];
   trainVoltages: TrainVoltageState[];
+  contactRailSections: PowerTopologyContactRailSection[];
+  contactRailFlows: ContactRailPowerFlowState[];
   firstMileage: number;
   span: number;
 }) {
   const xOf = (mileageM: number) => 55 + ((mileageM - firstMileage) / span) * 1090;
+  const flowById = new Map(contactRailFlows.map((item) => [item.sectionId, item]));
   return (
     <div className="relative h-[270px] border border-[#172436] bg-[#07101b] overflow-hidden">
       <svg viewBox="0 0 1200 270" className="w-full h-full" preserveAspectRatio="none">
-        <line x1="55" y1="112" x2="1145" y2="112" stroke="#8FC31F" strokeWidth="5" strokeLinecap="round" />
+        <line x1="55" y1="112" x2="1145" y2="112" stroke="#24374c" strokeWidth="5" strokeLinecap="round" />
         <line x1="55" y1="148" x2="1145" y2="148" stroke="#2b3c52" strokeWidth="3" strokeLinecap="round" />
         <text x="55" y="236" fill="#52647b" fontSize="12" fontFamily="monospace">K{fmt(firstMileage / 1000, 3)}</text>
         <text x="1070" y="236" fill="#52647b" fontSize="12" fontFamily="monospace">K{fmt((firstMileage + span) / 1000, 3)}</text>
+        {contactRailSections.filter((item) => item.direction === 'UP').map((section) => {
+          const flow = flowById.get(section.sectionId);
+          const color = flow?.status === 'DEENERGIZED' ? '#ff453a' : flow?.status === 'OVERLOAD' ? '#ffb454' : '#8FC31F';
+          const x1 = xOf(section.fromMileageM);
+          const x2 = xOf(section.toMileageM);
+          return (
+            <g key={section.sectionId}>
+              <line x1={x1} y1="112" x2={x2} y2="112" stroke={color} strokeWidth="5" />
+              <text x={(x1 + x2) / 2} y="101" textAnchor="middle" fill={color} fontSize="8" fontFamily="monospace">
+                {flow ? `${flow.currentA >= 0 ? '+' : ''}${fmt(flow.currentA, 0)} A` : '-- A'}
+              </text>
+            </g>
+          );
+        })}
         {substations.map((item) => {
           const x = xOf(item.mileageM);
           const statusColor = STATUS_COLOR[item.status ?? 'IN_SERVICE'] ?? 'var(--cyan)';
@@ -487,7 +575,15 @@ function TrendChart({
 }: {
   points: HistoryPoint[];
   events: EventPoint[];
-  series: Array<{ key: keyof HistoryPoint; label: string; color: string; min?: number; max?: number }>;
+  series: Array<{
+    key: keyof HistoryPoint;
+    label: string;
+    color: string;
+    min?: number;
+    max?: number;
+    unit?: string;
+    axis?: 'left' | 'right';
+  }>;
 }) {
   const width = 520;
   const height = 180;
@@ -495,12 +591,51 @@ function TrendChart({
   const firstTick = points[0]?.tick ?? 0;
   const lastTick = points[points.length - 1]?.tick ?? firstTick + 1;
   const tickRange = Math.max(lastTick - firstTick, 1);
+  const leftAxis = series.find((item) => item.axis !== 'right') ?? series[0];
+  const rightAxis = series.find((item) => item.axis === 'right');
+  const axisRange = (item: (typeof series)[number]) => {
+    const values = points.map((point) => Number(point[item.key] ?? 0));
+    const min = item.min ?? Math.min(...values, 0);
+    const max = item.max ?? Math.max(...values, 1);
+    return { min, max, range: Math.max(max - min, 1e-6) };
+  };
+  const leftRange = axisRange(leftAxis);
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[180px]">
       <rect x="0" y="0" width={width} height={height} fill="#07101b" stroke="#172436" />
       {[0.25, 0.5, 0.75].map((ratio) => (
         <line key={ratio} x1={pad} x2={width - pad} y1={pad + ratio * (height - pad * 2)} y2={pad + ratio * (height - pad * 2)} stroke="#172436" strokeDasharray="4 6" />
       ))}
+      {[0, 0.5, 1].map((ratio) => {
+        const y = pad + ratio * (height - pad * 2);
+        const leftValue = leftRange.max - ratio * leftRange.range;
+        const rightRange = rightAxis ? axisRange(rightAxis) : null;
+        const rightValue = rightRange ? rightRange.max - ratio * rightRange.range : null;
+        return (
+          <g key={`axis-${ratio}`}>
+            <text x="3" y={y + 3} fill="#61758e" fontSize="8" fontFamily="monospace">
+              {fmt(leftValue, Math.abs(leftValue) < 10 ? 1 : 0)}
+            </text>
+            {rightValue !== null && (
+              <text x={width - 3} y={y + 3} textAnchor="end" fill="#61758e" fontSize="8" fontFamily="monospace">
+                {fmt(rightValue, 1)}
+              </text>
+            )}
+          </g>
+        );
+      })}
+      <text x={pad} y="12" fill={leftAxis.color} fontSize="8" fontFamily="monospace">{leftAxis.unit ?? ''}</text>
+      {rightAxis && <text x={width - pad} y="12" textAnchor="end" fill={rightAxis.color} fontSize="8" fontFamily="monospace">{rightAxis.unit ?? ''}</text>}
+      {leftRange.min < 0 && leftRange.max > 0 && (
+        <line
+          x1={pad}
+          x2={width - pad}
+          y1={height - pad - ((0 - leftRange.min) / leftRange.range) * (height - pad * 2)}
+          y2={height - pad - ((0 - leftRange.min) / leftRange.range) * (height - pad * 2)}
+          stroke="#52647b"
+          strokeWidth="1"
+        />
+      )}
       {series.map((item) => {
         const values = points.map((point) => Number(point[item.key] ?? 0));
         const min = item.min ?? Math.min(...values, 0);
@@ -523,9 +658,16 @@ function TrendChart({
           </g>
         );
       })}
-      <g transform={`translate(${pad}, ${height - 8})`}>
+      <g transform={`translate(${pad}, ${height - 13})`}>
         {series.map((item, index) => (
-          <text key={item.label} x={index * 88} y="0" fill={item.color} fontSize="10" fontFamily="monospace">{item.label}</text>
+          <text
+            key={item.label}
+            x={(index % 3) * 158}
+            y={Math.floor(index / 3) * 11}
+            fill={item.color}
+            fontSize="9"
+            fontFamily="monospace"
+          >{item.label}</text>
         ))}
       </g>
     </svg>

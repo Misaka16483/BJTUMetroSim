@@ -25,6 +25,23 @@ class VehicleModelDataTests(unittest.TestCase):
         config = VehicleConfig.for_load("T001", onboard_pax=500)
         self.assertEqual(config.mass_kg, 225_000.0 + 500 * 65.0)
 
+    def test_pantograph_offsets_must_be_inside_train(self) -> None:
+        with self.assertRaisesRegex(ValueError, "pantograph offset"):
+            VehicleConfig(pantograph_offsets_from_head_m=(119.0,))
+
+    def test_user_formation_derives_collection_point_offsets(self) -> None:
+        config = VehicleConfig.from_user_config(
+            "T001",
+            {
+                "formation": "Tc-M-M-Tc",
+                "headCarLengthM": 20.0,
+                "middleCarLengthM": 19.0,
+                "carMassesKg": [38_000.0, 36_000.0, 36_000.0, 38_000.0],
+            },
+        )
+        self.assertEqual(config.train_length_m, 78.0)
+        self.assertEqual(config.pantograph_offsets_from_head_m, (19.5, 58.5))
+
     def test_teacher_curve_reduces_traction_capacity_at_high_speed(self) -> None:
         drive = TractionDriveModel(VehicleConfig())
         self.assertGreater(drive.traction_capacity_n(2.0), drive.traction_capacity_n(22.22))

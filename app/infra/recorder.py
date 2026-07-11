@@ -231,6 +231,24 @@ class RunRecorder:
                 detail_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(run_id) REFERENCES runs(id)
             );
+            CREATE TABLE IF NOT EXISTS regen_path_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                source_train_id TEXT NOT NULL,
+                sink_type TEXT NOT NULL,
+                sink_id TEXT NOT NULL,
+                via_substation_id TEXT,
+                source_feeder_id TEXT,
+                sink_feeder_id TEXT,
+                generated_kw REAL NOT NULL,
+                delivered_kw REAL NOT NULL,
+                losses_kw REAL NOT NULL,
+                current_a REAL NOT NULL,
+                path_resistance_ohm REAL NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
             CREATE TABLE IF NOT EXISTS power_solver_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id INTEGER NOT NULL,
@@ -277,6 +295,8 @@ class RunRecorder:
                 ON substation_power_records(run_id, substation_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_regen_energy_records_time
                 ON regen_energy_records(run_id, sim_time_ms);
+            CREATE INDEX IF NOT EXISTS idx_regen_path_records_time
+                ON regen_path_records(run_id, sim_time_ms, source_train_id);
             CREATE INDEX IF NOT EXISTS idx_power_solver_records_time
                 ON power_solver_records(run_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_power_command_records_time
@@ -332,7 +352,7 @@ class RunRecorder:
                     item["overloadCurrentA"],
                     item.get("efsCapacityKw", 0.0),
                     item.get("status", "IN_SERVICE"),
-                    quality,
+                    item.get("quality", quality),
                     json.dumps(item, ensure_ascii=False),
                 ),
             )
@@ -370,7 +390,7 @@ class RunRecorder:
                     item["continuousCurrentA"],
                     item["shortTimeCurrentA"],
                     item.get("status", "CLOSED"),
-                    quality,
+                    item.get("quality", quality),
                     json.dumps(item, ensure_ascii=False),
                 ),
             )
@@ -401,7 +421,7 @@ class RunRecorder:
                     item["resistanceOhmPerKm"],
                     item["currentLimitA"],
                     item.get("status", "ENERGIZED"),
-                    quality,
+                    item.get("quality", quality),
                     json.dumps(item, ensure_ascii=False),
                 ),
             )
@@ -430,7 +450,7 @@ class RunRecorder:
                     item["toMileageM"],
                     item["resistanceOhmPerKm"],
                     item.get("crossBondingGroup", "V0"),
-                    quality,
+                    item.get("quality", quality),
                     json.dumps(item, ensure_ascii=False),
                 ),
             )
@@ -464,7 +484,7 @@ class RunRecorder:
                     item["normalState"],
                     item["currentState"],
                     1 if item.get("remoteControllable", True) else 0,
-                    quality,
+                    item.get("quality", quality),
                     json.dumps(item, ensure_ascii=False),
                 ),
             )
@@ -815,6 +835,52 @@ class RunRecorder:
         )
         self.connection.commit()
 
+    def record_regen_path(
+        self,
+        run_id: int,
+        *,
+        sim_time_ms: int,
+        source_train_id: str,
+        sink_type: str,
+        sink_id: str,
+        via_substation_id: str | None,
+        source_feeder_id: str | None,
+        sink_feeder_id: str | None,
+        generated_kw: float,
+        delivered_kw: float,
+        losses_kw: float,
+        current_a: float,
+        path_resistance_ohm: float,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO regen_path_records(
+                run_id, sim_time_ms, source_train_id, sink_type, sink_id,
+                via_substation_id, source_feeder_id, sink_feeder_id,
+                generated_kw, delivered_kw, losses_kw, current_a,
+                path_resistance_ohm, detail_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                sim_time_ms,
+                source_train_id,
+                sink_type,
+                sink_id,
+                via_substation_id,
+                source_feeder_id,
+                sink_feeder_id,
+                generated_kw,
+                delivered_kw,
+                losses_kw,
+                current_a,
+                path_resistance_ohm,
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+        self.connection.commit()
+
     def record_power_command(
         self,
         run_id: int,
@@ -862,6 +928,30 @@ class RunRecorder:
             for row in rows
         ]
 
+    def replay_power_commands(self, run_id: int) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT command_id, sim_time_ms, command_type, status, payload_json, error
+            FROM power_command_records
+            WHERE run_id = ?
+            ORDER BY sim_time_ms, id
+            """,
+            (run_id,),
+        ).fetchall()
+        commands: list[dict[str, Any]] = []
+        for command_id, sim_time_ms, command_type, status, payload_json, error in rows:
+            payload = json.loads(payload_json)
+            commands.append({
+                "commandId": command_id,
+                "simTimeMs": sim_time_ms,
+                "commandType": command_type,
+                "status": status,
+                "requestPayload": payload.get("request", payload),
+                "result": payload.get("result", {}),
+                "error": error,
+            })
+        return commands
+
     def export_run(self, run_id: int) -> dict[str, Any]:
         run = self.connection.execute(
             "SELECT id, name, started_at, metadata_json FROM runs WHERE id = ?",
@@ -880,6 +970,7 @@ class RunRecorder:
             "train_voltage_records",
             "substation_power_records",
             "regen_energy_records",
+            "regen_path_records",
             "power_solver_records",
             "power_command_records",
         )

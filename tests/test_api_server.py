@@ -36,6 +36,9 @@ class ApiServerTests(unittest.TestCase):
         self.assertGreaterEqual(len(topology["substations"]), 10)
         self.assertGreaterEqual(len(topology["contactRailSections"]), 18)
         self.assertEqual(topology["quality"], "ENGINEERING_ESTIMATE")
+        self.assertEqual(topology["modelVersion"], "LINE9-DC750-V1.0")
+        self.assertTrue(topology["provenance"]["sources"])
+        self.assertTrue(topology["substations"][0]["parameterSources"])
 
     def test_member_d_demo_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

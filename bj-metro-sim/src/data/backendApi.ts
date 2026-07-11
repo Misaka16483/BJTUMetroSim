@@ -150,6 +150,11 @@ export interface SimTrainState {
   pathSegmentCount?: number;
   pathConstraintCount?: number;
   operationMode?: string;
+  trainLengthM: number;
+  headMileageM: number;
+  tailMileageM: number;
+  pantographMileagesM: number[];
+  spannedPowerSectionIds: string[];
 }
 
 export interface SimStationInfo {
@@ -207,15 +212,30 @@ export interface PowerTopologySubstation {
   overloadCurrentA: number;
   efsCapacityKw: number;
   status: string;
+  rectifierPowerKw: number;
+  feedbackPowerKw: number;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
 }
 
 export interface PowerTopology {
   lineId: string;
   nominalVoltageV: number;
   quality: string;
+  modelVersion: string;
+  provenance: {
+    sources: Array<{
+      sourceId: string;
+      description: string;
+      evidenceLevel: string;
+    }>;
+    parameterDocument: string;
+    limitations: string[];
+  };
   substations: PowerTopologySubstation[];
-  feeders: unknown[];
-  contactRailSections: unknown[];
+  feeders: PowerTopologyFeeder[];
+  contactRailSections: PowerTopologyContactRailSection[];
   returnRailSections?: unknown[];
   switches: unknown[];
 }
@@ -229,6 +249,41 @@ export interface PowerFeederState {
   powerKw: number;
   loadRatio: number;
   status: string;
+}
+
+export interface ContactRailPowerFlowState {
+  sectionId: string;
+  direction: string;
+  currentA: number;
+  powerKw: number;
+  loadRatio: number;
+  status: string;
+  rectifierPowerKw?: number;
+  feedbackPowerKw?: number;
+}
+
+export interface PowerTopologyFeeder {
+  feederId: string;
+  substationId: string;
+  direction: string;
+  side: string;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
+}
+
+export interface PowerTopologyContactRailSection {
+  sectionId: string;
+  direction: string;
+  fromMileageM: number;
+  toMileageM: number;
+  resistanceOhmPerKm: number;
+  currentLimitA: number;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
 }
 
 export interface TrainVoltageState {
@@ -249,12 +304,27 @@ export interface PowerNetworkState {
   simTimeMs?: number;
   substations: PowerSubstationState[];
   feeders: PowerFeederState[];
+  contactRailFlows?: ContactRailPowerFlowState[];
   trainVoltages: TrainVoltageState[];
   regen: {
     generatedKw: number;
     absorbedKw: number;
     feedbackKw: number;
     wastedKw: number;
+    transferLossesKw: number;
+    paths: Array<{
+      sourceTrainId: string;
+      sinkType: 'TRAIN' | 'SUBSTATION_FEEDBACK' | 'WASTE';
+      sinkId: string;
+      viaSubstationId: string | null;
+      sourceFeederId: string | null;
+      sinkFeederId: string | null;
+      generatedKw: number;
+      deliveredKw: number;
+      lossesKw: number;
+      currentA: number;
+      pathResistanceOhm: number;
+    }>;
   };
   lossesKw: number;
   solver?: {
@@ -281,6 +351,13 @@ export interface PowerNetworkState {
     status: string;
     error?: string;
   }>;
+  solverFailure?: {
+    type: 'POWER_SOLVER_FAILURE';
+    reasons: string[];
+    simTimeMs: number;
+    iterations: number;
+    powerBalanceErrorRatio: number;
+  } | null;
   alerts: Array<Record<string, unknown>>;
   source?: string;
   quality?: string;
@@ -391,6 +468,7 @@ export interface VehicleConfigPayload {
   maxTractionForceN?: number;
   maxServiceBrakeForceN?: number;
   emergencyBrakeForceN?: number;
+  pantographOffsetsFromHeadM?: number[];
 }
 
 export interface VehicleConfigResponse {
@@ -408,6 +486,7 @@ export interface VehicleConfigResponse {
     maxTractionForceN: number;
     maxServiceBrakeForceN: number;
     emergencyBrakeForceN: number;
+    pantographOffsetsFromHeadM: number[];
   };
 }
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.core.clock import SimulationClock
+from app.core.clock import ClockState, SimulationClock
 from app.core.message_bus import Envelope, MessageBus
 from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
@@ -97,6 +97,11 @@ class SimTrainState:
     regen_limit_ratio: float = 1.0
     power_limited_duration_sec: float = 0.0
     power_constraint_delay_sec: float = 0.0
+    train_length_m: float = 118.0
+    head_mileage_m: float = 0.0
+    tail_mileage_m: float = 0.0
+    pantograph_mileages_m: tuple[float, ...] = ()
+    spanned_power_section_ids: tuple[str, ...] = ()
     # ── profile 触发控制 ──
     _profile_triggered: bool = False
     _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
@@ -150,6 +155,11 @@ class SimTrainState:
             "powerLimitedDurationSec": round(self.power_limited_duration_sec, 3),
             "powerConstraintDelaySec": round(self.power_constraint_delay_sec, 3),
             "operationMode": self.operation_mode,
+            "trainLengthM": round(self.train_length_m, 3),
+            "headMileageM": round(self.head_mileage_m, 3),
+            "tailMileageM": round(self.tail_mileage_m, 3),
+            "pantographMileagesM": [round(value, 3) for value in self.pantograph_mileages_m],
+            "spannedPowerSectionIds": list(self.spanned_power_section_ids),
         }
 
 
@@ -171,6 +181,7 @@ class PowerCommand:
     command_id: str
     command_type: str
     payload: JsonDict
+    apply_at_sim_time_ms: int | None = None
 
 
 @dataclass
@@ -284,6 +295,7 @@ class SimulationEngine:
             if train.train_id == train_id:
                 train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
                 train.capacity_pax = 600
+                self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self._snapshot = self._build_snapshot()
         return vcfg
 
@@ -294,6 +306,7 @@ class SimulationEngine:
         for train in self.trains:
             if train.train_id == train_id:
                 train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
+                self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self._snapshot = self._build_snapshot()
         return vcfg
 
@@ -349,6 +362,7 @@ class SimulationEngine:
             auxiliary_power_kw=base.auxiliary_power_kw,
             nominal_line_voltage_v=base.nominal_line_voltage_v,
             parameter_quality=base.parameter_quality,
+            pantograph_offsets_from_head_m=base.pantograph_offsets_from_head_m,
         )
 
     def _manual_override(self, ato_cmd: ControlCommand, train_id: str) -> ControlCommand:
@@ -425,6 +439,7 @@ class SimulationEngine:
             self._vehicle_config_by_train[train_id] = vcfg
             train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
 
+        self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self.trains.append(train)
         self._snapshot = self._build_snapshot()
         return {"ok": True, "train": train.to_dict()}
@@ -465,6 +480,8 @@ class SimulationEngine:
             if self.scenario.auto_spawn_trains
             else []
         )
+        for train in self.trains:
+            self._train_power_geometry(train, self._make_vehicle_config(train.train_id, train.onboard_pax))
         self._snapshot = self._build_snapshot()
 
         if self.recorder is not None:
@@ -475,6 +492,14 @@ class SimulationEngine:
                     "lineId": self.scenario.line_id,
                     "startTimeMs": self.scenario.start_time_ms,
                     "trainCount": len(self.trains),
+                    "powerModelVersion": (
+                        self.power_service.network.model_version
+                        if self.power_service.network is not None else None
+                    ),
+                    "powerModelQuality": (
+                        self.power_service.network.quality
+                        if self.power_service.network is not None else None
+                    ),
                 },
             )
             if self.power_service.network is not None:
@@ -507,23 +532,45 @@ class SimulationEngine:
     def queue_power_command(self, command_type: str, payload: JsonDict) -> JsonDict:
         """Queue an external topology operation for deterministic application at a tick boundary."""
         with self._power_lock:
+            command_type = command_type.upper()
+            supported = {
+                "SUBSTATION_OUTAGE",
+                "SUBSTATION_RESTORE",
+                "OPERATE_SWITCH",
+                "SET_FEEDER_STATUS",
+                "SET_CONTACT_SECTION_STATUS",
+                "RESET_NETWORK",
+            }
+            if command_type not in supported:
+                raise ValueError("UNSUPPORTED_POWER_COMMAND")
             self._power_command_sequence += 1
+            apply_at = payload.get("applyAtSimTimeMs")
             command = PowerCommand(
                 command_id=f"PWR-CMD-{self._power_command_sequence:06d}",
                 command_type=command_type,
                 payload=dict(payload),
+                apply_at_sim_time_ms=int(apply_at) if apply_at is not None else None,
             )
             self._power_commands.append(command)
-            return {"commandId": command.command_id, "status": "QUEUED"}
+            return {
+                "commandId": command.command_id,
+                "status": "QUEUED",
+                "applyAtSimTimeMs": command.apply_at_sim_time_ms,
+            }
 
     def _apply_power_commands(self, sim_time_ms: int) -> None:
         with self._power_lock:
-            while self._power_commands:
+            pending_count = len(self._power_commands)
+            for _ in range(pending_count):
                 command = self._power_commands.popleft()
+                if command.apply_at_sim_time_ms is not None and command.apply_at_sim_time_ms > sim_time_ms:
+                    self._power_commands.append(command)
+                    continue
                 result: JsonDict = {
                     "commandId": command.command_id,
                     "commandType": command.command_type,
                     "simTimeMs": sim_time_ms,
+                    "requestPayload": dict(command.payload),
                 }
                 try:
                     if command.command_type == "SUBSTATION_OUTAGE":
@@ -531,6 +578,11 @@ class SimulationEngine:
                             str(command.payload["targetId"]),
                             big_bilateral=bool(command.payload.get("bigBilateral", True)),
                         )
+                    elif command.command_type == "SUBSTATION_RESTORE":
+                        network = self.power_service.network
+                        if network is None:
+                            raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
+                        result["data"] = network.restore_substation(str(command.payload["targetId"]))
                     elif command.command_type == "OPERATE_SWITCH":
                         switch = self.operate_power_switch(
                             str(command.payload["switchId"]),
@@ -540,6 +592,24 @@ class SimulationEngine:
                             "switchId": switch.switch_id,
                             "currentState": switch.current_state,
                         }
+                    elif command.command_type == "SET_FEEDER_STATUS":
+                        network = self.power_service.network
+                        if network is None:
+                            raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
+                        feeder = network.set_feeder_status(
+                            str(command.payload["feederId"]),
+                            str(command.payload["status"]),
+                        )
+                        result["data"] = {"feederId": feeder.feeder_id, "status": feeder.status}
+                    elif command.command_type == "SET_CONTACT_SECTION_STATUS":
+                        network = self.power_service.network
+                        if network is None:
+                            raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
+                        section = network.set_contact_section_status(
+                            str(command.payload["sectionId"]),
+                            str(command.payload["status"]),
+                        )
+                        result["data"] = {"sectionId": section.section_id, "status": section.status}
                     elif command.command_type == "RESET_NETWORK":
                         self.power_service = self._build_power_service()
                         self._last_power_states = self._empty_power_states()
@@ -551,7 +621,49 @@ class SimulationEngine:
                     result["status"] = "REJECTED"
                     result["error"] = str(exc)
                 self._power_command_results.append(result)
+                if self.recorder is not None and self._run_id is not None:
+                    self.recorder.record_power_command(
+                        self._run_id,
+                        command_id=command.command_id,
+                        sim_time_ms=sim_time_ms,
+                        command_type=command.command_type,
+                        status=str(result["status"]),
+                        payload={"request": command.payload, "result": result.get("data", {})},
+                        error=result.get("error"),
+                    )
+                    self._recorded_power_command_ids.add(command.command_id)
             self._power_command_results = self._power_command_results[-20:]
+
+    def power_command_status(self, command_id: str | None = None) -> list[JsonDict]:
+        with self._power_lock:
+            queued = [
+                {
+                    "commandId": item.command_id,
+                    "commandType": item.command_type,
+                    "status": "QUEUED",
+                    "applyAtSimTimeMs": item.apply_at_sim_time_ms,
+                    "requestPayload": dict(item.payload),
+                }
+                for item in self._power_commands
+            ]
+            items = [*self._power_command_results, *queued]
+            if command_id is not None:
+                items = [item for item in items if item["commandId"] == command_id]
+            return items
+
+    def replay_power_commands(self, records: list[JsonDict], *, base_sim_time_ms: int | None = None) -> list[JsonDict]:
+        """Queue an exported command sequence while preserving relative timing."""
+        if not records:
+            return []
+        ordered = sorted(records, key=lambda item: (int(item.get("simTimeMs", 0)), str(item.get("commandId", ""))))
+        first_time = int(ordered[0].get("simTimeMs", 0))
+        base_time = self._absolute_sim_time_ms() if base_sim_time_ms is None else int(base_sim_time_ms)
+        queued: list[JsonDict] = []
+        for item in ordered:
+            payload = dict(item.get("requestPayload") or item.get("payload") or {})
+            payload["applyAtSimTimeMs"] = base_time + int(item.get("simTimeMs", 0)) - first_time
+            queued.append(self.queue_power_command(str(item["commandType"]), payload))
+        return queued
 
     def apply_power_substation_outage(
         self,
@@ -644,6 +756,18 @@ class SimulationEngine:
         # 3) 同时求解全部列车负荷，得到本tick电压、限牵和再生能力。
         power_states = self._update_power(sim_time_ms, prepared_steps)
         self._last_power_states = power_states
+        solver_failure = self.power_service.last_solver_failure
+        if solver_failure is not None:
+            if self.clock.state == ClockState.RUNNING:
+                self.clock.pause()
+            self.bus.publish("power.solver_failure", solver_failure, source="engine", tick=tick)
+            if self.recorder is not None and self._run_id is not None:
+                self.recorder.record_event(
+                    self._run_id,
+                    "power.solver_failure",
+                    solver_failure,
+                    tick=tick,
+                )
 
         train_power_flows = {
             item.train_id: item
@@ -726,7 +850,13 @@ class SimulationEngine:
                         traction_limit_ratio=train_flow.traction_limit_ratio,
                         regen_limit_ratio=train_flow.regen_limit_ratio,
                         voltage_level=train_flow.voltage_level,
-                        detail={"tick": tick},
+                        detail={
+                            "tick": tick,
+                            "headMileageM": train_flow.head_mileage_m,
+                            "tailMileageM": train_flow.tail_mileage_m,
+                            "pantographMileagesM": list(train_flow.pantograph_mileages_m),
+                            "spannedPowerSectionIds": list(train_flow.spanned_power_section_ids),
+                        },
                     )
                 for substation_flow in network_snapshot.substations:
                     self.recorder.record_substation_power(
@@ -748,8 +878,29 @@ class SimulationEngine:
                     absorbed_regen_kw=network_snapshot.absorbed_regen_kw,
                     feedback_regen_kw=network_snapshot.feedback_regen_kw,
                     wasted_regen_kw=network_snapshot.wasted_regen_kw,
-                    detail={"tick": tick, "alerts": network_snapshot.alerts},
+                    detail={
+                        "tick": tick,
+                        "alerts": network_snapshot.alerts,
+                        "transferLossesKw": network_snapshot.regen_transfer_losses_kw,
+                    },
                 )
+                for path in network_snapshot.regen_paths:
+                    self.recorder.record_regen_path(
+                        self._run_id,
+                        sim_time_ms=sim_time_ms,
+                        source_train_id=path.source_train_id,
+                        sink_type=path.sink_type,
+                        sink_id=path.sink_id,
+                        via_substation_id=path.via_substation_id,
+                        source_feeder_id=path.source_feeder_id,
+                        sink_feeder_id=path.sink_feeder_id,
+                        generated_kw=path.generated_kw,
+                        delivered_kw=path.delivered_kw,
+                        losses_kw=path.losses_kw,
+                        current_a=path.current_a,
+                        path_resistance_ohm=path.path_resistance_ohm,
+                        detail={"tick": tick},
+                    )
                 self.recorder.record_power_solver(
                     self._run_id,
                     sim_time_ms=sim_time_ms,
@@ -770,10 +921,22 @@ class SimulationEngine:
                     sim_time_ms=int(command_result["simTimeMs"]),
                     command_type=str(command_result["commandType"]),
                     status=str(command_result["status"]),
-                    payload=command_result.get("data", {}),
+                    payload={
+                        "request": command_result.get("requestPayload", {}),
+                        "result": command_result.get("data", {}),
+                    },
                     error=command_result.get("error"),
                 )
                 self._recorded_power_command_ids.add(command_id)
+            if network_snapshot is not None:
+                for alert in network_snapshot.alerts:
+                    if str(alert.get("type", "")).endswith("_PROTECTION_TRIP"):
+                        self.recorder.record_event(
+                            self._run_id,
+                            "power.protection_trip",
+                            alert,
+                            tick=tick,
+                        )
 
         # 8) 更新快照
         self._snapshot = self._build_snapshot()
@@ -1544,7 +1707,7 @@ class SimulationEngine:
                 brake_force_n = prepared.demand.candidate_electric_brake_force_n
                 train.mass_kg = prepared.vehicle_config.mass_kg
             else:
-                vehicle = VehicleConfig.for_load(train.train_id, train.onboard_pax)
+                vehicle = self._make_vehicle_config(train.train_id, train.onboard_pax)
                 command = ControlCommand(
                     train_id=train.train_id,
                     traction_percent=train.traction_percent if train.speed_mps > 0 else 0.0,
@@ -1555,6 +1718,10 @@ class SimulationEngine:
                 traction_force_n = demand.traction_force_n
                 brake_force_n = demand.candidate_electric_brake_force_n
                 train.mass_kg = vehicle.mass_kg
+            head_mileage_m, tail_mileage_m, pantograph_mileages_m, spanned_sections = self._train_power_geometry(
+                train,
+                prepared.vehicle_config if prepared is not None else vehicle,
+            )
             requests.append(
                 TrainPowerRequest(
                     train_id=train.train_id,
@@ -1562,9 +1729,12 @@ class SimulationEngine:
                     speed_mps=train.speed_mps,
                     traction_force_n=traction_force_n,
                     brake_force_n=brake_force_n,
-                    position_m=self._train_mileage_m(train),
+                    position_m=sum(pantograph_mileages_m) / len(pantograph_mileages_m),
                     direction=train.direction,
                     aux_power_kw=150.0 if train.phase not in {IDLE, DWELLING} else 80.0,
+                    head_mileage_m=head_mileage_m,
+                    tail_mileage_m=tail_mileage_m,
+                    pantograph_mileages_m=pantograph_mileages_m,
                 )
             )
         with self._power_lock:
@@ -1824,6 +1994,43 @@ class SimulationEngine:
         next_m = self._station_distances[next_idx]
         return current_m + (next_m - current_m) * max(0.0, min(1.0, train.segment_progress))
 
+    def _train_power_geometry(
+        self,
+        train: SimTrainState,
+        vehicle: VehicleConfig,
+    ) -> tuple[float, float, tuple[float, ...], tuple[str, ...]]:
+        """Derive head, tail, collection points and overlapped supply sections."""
+        head_mileage_m = self._train_mileage_m(train)
+        direction_sign = 1.0 if train.direction == "UP" else -1.0
+        tail_mileage_m = head_mileage_m - direction_sign * vehicle.train_length_m
+        network = self.power_service.network
+        if network is not None:
+            lower_bound = network.ordered_substations[0].mileage_m
+            upper_bound = network.ordered_substations[-1].mileage_m
+        else:
+            lower_bound = min(self._station_distances, default=0.0)
+            upper_bound = max(self._station_distances, default=head_mileage_m)
+        pantograph_mileages_m = tuple(
+            min(
+                upper_bound,
+                max(lower_bound, head_mileage_m - direction_sign * offset_m),
+            )
+            for offset_m in vehicle.pantograph_offsets_from_head_m
+        )
+        if network is not None:
+            spanned_sections = tuple(
+                item.section_id
+                for item in network.sections_spanned(head_mileage_m, tail_mileage_m, train.direction)
+            )
+        else:
+            spanned_sections = ()
+        train.train_length_m = vehicle.train_length_m
+        train.head_mileage_m = head_mileage_m
+        train.tail_mileage_m = tail_mileage_m
+        train.pantograph_mileages_m = pantograph_mileages_m
+        train.spanned_power_section_ids = spanned_sections
+        return head_mileage_m, tail_mileage_m, pantograph_mileages_m, spanned_sections
+
     def _traction_limit_for_train(self, train: SimTrainState) -> float:
         state = self._last_power_states.get(self._power_section_for_train(train))
         if state is None:
@@ -1883,6 +2090,7 @@ class SimulationEngine:
                 result["contactRailSections"] = topology["contactRailSections"]
                 result["returnRailSections"] = topology["returnRailSections"]
             result["commandResults"] = list(self._power_command_results)
+            result["solverFailure"] = self.power_service.last_solver_failure
             return result
 
     def export_current_run(self) -> JsonDict:
@@ -1930,7 +2138,17 @@ class SimulationEngine:
             ]
         line_scope = None
         if scenario.line_scope_file:
-            line_scope = LineScope.load(scenario_path.parent / scenario.line_scope_file)
+            scope_candidates = [
+                scenario_path.parent / scenario.line_scope_file,
+                Path(line_map_path).parent.parent / "scenarios" / scenario.line_scope_file,
+            ]
+            scope_path = next((path for path in scope_candidates if path.exists()), None)
+            if scope_path is None:
+                searched = ", ".join(str(path) for path in scope_candidates)
+                raise FileNotFoundError(
+                    f"line scope file {scenario.line_scope_file} not found; searched: {searched}"
+                )
+            line_scope = LineScope.load(scope_path)
         return cls(
             scenario,
             line_map,

@@ -93,6 +93,67 @@ class DCTractionPowerFlowSolverTests(unittest.TestCase):
         self.assertGreater(snapshot.generated_regen_kw, 0.0)
         self.assertGreater(snapshot.absorbed_regen_kw, 0.0)
         self.assertLess(snapshot.wasted_regen_kw, snapshot.generated_regen_kw)
+        transfer = next(item for item in snapshot.regen_paths if item.sink_type == "TRAIN")
+        self.assertEqual(transfer.source_train_id, "T2")
+        self.assertEqual(transfer.sink_id, "T1")
+        self.assertAlmostEqual(transfer.generated_kw, transfer.delivered_kw + transfer.losses_kw, places=9)
+        traction = next(item for item in snapshot.trains if item.train_id == "T1")
+        self.assertAlmostEqual(
+            traction.voltage_v * traction.current_a / 1000.0,
+            traction.requested_power_kw,
+            delta=traction.requested_power_kw * 0.01,
+        )
+
+    def test_regen_is_not_absorbed_across_disconnected_supply_paths(self) -> None:
+        network = _network()
+        solver = DCTractionPowerFlowSolver(network)
+
+        snapshot = solver.solve(
+            [
+                TrainElectricalLoad("TRACTION", "UP", 2_200.0, 18.0, traction_force_n=95_000.0, aux_power_kw=60.0),
+                TrainElectricalLoad("REGEN", "UP", 13_000.0, 18.0, brake_force_n=80_000.0, aux_power_kw=60.0),
+            ],
+            dt_sec=1.0,
+        )
+
+        self.assertEqual(snapshot.absorbed_regen_kw, 0.0)
+        self.assertEqual(snapshot.feedback_regen_kw, 0.0)
+        self.assertAlmostEqual(snapshot.wasted_regen_kw, snapshot.generated_regen_kw, places=9)
+        self.assertEqual({item.sink_type for item in snapshot.regen_paths}, {"WASTE"})
+
+    def test_tie_switch_changes_regen_connectivity(self) -> None:
+        network = _network()
+        loads = [
+            TrainElectricalLoad("TRACTION", "UP", 700.0, 18.0, traction_force_n=95_000.0, aux_power_kw=60.0),
+            TrainElectricalLoad("REGEN", "UP", 4_000.0, 18.0, brake_force_n=80_000.0, aux_power_kw=60.0),
+        ]
+        isolated = DCTractionPowerFlowSolver(network).solve(loads, dt_sec=1.0)
+        network.operate_switch("SW-TIE-0903", "CLOSED")
+        connected = DCTractionPowerFlowSolver(network).solve(loads, dt_sec=1.0)
+
+        self.assertEqual(isolated.absorbed_regen_kw, 0.0)
+        self.assertGreater(connected.absorbed_regen_kw, 0.0)
+        self.assertTrue(any(item.sink_type == "TRAIN" for item in connected.regen_paths))
+
+    def test_reachable_feedback_is_assigned_to_device_and_signed_path(self) -> None:
+        network = _network()
+        solver = DCTractionPowerFlowSolver(network)
+
+        snapshot = solver.solve(
+            [TrainElectricalLoad("REGEN", "UP", 700.0, 18.0, brake_force_n=80_000.0, aux_power_kw=60.0)],
+            dt_sec=1.0,
+        )
+
+        feedback = next(item for item in snapshot.regen_paths if item.sink_type == "SUBSTATION_FEEDBACK")
+        self.assertEqual(feedback.sink_id, "TS-0901")
+        self.assertAlmostEqual(feedback.generated_kw, feedback.delivered_kw + feedback.losses_kw, places=9)
+        substation = next(item for item in snapshot.substations if item.substation_id == "TS-0901")
+        feeder = next(item for item in snapshot.feeders if item.feeder_id == feedback.source_feeder_id)
+        self.assertLess(substation.current_a, 0.0)
+        self.assertLess(substation.power_kw, 0.0)
+        self.assertGreater(substation.feedback_power_kw, 0.0)
+        self.assertLess(feeder.current_a, 0.0)
+        self.assertLess(feeder.power_kw, 0.0)
 
     def test_regen_without_absorber_is_limited_and_wasted(self) -> None:
         network = _network()
@@ -124,6 +185,35 @@ class DCTractionPowerFlowSolverTests(unittest.TestCase):
         )
 
         self.assertTrue(any(item["type"] == "SUBSTATION_OUTAGE" and item["targetId"] == "TS-0905" for item in snapshot.alerts))
+
+    def test_deenergized_contact_section_isolates_positive_train_load(self) -> None:
+        network = _network()
+        network.set_contact_section_status("CR-09-02-UP", "DEENERGIZED")
+        solver = DCTractionPowerFlowSolver(network)
+
+        snapshot = solver.solve(
+            [TrainElectricalLoad("T1", "UP", 2_400.0, 18.0, traction_force_n=95_000.0, aux_power_kw=60.0)],
+            dt_sec=1.0,
+        )
+
+        train = snapshot.trains[0]
+        self.assertEqual(train.voltage_v, 0.0)
+        self.assertEqual(train.traction_limit_ratio, 0.0)
+        self.assertTrue(any(item["type"] == "POWER_SECTION_ISOLATED" for item in snapshot.alerts))
+        section = next(item for item in snapshot.contact_rail_flows if item.section_id == "CR-09-02-UP")
+        self.assertEqual(section.status, "DEENERGIZED")
+
+    def test_contact_rail_flow_has_signed_current_and_dimensioned_power(self) -> None:
+        network = _network()
+        snapshot = DCTractionPowerFlowSolver(network).solve(
+            [TrainElectricalLoad("T1", "UP", 1_800.0, 18.0, traction_force_n=95_000.0, aux_power_kw=60.0)],
+            dt_sec=1.0,
+        )
+
+        section = next(item for item in snapshot.contact_rail_flows if item.section_id == "CR-09-02-UP")
+        self.assertNotEqual(section.current_a, 0.0)
+        self.assertAlmostEqual(section.power_kw, 750.0 * section.current_a / 1000.0, places=9)
+        self.assertGreater(section.load_ratio, 0.0)
 
 
 if __name__ == "__main__":
