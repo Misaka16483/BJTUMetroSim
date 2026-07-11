@@ -326,4 +326,43 @@ class StationService:
         return result, plan
 
 
+# ── 兼容旧版 member_d_demo 接口 ──
+
+@dataclass
+class PassengerDemandProfile:
+    """旧版客流需求配置（兼容 member_d_demo）。"""
+    station_code: str
+    direction: str
+    start_time_s: int
+    end_time_s: int
+    hourly_arrival_rate: float
+    alighting_ratio: float = 0.0
+
+
+class PassengerFlowGenerator(PoissonPassengerFlowGenerator):
+    """
+    旧版客流生成器兼容封装。
+    member_d_demo 仍通过此接口创建 StationService，内部转译为 FlowScenario。
+    """
+
+    def __init__(self, profiles: list[PassengerDemandProfile]) -> None:
+        scenario = FlowScenario(
+            scenario_id="legacy_member_d",
+            description="Legacy member_d demo flow",
+            day_type=DayType.NORMAL_WEEKDAY,
+            stations=[
+                StationFlowConfig(
+                    station_id=p.station_code,
+                    direction=p.direction,
+                    start_time_sec=p.start_time_s,
+                    end_time_sec=p.end_time_s,
+                    base_arrival_rate_pph=p.hourly_arrival_rate,
+                    alighting_ratio=p.alighting_ratio,
+                )
+                for p in profiles
+            ],
+        )
+        super().__init__(scenario)
+
+
 
