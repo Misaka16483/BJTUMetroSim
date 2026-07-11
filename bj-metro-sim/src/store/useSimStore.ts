@@ -73,6 +73,11 @@ interface SimState {
   speedHistoryByTrain: Record<string, SpeedHistoryEntry[]>;
   speedTimeHistoryByTrain: Record<string, SpeedTimeEntry[]>;
 
+  // 每车按站间运行分段的曲线档案（切车后仍持续采集）
+  speedRunsByTrain: Record<string, SpeedRunRecord[]>;
+  activeSpeedRunIdByTrain: Record<string, string>;
+  viewedSpeedRunIdByTrain: Record<string, string | null>;
+
   // 选中的列车ID
   selectedTrainId: string | null;
 
@@ -119,6 +124,12 @@ interface SimState {
   setSpeed: (speed: number) => void;
   setDayType: (dayType: 'weekday' | 'friday' | 'saturday' | 'sunday') => void;
   selectTrain: (id: string | null) => void;
+  selectSpeedRun: (trainId: string, runId: string | null) => void;
+  applySpeedProfiles: (
+    profiles: Record<string, SpeedProfilePoint[]>,
+    profileMeta?: Record<string, SpeedProfileMeta>,
+    expectedActiveRunIds?: Record<string, string>,
+  ) => void;
   setSelectedStationCode: (code: string | null) => void;
   tick: () => void;
 
@@ -289,6 +300,25 @@ type SpeedHistoryEntry = {
 
 type SpeedTimeEntry = { elapsedS: number; speedMps: number };
 
+export type SpeedRunRecord = {
+  id: string;
+  intervalKey: string;
+  trainId: string;
+  direction: 'UP' | 'DOWN';
+  startStation: string;
+  endStation: string;
+  startedAtSimTime: string;
+  startedAtSimTimeMs: number;
+  endedAtSimTime?: string;
+  completed: boolean;
+  pathTotalLengthM: number;
+  positionHistory: SpeedHistoryEntry[];
+  timeHistory: SpeedTimeEntry[];
+  profile: SpeedProfilePoint[];
+  profileMeta: SpeedProfileMeta | null;
+  lastSampleTick: number;
+};
+
 const DEF_TRAIN_COLORS = [
   '#8FC31F', '#58a6ff', '#f59e0b', '#22c55e', '#ef4444',
   '#c084fc', '#00a8ff', '#fbbf24', '#ec4899', '#14b8a6',
@@ -300,6 +330,19 @@ function _nextTrainColor(used: Set<string>): string {
     if (!used.has(c)) return c;
   }
   return DEF_TRAIN_COLORS[used.size % DEF_TRAIN_COLORS.length];
+}
+
+function _intervalKey(t: SimTrainState): string {
+  return `${t.direction}:${t.currentStationCode || t.currentStation}>${t.nextStationCode || t.nextStation}`;
+}
+
+function _activeRun(
+  runs: Record<string, SpeedRunRecord[]>,
+  activeIds: Record<string, string>,
+  trainId: string,
+): SpeedRunRecord | undefined {
+  const id = activeIds[trainId];
+  return id ? runs[trainId]?.find((run) => run.id === id) : undefined;
 }
 function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimStore.getState>, forceReset = false) {
   const manualMode = t.operationMode === 'MANUAL';
@@ -386,6 +429,9 @@ export const useSimStore = create<SimState>((set, get) => ({
   trainColors: {},
   speedHistoryByTrain: {},
   speedTimeHistoryByTrain: {},
+  speedRunsByTrain: {},
+  activeSpeedRunIdByTrain: {},
+  viewedSpeedRunIdByTrain: {},
   selectedTrainId: null,
   selectedStationCode: null,
 
@@ -461,12 +507,52 @@ export const useSimStore = create<SimState>((set, get) => ({
     }
     const train = state.trains.find((t) => t.trainId === id);
     if (!train) return;
-    const sel = _applyTrainDetail(train, state, true);
+    const sel = _applyTrainDetail(train);
+    const activeRun = _activeRun(state.speedRunsByTrain, state.activeSpeedRunIdByTrain, id);
     set({
       selectedTrainId: id,
       ...sel,
-      speedHistory: state.speedHistoryByTrain[id] || [],
-      speedTimeHistory: state.speedTimeHistoryByTrain[id] || [],
+      speedHistory: activeRun?.positionHistory ?? [],
+      speedTimeHistory: activeRun?.timeHistory ?? [],
+      speedProfile: activeRun?.profile ?? [],
+      speedProfileMeta: activeRun?.profileMeta ?? null,
+    });
+  },
+  selectSpeedRun: (trainId, runId) => set((state) => ({
+    viewedSpeedRunIdByTrain: { ...state.viewedSpeedRunIdByTrain, [trainId]: runId },
+  })),
+  applySpeedProfiles: (profiles, profileMeta = {}, expectedActiveRunIds) => {
+    const state = get();
+    const nextRuns = { ...state.speedRunsByTrain };
+    let selectedProfile: SpeedProfilePoint[] | undefined;
+    let selectedMeta: SpeedProfileMeta | null | undefined;
+
+    for (const [trainId, points] of Object.entries(profiles)) {
+      if (points.length === 0) continue;
+      const activeId = state.activeSpeedRunIdByTrain[trainId];
+      // 请求发出后若车辆已经到下一站，丢弃迟到的旧区间响应。
+      if (expectedActiveRunIds && expectedActiveRunIds[trainId] !== activeId) continue;
+      const trainRuns = nextRuns[trainId];
+      const runIndex = activeId && trainRuns ? trainRuns.findIndex((run) => run.id === activeId) : -1;
+      if (runIndex < 0 || !trainRuns) continue;
+
+      const run = trainRuns[runIndex];
+      const profileEndM = points[points.length - 1]?.positionM ?? 0;
+      if (run.pathTotalLengthM > 0 && Math.abs(profileEndM - run.pathTotalLengthM) > 2) continue;
+
+      const updatedRun = { ...run, profile: points, profileMeta: profileMeta[trainId] ?? null };
+      const updatedTrainRuns = [...trainRuns];
+      updatedTrainRuns[runIndex] = updatedRun;
+      nextRuns[trainId] = updatedTrainRuns;
+      if (trainId === state.selectedTrainId) {
+        selectedProfile = points;
+        selectedMeta = updatedRun.profileMeta;
+      }
+    }
+
+    set({
+      speedRunsByTrain: nextRuns,
+      ...(selectedProfile ? { speedProfile: selectedProfile, speedProfileMeta: selectedMeta ?? null } : {}),
     });
   },
   setSelectedStationCode: (code: string | null) => set({ selectedStationCode: code }),
@@ -717,39 +803,91 @@ export const useSimStore = create<SimState>((set, get) => ({
       avgWaitTime: kpi.totalWaitingPax ?? 0,
     });
 
-    // 速度历史曲线 — 选中列车
-    if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
+    // 速度曲线档案 — 每次轮询采集全部列车，并按站间运行分段。
+    // 这样切换车辆不会中断采样，也不会把上一站末点与下一站首点连起来。
+    if (isEngineRunning || clock.state === 'PAUSED') {
       const curState = get();
-      const hasPathPosition = typeof selTrain.pathPositionM === 'number' && (selTrain.pathTotalLengthM ?? 0) > 0;
-      if (hasPathPosition) {
-        const newHistory = [
-          ...curState.speedHistory,
-          {
-            positionM: selTrain.pathPositionM ?? 0,
-            speedMps: selTrain.speedMps,
-            targetSpeedMps: selTrain.targetSpeedMps ?? 0,
-            localSpeedLimitMps: selTrain.localSpeedLimitMps,
-            gradeRatio: selTrain.gradeRatio,
-            segmentId: selTrain.currentSegmentId,
-          },
-        ];
-        if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
-        set({
-          speedHistory: newHistory,
-          speedHistoryByTrain: { ...curState.speedHistoryByTrain, [selTrain.trainId]: newHistory },
-        });
+      const nextRuns = { ...curState.speedRunsByTrain };
+      const nextActiveIds = { ...curState.activeSpeedRunIdByTrain };
+      const nextPositionCache = { ...curState.speedHistoryByTrain };
+      const nextTimeCache = { ...curState.speedTimeHistoryByTrain };
+
+      for (const train of trains) {
+        const pathTotalLengthM = train.pathTotalLengthM ?? train.targetDistanceM ?? 0;
+        if (pathTotalLengthM <= 0) continue;
+
+        const intervalKey = _intervalKey(train);
+        const trainRuns = [...(nextRuns[train.trainId] ?? [])];
+        const activeId = nextActiveIds[train.trainId];
+        let activeIndex = activeId ? trainRuns.findIndex((run) => run.id === activeId) : -1;
+        let run = activeIndex >= 0 ? trainRuns[activeIndex] : undefined;
+
+        if (!run || run.intervalKey !== intervalKey) {
+          if (run && !run.completed) {
+            trainRuns[activeIndex] = { ...run, completed: true, endedAtSimTime: clock.simTime };
+          }
+          const runId = `${train.trainId}:${intervalKey}:${clock.tick}`;
+          run = {
+            id: runId,
+            intervalKey,
+            trainId: train.trainId,
+            direction: train.direction,
+            startStation: train.currentStation,
+            endStation: train.nextStation,
+            startedAtSimTime: clock.simTime,
+            startedAtSimTimeMs: clock.simTimeMs,
+            completed: false,
+            pathTotalLengthM,
+            positionHistory: [],
+            timeHistory: [],
+            profile: [],
+            profileMeta: null,
+            lastSampleTick: -1,
+          };
+          trainRuns.push(run);
+          activeIndex = trainRuns.length - 1;
+          nextActiveIds[train.trainId] = runId;
+        }
+
+        // 同一个后端 tick 可能被 200ms 轮询读到多次，只记录一次。
+        if (run.lastSampleTick !== clock.tick) {
+          const positionHistory = typeof train.pathPositionM === 'number'
+            ? [...run.positionHistory, {
+                positionM: train.pathPositionM,
+                speedMps: train.speedMps,
+                targetSpeedMps: train.targetSpeedMps ?? 0,
+                localSpeedLimitMps: train.localSpeedLimitMps,
+                gradeRatio: train.gradeRatio,
+                segmentId: train.currentSegmentId,
+              }]
+            : run.positionHistory;
+          const shouldRecordTime = train.phase !== 'DWELLING' && train.phase !== 'IDLE';
+          const elapsedS = Math.max(0, (clock.simTimeMs - run.startedAtSimTimeMs) / 1000);
+          const timeHistory = shouldRecordTime
+            ? [...run.timeHistory, { elapsedS, speedMps: train.speedMps }]
+            : run.timeHistory;
+          run = { ...run, pathTotalLengthM, positionHistory, timeHistory, lastSampleTick: clock.tick };
+          trainRuns[activeIndex] = run;
+        }
+
+        nextRuns[train.trainId] = trainRuns;
+        nextPositionCache[train.trainId] = run.positionHistory;
+        nextTimeCache[train.trainId] = run.timeHistory;
       }
 
-      if (selTrain.phase !== 'DWELLING' && selTrain.phase !== 'IDLE') {
-        const baseTime = curState.speedTimeHistory;
-        const elapsedS = baseTime.length > 0 ? baseTime[baseTime.length - 1].elapsedS + 0.25 : 0.25;
-        const newTimeHistory = [...baseTime, { elapsedS, speedMps: selTrain.speedMps }];
-        if (newTimeHistory.length > 500) newTimeHistory.splice(0, newTimeHistory.length - 500);
-        set({
-          speedTimeHistory: newTimeHistory,
-          speedTimeHistoryByTrain: { ...curState.speedTimeHistoryByTrain, [selTrain.trainId]: newTimeHistory },
-        });
-      }
+      const selectedRun = selId
+        ? _activeRun(nextRuns, nextActiveIds, selId)
+        : undefined;
+      set({
+        speedRunsByTrain: nextRuns,
+        activeSpeedRunIdByTrain: nextActiveIds,
+        speedHistoryByTrain: nextPositionCache,
+        speedTimeHistoryByTrain: nextTimeCache,
+        speedHistory: selectedRun?.positionHistory ?? [],
+        speedTimeHistory: selectedRun?.timeHistory ?? [],
+        speedProfile: selectedRun?.profile ?? [],
+        speedProfileMeta: selectedRun?.profileMeta ?? null,
+      });
     }
   },
 
@@ -780,6 +918,9 @@ export const useSimStore = create<SimState>((set, get) => ({
       speedTimeHistory: [],
       speedHistoryByTrain: {},
       speedTimeHistoryByTrain: {},
+      speedRunsByTrain: {},
+      activeSpeedRunIdByTrain: {},
+      viewedSpeedRunIdByTrain: {},
     });
   },
 
@@ -818,11 +959,25 @@ export const useSimStore = create<SimState>((set, get) => ({
       delete nextSpdHist[trainId];
       const nextTimeHist = { ...state.speedTimeHistoryByTrain };
       delete nextTimeHist[trainId];
+      const nextRuns = { ...state.speedRunsByTrain };
+      delete nextRuns[trainId];
+      const nextActiveIds = { ...state.activeSpeedRunIdByTrain };
+      delete nextActiveIds[trainId];
+      const nextViewedIds = { ...state.viewedSpeedRunIdByTrain };
+      delete nextViewedIds[trainId];
+      const historyState = {
+        trainColors: nextColors,
+        speedHistoryByTrain: nextSpdHist,
+        speedTimeHistoryByTrain: nextTimeHist,
+        speedRunsByTrain: nextRuns,
+        activeSpeedRunIdByTrain: nextActiveIds,
+        viewedSpeedRunIdByTrain: nextViewedIds,
+      };
       if (state.selectedTrainId === trainId) {
         const remaining = state.trains.filter((t) => t.trainId !== trainId);
-        set({ selectedTrainId: remaining[0]?.trainId ?? null, trainColors: nextColors, speedHistoryByTrain: nextSpdHist, speedTimeHistoryByTrain: nextTimeHist });
+        set({ selectedTrainId: remaining[0]?.trainId ?? null, ...historyState });
       } else {
-        set({ trainColors: nextColors, speedHistoryByTrain: nextSpdHist, speedTimeHistoryByTrain: nextTimeHist });
+        set(historyState);
       }
     }
     return !!resp.ok;

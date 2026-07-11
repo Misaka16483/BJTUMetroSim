@@ -33,10 +33,9 @@ export default function App() {
   const metroLines = useSimStore((s) => s.metroLines);
   const linesLoading = useSimStore((s) => s.linesLoading);
   const updateFromBackend = useSimStore((s) => s.updateFromBackend);
-  const speedProfile = useSimStore((s) => s.speedProfile);
+  const applySpeedProfiles = useSimStore((s) => s.applySpeedProfiles);
   const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
-  const selectedTrainId = useSimStore((s) => s.selectedTrainId);
   const trains = useSimStore((s) => s.trains);
   const startBackendSim = useSimStore((s) => s.startBackendSim);
   const pauseBackendSim = useSimStore((s) => s.pauseBackendSim);
@@ -137,36 +136,24 @@ export default function App() {
     return () => { active = false; };
   }, [backendStatus, updateFromBackend]);
 
-  // 引擎启动后 / 到站清空后 —— 轮询拉取规划曲线
+  // 引擎运行时拉取全部列车的当前规划曲线，并归档到各自的站间记录。
   useEffect(() => {
-    if (!isRunning || !selectedTrainId) return;
+    if (!isRunning) return;
     let active = true;
-    let attempts = 0;
-    const tryFetch = () => {
+    const fetchProfiles = () => {
       if (!active) return;
-      const sid = useSimStore.getState().selectedTrainId;
-      if (!sid) return;
+      const expectedActiveRunIds = { ...useSimStore.getState().activeSpeedRunIdByTrain };
       fetchSpeedProfile()
         .then((res) => {
           if (!active) return;
-          const points = res.profiles?.[sid] ?? [];
-          const meta = res.profileMeta?.[sid] ?? null;
-          const current = useSimStore.getState();
-          const expectedEndM = current.pathTotalLengthM || current.targetDistanceM;
-          const profileEndM = points.length > 0 ? points[points.length - 1].positionM : 0;
-          const matchesCurrentInterval = expectedEndM <= 0 || Math.abs(profileEndM - expectedEndM) <= 2;
-          if (points.length > 0 && matchesCurrentInterval) {
-            useSimStore.setState({ speedProfile: points, speedProfileMeta: meta });
-          } else if (attempts < 20) {
-            attempts++;
-            setTimeout(tryFetch, 250);
-          }
+          applySpeedProfiles(res.profiles ?? {}, res.profileMeta, expectedActiveRunIds);
         })
-        .catch(() => { if (active && attempts < 20) { attempts++; setTimeout(tryFetch, 500); } });
+        .catch(() => { /* 下一轮继续尝试 */ });
     };
-    const t = setTimeout(tryFetch, 300);
-    return () => { active = false; clearTimeout(t); };
-  }, [isRunning, selectedTrainId, speedProfile.length]);
+    fetchProfiles();
+    const timer = window.setInterval(fetchProfiles, 750);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [isRunning, applySpeedProfiles]);
 
   return (
     <div

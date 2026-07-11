@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { useSimStore } from '../store/useSimStore';
+import { useSimStore, type SpeedRunRecord } from '../store/useSimStore';
 import { lineColor } from './LineSelector';
 import MasterController from './MasterController';
 import type { MetroLineData } from '../data/amapMetroApi';
@@ -92,7 +92,7 @@ function TopBar({ lines, activeLineId, onSelect, color }: {
 /* ═══ 活跃驾驶舱 ═══ */
 function ActiveCab({ line9 }: { line9: MetroLineData }) {
   const {
-    nextStation, distanceToNextStationM, stationIndex, line9Stations,
+    currentStation, nextStation, distanceToNextStationM, stationIndex, line9Stations,
     runDirection, currentSpeedMps, simTime, avgLoadRate, totalPassengers,
     engineClockState, tractionPercent, brakePercent,
     energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
@@ -100,8 +100,21 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
     currentSegmentId, localSpeedLimitMps, gradeRatio,
     manualMode, setManualMode,
     selectedTrainId, trains, selectTrain, trainColors,
+    speedRunsByTrain, activeSpeedRunIdByTrain, viewedSpeedRunIdByTrain, selectSpeedRun,
   } = useSimStore();
   const color = lineColor(line9.id);
+
+  const trainRuns = selectedTrainId ? (speedRunsByTrain[selectedTrainId] ?? []) : [];
+  const activeRunId = selectedTrainId ? activeSpeedRunIdByTrain[selectedTrainId] : undefined;
+  const viewedRunId = selectedTrainId ? viewedSpeedRunIdByTrain[selectedTrainId] : null;
+  const activeRun = activeRunId ? trainRuns.find((run) => run.id === activeRunId) : trainRuns[trainRuns.length - 1];
+  const chartRun = (viewedRunId ? trainRuns.find((run) => run.id === viewedRunId) : activeRun) ?? activeRun;
+  const chartPositionHistory = chartRun?.positionHistory ?? speedHistory;
+  const chartTimeHistory = chartRun?.timeHistory ?? speedTimeHistory;
+  const chartProfile = chartRun?.profile ?? speedProfile;
+  const chartLastPosition = chartPositionHistory[chartPositionHistory.length - 1];
+  const chartLastTime = chartTimeHistory[chartTimeHistory.length - 1];
+  const chartIsLive = !viewedRunId || chartRun?.id === activeRunId;
 
   const speedKmh = currentSpeedMps * 3.6;
   const eta = distanceToNextStationM > 0 && currentSpeedMps > 0
@@ -142,7 +155,7 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
       {/* ── 中部顶部：站台信息 ── */}
       <div className="shrink-0 px-8 pt-6 pb-4">
         <StationRouteCard
-          current={line9Stations[stationIndex] || '--'}
+          current={currentStation || '--'}
           next={nextStation || '--'}
           distanceKm={distanceToNextStationM / 1000}
           eta={eta}
@@ -168,27 +181,29 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
             <MetricBadge label="MODE" value="AM-CBTC" unit="" accent="#8FC31F" />
           </div>
           {/* ── 速度-位点曲线 ── */}
+          {selectedTrainId && trainRuns.length > 0 && (
+            <SpeedRunSelector
+              runs={trainRuns}
+              activeRunId={activeRunId}
+              viewedRunId={viewedRunId ?? null}
+              onSelect={(runId) => selectSpeedRun(selectedTrainId, runId)}
+            />
+          )}
           <SpeedCurveChart
-            profile={speedProfile}
-            history={speedHistory}
-            currentSpeedMps={currentSpeedMps}
-            currentPositionM={
-              speedHistory.length > 0 ? speedHistory[speedHistory.length - 1].positionM : 0
-            }
-            pathTotalLengthM={pathTotalLengthM}
-            profileSource={speedProfileMeta?.source ?? ''}
-            startStation={line9Stations[stationIndex] || '--'}
-            endStation={nextStation || '--'}
+            profile={chartProfile}
+            history={chartPositionHistory}
+            currentSpeedMps={chartIsLive ? currentSpeedMps : (chartLastPosition?.speedMps ?? 0)}
+            currentPositionM={chartLastPosition?.positionM ?? 0}
+            pathTotalLengthM={chartRun?.pathTotalLengthM ?? pathTotalLengthM}
+            profileSource={chartRun?.profileMeta?.source ?? speedProfileMeta?.source ?? ''}
+            startStation={chartRun?.startStation ?? currentStation ?? '--'}
+            endStation={chartRun?.endStation ?? nextStation ?? '--'}
           />
           {/* ── 速度-时间曲线 ── */}
           <SpeedTimeCurveChart
-            history={speedTimeHistory}
-            currentSpeedMps={currentSpeedMps}
-            elapsedS={
-              speedTimeHistory.length > 0
-                ? speedTimeHistory[speedTimeHistory.length - 1].elapsedS
-                : 0
-            }
+            history={chartTimeHistory}
+            currentSpeedMps={chartIsLive ? currentSpeedMps : (chartLastTime?.speedMps ?? 0)}
+            elapsedS={chartLastTime?.elapsedS ?? 0}
           />
         </div>
 
@@ -507,6 +522,37 @@ function hexToRgb(hex: string): string {
   if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
   const n = parseInt(hex, 16);
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
+
+function SpeedRunSelector({ runs, activeRunId, viewedRunId, onSelect }: {
+  runs: SpeedRunRecord[];
+  activeRunId?: string;
+  viewedRunId: string | null;
+  onSelect: (runId: string | null) => void;
+}) {
+  const completedRuns = runs.filter((run) => run.completed).reverse();
+  return (
+    <div className="flex items-center gap-2 px-8 py-1 rounded" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <span className="text-[7px] font-semibold uppercase tracking-[0.12em] text-[#6b7280] shrink-0">区间记录</span>
+      <select
+        aria-label="选择速度曲线区间"
+        value={viewedRunId ?? '__live__'}
+        onChange={(event) => onSelect(event.target.value === '__live__' ? null : event.target.value)}
+        className="min-w-0 flex-1 text-[8px] font-mono rounded px-1.5 py-1 cursor-pointer"
+        style={{ color: '#cbd5e1', background: '#172033', border: '1px solid rgba(255,255,255,0.08)' }}
+      >
+        <option value="__live__">
+          实时 · {runs.find((run) => run.id === activeRunId)?.startStation ?? '--'} → {runs.find((run) => run.id === activeRunId)?.endStation ?? '--'}
+        </option>
+        {completedRuns.map((run) => (
+          <option key={run.id} value={run.id}>
+            {run.startedAtSimTime} · {run.startStation} → {run.endStation}
+          </option>
+        ))}
+      </select>
+      <span className="text-[7px] text-[#475569] shrink-0">{completedRuns.length} 历史</span>
+    </div>
+  );
 }
 
 /* ═══ 速度曲线对比图 ═══ */
