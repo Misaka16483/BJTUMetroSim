@@ -10,6 +10,7 @@ import OperationalLoopPanel from './components/OperationalLoopPanel';
 import PowerNetworkPanel from './components/PowerNetworkPanel';
 import PowerSystemView from './components/PowerSystemView';
 import TrainManagementPanel from './components/TrainManagementPanel';
+import SimulationLifecycleControls from './components/SimulationLifecycleControls';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -33,15 +34,10 @@ export default function App() {
   const metroLines = useSimStore((s) => s.metroLines);
   const linesLoading = useSimStore((s) => s.linesLoading);
   const updateFromBackend = useSimStore((s) => s.updateFromBackend);
-  const speedProfile = useSimStore((s) => s.speedProfile);
+  const applySpeedProfiles = useSimStore((s) => s.applySpeedProfiles);
   const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
-  const selectedTrainId = useSimStore((s) => s.selectedTrainId);
   const trains = useSimStore((s) => s.trains);
-  const startBackendSim = useSimStore((s) => s.startBackendSim);
-  const pauseBackendSim = useSimStore((s) => s.pauseBackendSim);
-  const resumeBackendSim = useSimStore((s) => s.resumeBackendSim);
-  const stopBackendSim = useSimStore((s) => s.stopBackendSim);
   const [collapsed, setCollapsed] = useState(false);
   const [showTrainMgmt, setShowTrainMgmt] = useState(false);
   const modeIndex = viewMode === 'macro'
@@ -137,36 +133,24 @@ export default function App() {
     return () => { active = false; };
   }, [backendStatus, updateFromBackend]);
 
-  // 引擎启动后 / 到站清空后 —— 轮询拉取规划曲线
+  // 引擎运行时拉取全部列车的当前规划曲线，并归档到各自的站间记录。
   useEffect(() => {
-    if (!isRunning || !selectedTrainId) return;
+    if (!isRunning) return;
     let active = true;
-    let attempts = 0;
-    const tryFetch = () => {
+    const fetchProfiles = () => {
       if (!active) return;
-      const sid = useSimStore.getState().selectedTrainId;
-      if (!sid) return;
+      const expectedActiveRunIds = { ...useSimStore.getState().activeSpeedRunIdByTrain };
       fetchSpeedProfile()
         .then((res) => {
           if (!active) return;
-          const points = res.profiles?.[sid] ?? [];
-          const meta = res.profileMeta?.[sid] ?? null;
-          const current = useSimStore.getState();
-          const expectedEndM = current.pathTotalLengthM || current.targetDistanceM;
-          const profileEndM = points.length > 0 ? points[points.length - 1].positionM : 0;
-          const matchesCurrentInterval = expectedEndM <= 0 || Math.abs(profileEndM - expectedEndM) <= 2;
-          if (points.length > 0 && matchesCurrentInterval) {
-            useSimStore.setState({ speedProfile: points, speedProfileMeta: meta });
-          } else if (attempts < 20) {
-            attempts++;
-            setTimeout(tryFetch, 250);
-          }
+          applySpeedProfiles(res.profiles ?? {}, res.profileMeta, expectedActiveRunIds);
         })
-        .catch(() => { if (active && attempts < 20) { attempts++; setTimeout(tryFetch, 500); } });
+        .catch(() => { /* 下一轮继续尝试 */ });
     };
-    const t = setTimeout(tryFetch, 300);
-    return () => { active = false; clearTimeout(t); };
-  }, [isRunning, selectedTrainId, speedProfile.length]);
+    fetchProfiles();
+    const timer = window.setInterval(fetchProfiles, 750);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [isRunning, applySpeedProfiles]);
 
   return (
     <div
@@ -237,21 +221,7 @@ export default function App() {
         <div className="flex items-center gap-1.5">
           {/* ─── 仿真控制 ─── */}
           {backendStatus === 'connected' && (
-            <div className="flex items-center gap-1">
-              {engineClockState !== 'RUNNING' && engineClockState !== 'PAUSED' ? (
-                <ControlBtn onClick={startBackendSim} color="#22c55e" label="▶" title="启动" />
-              ) : engineClockState === 'RUNNING' ? (
-                <>
-                  <ControlBtn onClick={pauseBackendSim} color="#eab308" label="⏸" title="暂停" />
-                  <ControlBtn onClick={stopBackendSim} color="#ef4444" label="⏹" title="停止" />
-                </>
-              ) : (
-                <>
-                  <ControlBtn onClick={resumeBackendSim} color="#22c55e" label="▶" title="恢复" />
-                  <ControlBtn onClick={stopBackendSim} color="#ef4444" label="⏹" title="停止" />
-                </>
-              )}
-            </div>
+            <SimulationLifecycleControls />
           )}
         </div>
 
@@ -442,7 +412,6 @@ export default function App() {
     </div>
   );
 }
-
 /* ═══════════════ 地图浮动线路过滤 ═══════════════ */
 function FloatingLineFilter() {
   const showAllLines = useSimStore((s) => s.showAllLines);
@@ -475,21 +444,5 @@ function FloatingLineFilter() {
          9号线
       </button>
     </div>
-  );
-}
-
-function ControlBtn({ onClick, color, label, title }: { onClick: () => void; color: string; label: string; title: string }) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      className="flex items-center justify-center cursor-pointer rounded"
-      style={{
-        width: 24, height: 24, color, background: `${color}12`,
-        border: `1px solid ${color}30`, fontSize: 11, lineHeight: 1,
-      }}
-    >
-      {label}
-    </button>
   );
 }

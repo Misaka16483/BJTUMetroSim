@@ -17,6 +17,7 @@ const DEF_VEHICLE: VehicleConfigPayload = {
 export default function TrainManagementPanel() {
   const trains = useSimStore((s) => s.trains);
   const trainColors = useSimStore((s) => s.trainColors);
+  const line9Stations = useSimStore((s) => s.line9Stations);
   const trackMap = useSimStore((s) => s.trackMap);
   const addTrain = useSimStore((s) => s.addTrain);
   const removeTrain = useSimStore((s) => s.removeTrain);
@@ -38,19 +39,29 @@ export default function TrainManagementPanel() {
   const [addError, setAddError] = useState<string | null>(null);
 
   const connected = backendStatus === 'connected';
-  const stationOptions = trackMap?.stations.map((station) => ({
+  const stationOptions = trackMap?.stations?.map((station) => ({
     code: station.stationCode,
     name: station.stationName,
-  })) ?? [];
+  })) ?? line9Stations.map((station) => ({ code: station, name: station }));
   let trainIdSeq = 1;
   while (trains.some((train) => train.trainId === `T09${String(trainIdSeq).padStart(2, '0')}`)) {
     trainIdSeq += 1;
   }
+  // 后端权威约定：UP 按站序递增（郭公庄→国家图书馆），DOWN 按站序递减。
+  // 正线仿真按固定端点发车；到终点后由后端自动折返。
+  const fixedStart = form.direction === 'UP'
+    ? stationOptions[0]
+    : stationOptions[stationOptions.length - 1];
+  const routeLabel = stationOptions.length > 1
+    ? (form.direction === 'UP'
+      ? `${stationOptions[0].name} → ${stationOptions[stationOptions.length - 1].name}`
+      : `${stationOptions[stationOptions.length - 1].name} → ${stationOptions[0].name}`)
+    : '线路数据加载中';
 
   const handleAdd = async () => {
     setAddError(null);
     const id = form.trainId || `T09${String(trainIdSeq).padStart(2, '0')}`;
-    const station = form.initialStationCode || stationOptions[0]?.code || 'GGZ';
+    const station = fixedStart?.code ?? (form.direction === 'UP' ? 'GGZ' : 'GTG');
     const payload: AddTrainPayload = {
       trainId: id,
       initialStationCode: station,
@@ -154,27 +165,20 @@ export default function TrainManagementPanel() {
               />
             </Field>
             <Field label="起点站" small>
-              <select
-                value={form.initialStationCode}
-                onChange={(e) => setForm({ ...form, initialStationCode: e.target.value })}
-                style={inputStyle}
-              >
-                {stationOptions.map((station) => (
-                  <option key={station.code} value={station.code}>
-                    {station.name} ({station.code})
-                  </option>
-                ))}
-              </select>
+              <div style={{ ...inputStyle, color: '#8b949e' }}>
+                {fixedStart ? `${fixedStart.name}（${fixedStart.code}）` : '线路数据加载中'}
+              </div>
             </Field>
             <Field label="方向" small>
               <select
                 value={form.direction}
-                onChange={(e) => setForm({ ...form, direction: e.target.value as 'UP' | 'DOWN' })}
+                onChange={(e) => setForm({ ...form, direction: e.target.value as 'UP' | 'DOWN', initialStationCode: '' })}
                 style={inputStyle}
               >
                 <option value="UP">上行 (UP)</option>
                 <option value="DOWN">下行 (DOWN)</option>
               </select>
+              <span style={{ fontSize: 8, color: '#6e7681' }}>{routeLabel}</span>
             </Field>
             <Field label="驾驶模式" small>
               <select

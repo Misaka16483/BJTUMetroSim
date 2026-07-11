@@ -32,12 +32,12 @@ JsonDict = dict[str, Any]
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = ROOT / "data" / "cache" / "line_map.json"
 DEFAULT_RUN_DIR = ROOT / "outputs" / "runs"
-REPO_STATIONS = ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
+REPO_STATIONS = ROOT / "data" / "line9" / "stations.csv"
 WORKSPACE_STATIONS = (
     ROOT / "external" / "BJTUMetroSim" / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
 )
 DEFAULT_STATIONS = REPO_STATIONS if REPO_STATIONS.exists() else WORKSPACE_STATIONS
-DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_single.json"
+DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_interactive.json"
 DEFAULT_MAINLINE_SCOPE = ROOT / "data" / "scenarios" / "line9_mainline_scope.json"
 DEFAULT_POWER_TOPOLOGY = ROOT / "data" / "scenarios" / "line9_power_topology.json"
 
@@ -502,11 +502,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return
 
             if path == "/api/sim/start":
-                self.engine.start()
+                start_result = self.engine.start()
                 snap = self.engine.snapshot()
                 self._send_json({
                     "ok": True,
                     "action": "start",
+                    "result": start_result,
+                    "clockState": self.engine.clock.state.value,
+                    "initializationSteps": [
+                        "LOAD_SCENARIO", "RESET_STATE", "CREATE_RECORDER_RUN",
+                        "INITIALIZE_POWER_NETWORK", "START_TICK_THREAD",
+                    ],
                     "simTimeMs": snap.sim_time_ms if snap else int(self.engine.clock.sim_time_seconds * 1000),
                 })
             elif path == "/api/sim/pause":

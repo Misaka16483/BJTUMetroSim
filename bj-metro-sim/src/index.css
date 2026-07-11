@@ -232,3 +232,9 @@ button, .btn, [role="button"], .clickable {
   font-family: 'Consolas', 'Courier New', monospace;
   font-weight: 500;
 }
+@keyframes startup-spin { to { transform: rotate(360deg); } }
+.startup-spinner {
+  width: 9px; height: 9px; display: inline-block; border-radius: 50%;
+  border: 1.5px solid rgba(100,210,255,.25); border-top-color: currentColor;
+  animation: startup-spin .7s linear infinite;
+}

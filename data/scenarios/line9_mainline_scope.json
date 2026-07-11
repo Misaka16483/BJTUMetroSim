@@ -3,7 +3,7 @@
   "scopeId": "line9-mainline-v1",
   "lineId": "9",
   "description": "9号线13个运营车站之间的正线运行Seg白名单；车辆段和库线数据仍保留在全量line_map.json中。",
-  "source": "data/cache/line_map.json + MetroDynamicsJavaDemo/data/stations.csv",
+  "source": "data/cache/line_map.json + data/line9/stations.csv",
   "selectionRule": "按13个运营站台公里标匹配站台，对每个相邻站选取可连通的最短Seg路径，将路径并集固化为正线运行范围。",
   "segmentIds": [
     39, 40, 41, 43, 45, 46, 48, 49, 50, 51, 52, 55, 56, 57, 58,
