@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.core.clock import ClockState, SimulationClock
 from app.core.message_bus import MessageBus
-from app.domain.line.services import LineMapRepository, PathPlanner, TrackQueryService
+from app.domain.line.services import LineMapRepository, LineScope, PathPlanner, TrackQueryService
 from app.infra.excel_importer import cm_to_m, cmps_to_mps, parse_k_mileage, to_int, validate_line_map
 from app.infra.recorder import RunRecorder
 
@@ -121,6 +121,57 @@ class Phase0UnitTests(unittest.TestCase):
         self.assertAlmostEqual(reverse_plan.total_length_m, 70.0)
         self.assertAlmostEqual(reverse_plan.speed_limit_at(10.0), 6.0)
         self.assertAlmostEqual(reverse_plan.grade_ratio_at(10.0), -0.005)
+
+    def test_path_planner_rejects_shortcut_outside_active_scope(self) -> None:
+        line_map = tiny_line_map()
+        line_map["segments"] = [
+            {
+                "id": 1,
+                "lengthM": 10.0,
+                "endForwardSegId": 2,
+                "endDivergingSegId": 3,
+            },
+            {"id": 2, "lengthM": 100.0, "endForwardSegId": 4},
+            {"id": 3, "lengthM": 1.0, "endForwardSegId": 4},
+            {"id": 4, "lengthM": 10.0},
+        ]
+        line_map["platforms"] = [
+            {"id": 20, "segmentId": 1, "offsetM": 0.0},
+            {"id": 21, "segmentId": 4, "offsetM": 10.0},
+        ]
+        line_map["signals"] = []
+        line_map["speedRestrictions"] = []
+        line_map["gradients"] = []
+
+        unrestricted = PathPlanner(line_map).plan_between_platforms(20, 21, direction="forward")
+        scoped = PathPlanner(
+            line_map,
+            allowed_segment_ids={1, 2, 4},
+        ).plan_between_platforms(20, 21, direction="forward")
+
+        self.assertEqual(unrestricted.segment_ids, (1, 3, 4))
+        self.assertEqual(scoped.segment_ids, (1, 2, 4))
+
+    def test_line_scope_validates_station_pair_union(self) -> None:
+        scope = LineScope.from_dict(
+            {
+                "scopeId": "test-mainline",
+                "lineId": "9",
+                "segmentIds": [1, 2],
+                "stationPairPaths": [{"from": "A", "to": "B", "segmentIds": [1, 2]}],
+            }
+        )
+        self.assertEqual(scope.segment_ids, frozenset({1, 2}))
+
+        with self.assertRaises(ValueError):
+            LineScope.from_dict(
+                {
+                    "scopeId": "broken-mainline",
+                    "lineId": "9",
+                    "segmentIds": [1, 2, 3],
+                    "stationPairPaths": [{"from": "A", "to": "B", "segmentIds": [1, 2]}],
+                }
+            )
 
     def test_repository_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

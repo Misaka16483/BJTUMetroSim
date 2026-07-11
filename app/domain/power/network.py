@@ -22,6 +22,8 @@ class TractionPowerNetwork:
         line_id: str,
         nominal_voltage_v: float,
         quality: str,
+        model_version: str,
+        provenance: dict,
         substations: Iterable[TractionSubstation],
         feeders: Iterable[FeederArm],
         contact_sections: Iterable[ContactRailSection],
@@ -31,6 +33,8 @@ class TractionPowerNetwork:
         self.line_id = line_id
         self.nominal_voltage_v = nominal_voltage_v
         self.quality = quality
+        self.model_version = model_version
+        self.provenance = dict(provenance)
         self.substations = {
             item.substation_id: item
             for item in sorted(substations, key=lambda sub: sub.mileage_m)
@@ -61,6 +65,21 @@ class TractionPowerNetwork:
         section = self.locate_section(mileage_m, direction)
         return self.substations[section.left_substation_id], self.substations[section.right_substation_id]
 
+    def sections_spanned(self, first_mileage_m: float, second_mileage_m: float, direction: str) -> tuple[PowerSupplySection, ...]:
+        """Return every supply section overlapped by a finite-length train."""
+        lower, upper = sorted((first_mileage_m, second_mileage_m))
+        direction = direction.upper()
+        matched = [
+            section
+            for section in self.sections
+            if section.direction == direction
+            and section.to_mileage_m >= lower
+            and section.from_mileage_m <= upper
+        ]
+        if matched:
+            return tuple(sorted(matched, key=lambda item: item.from_mileage_m))
+        return (self.locate_section((lower + upper) / 2.0, direction),)
+
     def feeder_for(self, substation_id: str, direction: str, side: str) -> FeederArm | None:
         feeder_id = f"FD-{substation_id[-4:]}-{direction.upper()}-{side.upper()}"
         return self.feeders.get(feeder_id)
@@ -90,6 +109,21 @@ class TractionPowerNetwork:
             "closedSwitches": closed,
         }
 
+    def restore_substation(self, substation_id: str) -> dict[str, list[str] | str]:
+        if substation_id not in self.substations:
+            raise KeyError(substation_id)
+        self.substations[substation_id] = replace(self.substations[substation_id], status="IN_SERVICE")
+        closed: list[str] = []
+        for feeder in list(self.feeders.values()):
+            if feeder.substation_id == substation_id:
+                self.feeders[feeder.feeder_id] = replace(feeder, status="CLOSED")
+                closed.append(feeder.feeder_id)
+        return {
+            "affectedSubstationId": substation_id,
+            "supplyMode": "RESTORED",
+            "closedFeeders": closed,
+        }
+
     def operate_switch(self, switch_id: str, state: str) -> PowerSwitch:
         if switch_id not in self.switches:
             raise KeyError(switch_id)
@@ -100,15 +134,30 @@ class TractionPowerNetwork:
     def set_feeder_status(self, feeder_id: str, status: str) -> FeederArm:
         if feeder_id not in self.feeders:
             raise KeyError(feeder_id)
-        next_feeder = replace(self.feeders[feeder_id], status=status.upper())
+        status = status.upper()
+        if status not in {"OPEN", "CLOSED"}:
+            raise ValueError("INVALID_FEEDER_STATUS")
+        next_feeder = replace(self.feeders[feeder_id], status=status)
         self.feeders[feeder_id] = next_feeder
         return next_feeder
+
+    def set_contact_section_status(self, section_id: str, status: str) -> ContactRailSection:
+        if section_id not in self.contact_sections:
+            raise KeyError(section_id)
+        status = status.upper()
+        if status not in {"ENERGIZED", "DEENERGIZED"}:
+            raise ValueError("INVALID_CONTACT_SECTION_STATUS")
+        next_section = replace(self.contact_sections[section_id], status=status)
+        self.contact_sections[section_id] = next_section
+        return next_section
 
     def topology_dict(self) -> dict:
         return {
             "lineId": self.line_id,
             "nominalVoltageV": self.nominal_voltage_v,
             "quality": self.quality,
+            "modelVersion": self.model_version,
+            "provenance": self.provenance,
             "substations": [
                 {
                     "substationId": item.substation_id,
@@ -120,6 +169,9 @@ class TractionPowerNetwork:
                     "overloadCurrentA": item.overload_current_a,
                     "efsCapacityKw": item.efs_capacity_kw,
                     "status": item.status,
+                    "sourceId": item.source_id,
+                    "quality": item.quality,
+                    "parameterSources": item.parameter_sources,
                 }
                 for item in self.ordered_substations
             ],
@@ -135,6 +187,9 @@ class TractionPowerNetwork:
                     "continuousCurrentA": item.continuous_current_a,
                     "shortTimeCurrentA": item.short_time_current_a,
                     "status": item.status,
+                    "sourceId": item.source_id,
+                    "quality": item.quality,
+                    "parameterSources": item.parameter_sources,
                 }
                 for item in self.feeders.values()
             ],
@@ -147,6 +202,9 @@ class TractionPowerNetwork:
                     "resistanceOhmPerKm": item.resistance_ohm_per_km,
                     "currentLimitA": item.current_limit_a,
                     "status": item.status,
+                    "sourceId": item.source_id,
+                    "quality": item.quality,
+                    "parameterSources": item.parameter_sources,
                 }
                 for item in self.contact_sections.values()
             ],
@@ -158,6 +216,9 @@ class TractionPowerNetwork:
                     "toMileageM": item.to_mileage_m,
                     "resistanceOhmPerKm": item.resistance_ohm_per_km,
                     "crossBondingGroup": item.cross_bonding_group,
+                    "sourceId": item.source_id,
+                    "quality": item.quality,
+                    "parameterSources": item.parameter_sources,
                 }
                 for item in self.return_sections.values()
             ],
@@ -171,6 +232,9 @@ class TractionPowerNetwork:
                     "normalState": item.normal_state,
                     "currentState": item.current_state,
                     "remoteControllable": item.remote_controllable,
+                    "sourceId": item.source_id,
+                    "quality": item.quality,
+                    "parameterSources": item.parameter_sources,
                 }
                 for item in self.switches.values()
             ],

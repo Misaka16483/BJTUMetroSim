@@ -16,8 +16,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.core.engine import SimulationEngine
-from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.line.services import LineMapRepository, LineScope, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
+from app.domain.power.experiments import PowerExperimentRegistry
 from app.domain.operations.member_c_demo import MemberCDemoRunner
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
 from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
@@ -31,12 +32,13 @@ JsonDict = dict[str, Any]
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = ROOT / "data" / "cache" / "line_map.json"
 DEFAULT_RUN_DIR = ROOT / "outputs" / "runs"
-REPO_STATIONS = ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
+REPO_STATIONS = ROOT / "data" / "line9" / "stations.csv"
 WORKSPACE_STATIONS = (
     ROOT / "external" / "BJTUMetroSim" / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
 )
 DEFAULT_STATIONS = REPO_STATIONS if REPO_STATIONS.exists() else WORKSPACE_STATIONS
-DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_single.json"
+DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_interactive.json"
+DEFAULT_MAINLINE_SCOPE = ROOT / "data" / "scenarios" / "line9_mainline_scope.json"
 DEFAULT_POWER_TOPOLOGY = ROOT / "data" / "scenarios" / "line9_power_topology.json"
 
 LINE9_COLOR = "#8FC31F"
@@ -65,12 +67,15 @@ class Line9DataService:
         cache_path: Path = DEFAULT_CACHE,
         stations_path: Path = DEFAULT_STATIONS,
         run_dir: Path = DEFAULT_RUN_DIR,
+        mainline_scope_path: Path = DEFAULT_MAINLINE_SCOPE,
     ) -> None:
         self.cache_path = cache_path
         self.stations_path = stations_path
         self.run_dir = run_dir
+        self.mainline_scope_path = mainline_scope_path
         self._line_map: JsonDict | None = None
         self._stations: list[JsonDict] | None = None
+        self._mainline_scope: LineScope | None = None
         self._sim_runner: MemberCDemoRunner | None = None
         self._power_topology: JsonDict | None = None
 
@@ -86,6 +91,12 @@ class Line9DataService:
             self._stations = self._load_station_catalog()
         return self._stations
 
+    @property
+    def mainline_scope(self) -> LineScope:
+        if self._mainline_scope is None:
+            self._mainline_scope = LineScope.load(self.mainline_scope_path)
+        return self._mainline_scope
+
     def health(self) -> JsonDict:
         validation = self.line_map.get("validation", {})
         return {
@@ -95,6 +106,8 @@ class Line9DataService:
             "cache": str(self.cache_path),
             "cacheExists": self.cache_path.exists(),
             "validationOk": validation.get("ok"),
+            "mainlineScopeId": self.mainline_scope.scope_id,
+            "mainlineSegmentCount": len(self.mainline_scope.segment_ids),
             "generatedAt": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -181,6 +194,12 @@ class Line9DataService:
         return {
             "lineId": "9",
             "name": "9号线轨道级视图",
+            "scope": {
+                "activeForSimulation": self.mainline_scope.scope_id,
+                "mainlineSegmentCount": len(self.mainline_scope.segment_ids),
+                "fullMapRetained": True,
+                "segmentIds": sorted(self.mainline_scope.segment_ids),
+            },
             "lengthM": self.stations[-1]["mileageM"] - self.stations[0]["mileageM"],
             "counts": {
                 "segments": len(self.line_map.get("segments", [])),
@@ -396,6 +415,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     service: Line9DataService
     engine: SimulationEngine | None = None
     ws_broadcaster: WebSocketBroadcaster | None = None
+    experiment_registry: PowerExperimentRegistry | None = None
 
     def do_GET(self) -> None:
         try:
@@ -415,6 +435,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self._sim_state())
             elif path == "/api/sim/power/state":
                 self._send_json(self._sim_power_state())
+            elif path == "/api/sim/power/commands":
+                self._send_json({"ok": True, "data": self.engine.power_command_status() if self.engine else []})
+            elif match := re.fullmatch(r"/api/sim/power/commands/([^/]+)", path):
+                commands = self.engine.power_command_status(match.group(1)) if self.engine else []
+                if commands:
+                    self._send_json({"ok": True, "data": commands[0]})
+                else:
+                    self._send_json({"ok": False, "error": "POWER_COMMAND_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
             elif path == "/api/sim/speed-profile":
                 self._send_json(self._speed_profile())
             elif path == "/api/sim/run/export":
@@ -422,6 +450,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json({"ok": True, "data": self.engine.export_current_run()})
+            elif path == "/api/power/experiments":
+                self._send_json({"ok": True, "data": self._power_experiment_registry().list()})
+            elif match := re.fullmatch(r"/api/power/experiments/([^/]+)/trials", path):
+                try:
+                    result = self._power_experiment_registry().get(match.group(1), include_trials=True)
+                    self._send_json({"ok": True, "data": result["trials"]})
+                except KeyError:
+                    self._send_json({"ok": False, "error": "POWER_EXPERIMENT_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
+            elif match := re.fullmatch(r"/api/power/experiments/([^/]+)", path):
+                try:
+                    result = self._power_experiment_registry().get(match.group(1), include_trials=False)
+                    self._send_json({"ok": True, "data": result})
+                except KeyError:
+                    self._send_json({"ok": False, "error": "POWER_EXPERIMENT_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
@@ -451,19 +493,26 @@ class ApiHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
-            if not self.engine:
-                self._send_json(
-                    {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                )
-                return
+            if path == "/api/sim/start" or path == "/api/sim/pause" or path == "/api/sim/resume" or path == "/api/sim/stop":
+                if not self.engine:
+                    self._send_json(
+                        {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
 
             if path == "/api/sim/start":
-                self.engine.start()
+                start_result = self.engine.start()
                 snap = self.engine.snapshot()
                 self._send_json({
                     "ok": True,
                     "action": "start",
+                    "result": start_result,
+                    "clockState": self.engine.clock.state.value,
+                    "initializationSteps": [
+                        "LOAD_SCENARIO", "RESET_STATE", "CREATE_RECORDER_RUN",
+                        "INITIALIZE_POWER_NETWORK", "START_TICK_THREAD",
+                    ],
                     "simTimeMs": snap.sim_time_ms if snap else int(self.engine.clock.sim_time_seconds * 1000),
                 })
             elif path == "/api/sim/pause":
@@ -475,11 +524,65 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/train/add":
+                self._send_json(self._add_train())
+            elif path == "/api/sim/train/remove":
+                self._send_json(self._remove_train())
+            elif path == "/api/sim/train/vehicle-config":
+                self._send_json(self._set_train_vehicle_config())
+            elif path == "/api/sim/train/manual-mode":
+                self._send_json(self._set_train_manual_mode())
+            elif path == "/api/sim/train/manual-command":
+                self._send_json(self._send_train_manual_command())
+            elif path == "/api/sim/vehicle-config":
+                payload = self._read_json_body()
+                vcfg = self.engine.set_vehicle_config(payload)
+                self._send_json({"ok": True, "vehicleConfig": vcfg.to_dict()})
+            elif path == "/api/sim/manual-mode":
+                payload = self._read_json_body()
+                enabled = bool(payload.get("enabled", False))
+                train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
+                self._send_json(self.engine.set_manual_mode(train_id, enabled))
+            elif path == "/api/sim/manual-command":
+                payload = self._read_json_body()
+                train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
+                self._send_json(self.engine.set_manual_command(
+                    train_id,
+                    float(payload.get("tractionPercent", 0)),
+                    float(payload.get("brakePercent", 0)),
+                ))
             elif path == "/api/sim/power/faults":
                 payload = self._read_json_body()
                 self._send_json(self._apply_power_fault(payload))
             elif path == "/api/sim/power/reset":
                 self._send_json(self._reset_power_network())
+            elif path == "/api/sim/power/commands":
+                payload = self._read_json_body()
+                self._send_json(self._queue_power_command(payload))
+            elif path == "/api/sim/power/commands/replay":
+                payload = self._read_json_body()
+                self._send_json(self._replay_power_commands(payload))
+            elif path == "/api/power/experiments":
+                payload = self._read_json_body()
+                try:
+                    result = self._power_experiment_registry().create(payload)
+                    self._send_json({"ok": True, "data": result}, HTTPStatus.CREATED)
+                except ValueError as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/power/experiments/batch":
+                payload = self._read_json_body()
+                requests = payload.get("experiments", [])
+                if not isinstance(requests, list) or not requests:
+                    self._send_json({"ok": False, "error": "POWER_EXPERIMENT_BATCH_REQUIRED"}, HTTPStatus.BAD_REQUEST)
+                else:
+                    try:
+                        results = [self._power_experiment_registry().create(item) for item in requests]
+                        self._send_json(
+                            {"ok": True, "data": {"count": len(results), "experiments": results}},
+                            HTTPStatus.CREATED,
+                        )
+                    except ValueError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif match := re.fullmatch(r"/api/sim/power/switches/([^/]+)/operate", path):
                 payload = self._read_json_body()
                 self._send_json(self._operate_power_switch(match.group(1), payload))
@@ -566,15 +669,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "POWER_NETWORK_NOT_INITIALIZED"}
         fault_type = str(payload.get("faultType", "SUBSTATION_OUTAGE"))
         target_id = str(payload.get("targetId", ""))
-        if fault_type != "SUBSTATION_OUTAGE" or not target_id:
+        command_by_fault = {
+            "SUBSTATION_OUTAGE": ("SUBSTATION_OUTAGE", {"targetId": target_id, "bigBilateral": str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL"}),
+            "FEEDER_OPEN": ("SET_FEEDER_STATUS", {"feederId": target_id, "status": "OPEN"}),
+            "CONTACT_RAIL_DEENERGIZED": ("SET_CONTACT_SECTION_STATUS", {"sectionId": target_id, "status": "DEENERGIZED"}),
+        }
+        if fault_type not in command_by_fault or not target_id:
             return {"ok": False, "error": "UNSUPPORTED_POWER_FAULT"}
-        result = self.engine.queue_power_command(
-            "SUBSTATION_OUTAGE",
-            {
-                "targetId": target_id,
-                "bigBilateral": str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
-            },
-        )
+        command_type, command_payload = command_by_fault[fault_type]
+        result = self.engine.queue_power_command(command_type, command_payload)
         return {"ok": True, "data": {"faultId": f"PF-{target_id}", **result}}
 
     def _reset_power_network(self) -> JsonDict:
@@ -608,12 +711,91 @@ class ApiHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _queue_power_command(self, payload: JsonDict) -> JsonDict:
+        if self.engine is None or self.engine.power_service.network is None:
+            return {"ok": False, "error": "POWER_NETWORK_NOT_INITIALIZED"}
+        command_type = str(payload.get("commandType", ""))
+        command_payload = payload.get("payload", {})
+        if not command_type or not isinstance(command_payload, dict):
+            return {"ok": False, "error": "INVALID_POWER_COMMAND"}
+        try:
+            return {"ok": True, "data": self.engine.queue_power_command(command_type, command_payload)}
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _replay_power_commands(self, payload: JsonDict) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        records = payload.get("commands")
+        if records is None and payload.get("runId") is not None and self.engine.recorder is not None:
+            records = self.engine.recorder.replay_power_commands(int(payload["runId"]))
+        if not isinstance(records, list):
+            return {"ok": False, "error": "POWER_COMMAND_REPLAY_DATA_REQUIRED"}
+        queued = self.engine.replay_power_commands(
+            records,
+            base_sim_time_ms=int(payload["baseSimTimeMs"]) if payload.get("baseSimTimeMs") is not None else None,
+        )
+        return {"ok": True, "data": {"queuedCount": len(queued), "commands": queued}}
+
     def _read_json_body(self) -> JsonDict:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
+
+    @classmethod
+    def _power_experiment_registry(cls) -> PowerExperimentRegistry:
+        if cls.experiment_registry is None:
+            cls.experiment_registry = PowerExperimentRegistry(
+                DEFAULT_POWER_TOPOLOGY,
+                ROOT / "outputs" / "power_experiments.sqlite",
+            )
+        return cls.experiment_registry
+
+    def _add_train(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        return self.engine.add_train(payload)
+
+    def _remove_train(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        return self.engine.remove_train(str(payload.get("trainId", "")))
+
+    def _set_train_vehicle_config(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        vcfg = self.engine.set_train_vehicle_config(train_id, payload)
+        return {"ok": True, "vehicleConfig": vcfg.to_dict()}
+
+    def _set_train_manual_mode(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        return self.engine.set_manual_mode(train_id, bool(payload.get("enabled", False)))
+
+    def _send_train_manual_command(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        return self.engine.set_manual_command(
+            train_id,
+            float(payload.get("tractionPercent", 0)),
+            float(payload.get("brakePercent", 0)),
+        )
 
     def _speed_profile(self) -> JsonDict:
         if self.engine is None:

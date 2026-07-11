@@ -1785,7 +1785,29 @@ GET  /api/experiments/{experimentId}/trials
 5. API 响应模型先兼容现有 Phase 0 字段，再逐步切换到统一包裹格式。
 ## 供电网络接口补充
 
-本节对应 9号线牵引供电准静态仿真 V0，数据来源为自研工程近似模型：
+### 车辆功率闭环字段（2.0）
+
+`GET /api/sim/state` 的 `trains[]` 新增以下逐车瞬时与累计字段：
+
+| 字段 | 单位 | 说明 |
+|---|---:|---|
+| `tractionPowerRequestKw` | kW | 老师车辆曲线计算的候选牵引功率 |
+| `tractionPowerDeliveredKw` | kW | 供电约束后的实际牵引功率 |
+| `auxiliaryPowerKw` | kW | 辅助负荷 |
+| `regenPowerAvailableKw` | kW | 候选电制动再生功率 |
+| `regenPowerSelfConsumedKw` | kW | 本车辅助负荷自用 |
+| `regenPowerAcceptedKw` | kW | 自用与接触网接受之和 |
+| `regenPowerWastedKw` | kW | 未被利用的候选再生功率 |
+| `tractionEnergyKwh` | kWh | 累计实际牵引电能 |
+| `auxiliaryEnergyKwh` | kWh | 累计辅助能耗 |
+| `regenGeneratedKwh` | kWh | 累计候选再生电能 |
+| `regenSelfConsumedKwh` | kWh | 累计本车自用再生电能 |
+| `regenAcceptedKwh` | kWh | 累计实际接受再生电能 |
+| `regenWastedKwh` | kWh | 累计未利用再生电能 |
+
+`powerNetwork.trainVoltages[]` 同步提供上述逐车瞬时功率，并增加 `regenPowerExportedKw`。`powerNetwork.regen` 增加 `selfConsumedKw`，`paths[].sinkType` 增加 `TRAIN_AUXILIARY`。兼容字段 `energyKwh` 表示车辆实际净电能，不再表示“牵引候选能量减全部候选再生能量”。
+
+本节对应9号线牵引供电准静态仿真V1，数据来源为自研工程近似模型：
 
 ```text
 source = SELF_SIM
@@ -1794,7 +1816,7 @@ quality = ENGINEERING_ESTIMATE
 
 ### GET /api/lines/9/power-topology
 
-返回 9号线 DC750V 接触轨牵引供电 V0 静态拓扑。
+返回9号线DC750V接触轨牵引供电V1显式静态拓扑。正式配置启用严格校验，不允许在缺少馈线、接触轨、回流轨或开关时静默生成设备。
 
 响应字段：
 
@@ -1803,6 +1825,8 @@ quality = ENGINEERING_ESTIMATE
 | lineId | string | 线路 ID |
 | nominalVoltageV | number | 标称直流电压，V0 为 750V |
 | quality | string | 数据质量 |
+| modelVersion | string | 拓扑和参数模型版本，当前为 `LINE9-DC750-V1.0` |
+| provenance | object | 来源目录、参数文档和已知局限 |
 | substations | array | 牵引变电所列表 |
 | feeders | array | 馈电臂列表 |
 | contactRailSections | array | 接触轨分段 |
@@ -1818,12 +1842,40 @@ quality = ENGINEERING_ESTIMATE
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | simTimeMs | integer | 仿真绝对时刻 |
-| substations | array | 各牵引所电压、电流、功率、负载率 |
-| feeders | array | 馈电臂电流、功率、负载率 |
-| trainVoltages | array | 每列车受电电压、电流、限功率系数，包含 `mileageM` 用于前端定位 |
-| regen | object | 再生能量产生、吸收、回馈、浪费功率 |
+| substations | array | 各牵引所电压、有符号净电流/功率、整流功率、回馈功率和负载率 |
+| feeders | array | 馈电臂有符号电流、功率和负载率；正值表示从所向线路供电，负值表示向所回送 |
+| trainVoltages | array | 每列车受电电压、电流、限功率系数、等效受电里程、车头/车尾、全部受流点及跨越供电分区 |
+| regen | object | 再生生成、邻车吸收、具体设备回馈、路径损耗、浪费和逐路径明细 |
 | lossesKw | number | 线路损耗 |
 | alerts | array | 欠压、过载、过压、再生浪费等告警 |
+
+`regen.paths[]`字段如下：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| sourceTrainId | string | 再生源列车 |
+| sinkType | string | `TRAIN`、`SUBSTATION_FEEDBACK`或`WASTE` |
+| sinkId | string | 受能列车、能馈牵引所或制动电阻标识 |
+| viaSubstationId | string/null | 路径共同经过或回馈到的牵引所 |
+| sourceFeederId/sinkFeederId | string/null | 再生源和受端馈线 |
+| generatedKw | number | 源列车沿该路径提供的功率 |
+| deliveredKw | number | 到达受端的功率 |
+| lossesKw | number | 路径电阻损耗 |
+| currentA | number | 该分配路径电流绝对值 |
+| pathResistanceOhm | number | 正、回流及馈线的路径等效电阻 |
+
+每个tick必须满足：`generatedKw = absorbedKw + feedbackKw + transferLossesKw + wastedKw`；每条非浪费路径必须满足：`generatedKw = deliveredKw + lossesKw`。
+
+`trainVoltages[]`中的位置字段：
+
+| 字段 | 说明 |
+|---|---|
+| mileageM | 全部有效受流点的等效中心里程 |
+| headMileageM/tailMileageM | 按运行方向定义的车头、车尾线路里程 |
+| pantographMileagesM | 车载受流点线路里程数组；V1默认两个等效受流点 |
+| spannedPowerSectionIds | 118 m列车车体当前跨越的全部供电区段 |
+
+供电路径由受流点而不是车头点求解。同一馈线上的多个受流点只保留最短有效路径；不同馈线上的受流点可以在跨分段时共同受流。
 
 ### POST /api/sim/power/faults
 
@@ -1895,3 +1947,43 @@ quality = ENGINEERING_ESTIMATE
 | kpi.totalAbsorbedRegenKw | number | 当前再生吸收功率 |
 | kpi.totalWastedRegenKw | number | 当前再生浪费功率 |
 | kpi.powerLossesKw | number | 当前线路损耗 |
+
+## 供电命令与优化实验API（V2补充）
+
+### 可回放供电命令
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/sim/power/commands` | 排队执行统一供电命令 |
+| GET | `/api/sim/power/commands` | 查询最近命令及待执行命令 |
+| GET | `/api/sim/power/commands/{commandId}` | 查询单条命令 |
+| POST | `/api/sim/power/commands/replay` | 按相对仿真时刻重放导出命令 |
+
+`commandType` 支持：`SUBSTATION_OUTAGE`、`SUBSTATION_RESTORE`、`OPERATE_SWITCH`、`SET_FEEDER_STATUS`、`SET_CONTACT_SECTION_STATUS`、`RESET_NETWORK`。命令可带 `applyAtSimTimeMs`，仅在对应tick边界生效。记录同时保留 `requestPayload` 和执行 `data/error`。
+
+### 批量优化实验
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/power/experiments` | 同步创建并运行一个实验 |
+| POST | `/api/power/experiments/batch` | 批量运行多个实验 |
+| GET | `/api/power/experiments` | 列出实验摘要 |
+| GET | `/api/power/experiments/{experimentId}` | 获取实验摘要和最佳候选 |
+| GET | `/api/power/experiments/{experimentId}/trials` | 获取全部候选明细 |
+
+请求示例：
+
+```json
+{
+  "problem": "N1_ROBUST_TIMETABLE",
+  "algorithm": "EVOLUTIONARY",
+  "populationSize": 12,
+  "generations": 5,
+  "seed": 20260711,
+  "trainCount": 12,
+  "timeSlots": 16,
+  "slotSeconds": 5
+}
+```
+
+`problem` 支持 `REGEN_MATCHING`、`TRACTION_STAGGER`、`EFS_CAPACITY`、`N1_ROBUST_TIMETABLE`。响应包含基线、最佳试验、改善比例、逐代摘要、全部目标与硬约束。

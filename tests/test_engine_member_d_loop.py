@@ -10,9 +10,15 @@ class EngineMemberDLoopTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             "data/scenarios/line9_single.json",
             "data/cache/line_map.json",
-            "MetroDynamicsJavaDemo/data/stations.csv",
+            "data/line9/stations.csv",
         )
         engine.load()
+        result = engine.add_train({
+            "trainId": "T0901",
+            "initialStationCode": "GGZ",
+            "direction": "UP",
+        })
+        self.assertTrue(result["ok"])
         return engine
 
     def test_snapshot_uses_scenario_start_time(self) -> None:
@@ -39,6 +45,13 @@ class EngineMemberDLoopTests(unittest.TestCase):
         self.assertIn("tractionLimitRatio", snapshot.power[0])
         self.assertIn("waitingPax", snapshot.stations[0])
         self.assertIn("lastDispatchAction", snapshot.kpi)
+        train = snapshot.trains[0]
+        self.assertIn("tractionPowerRequestKw", train)
+        self.assertIn("regenPowerAvailableKw", train)
+        self.assertIn("regenAcceptedKwh", train)
+        self.assertIn("regenWastedKwh", train)
+        self.assertIn("selfConsumedKw", snapshot.power_network["regen"])
+        self.assertIn("tractionPowerDeliveredKw", snapshot.power_network["trainVoltages"][0])
 
     def test_engine_exports_path_plan_context_for_interval(self) -> None:
         engine = self._engine()

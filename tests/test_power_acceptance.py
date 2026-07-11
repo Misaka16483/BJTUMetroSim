@@ -28,7 +28,7 @@ class PowerAcceptanceTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
         engine.clock.start()
@@ -76,7 +76,7 @@ class PowerAcceptanceTests(unittest.TestCase):
             engine = SimulationEngine.load_from_files(
                 scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
                 line_map_path=ROOT / "data" / "cache" / "line_map.json",
-                stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
             )
             engine.load()
             engine.clock.start()
@@ -111,7 +111,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                 engine = SimulationEngine.load_from_files(
                     scenario_path=scenario_path,
                     line_map_path=ROOT / "data" / "cache" / "line_map.json",
-                    stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                    stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
                 )
                 engine.load()
                 engine.clock.start()
@@ -143,7 +143,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                 stressed = SimulationEngine.load_from_files(
                     scenario_path=scenario_path,
                     line_map_path=ROOT / "data" / "cache" / "line_map.json",
-                    stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                    stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
                 )
                 stressed.load()
                 network = stressed.power_service.network
@@ -182,12 +182,20 @@ class PowerAcceptanceTests(unittest.TestCase):
             ],
             dt_sec=0.25,
         )
-        split = snapshot.absorbed_regen_kw + snapshot.feedback_regen_kw + snapshot.wasted_regen_kw
+        split = (
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
+            + snapshot.feedback_regen_kw
+            + snapshot.wasted_regen_kw
+            + snapshot.regen_transfer_losses_kw
+        )
         self.assertAlmostEqual(snapshot.generated_regen_kw, split, places=9)
         self.assertGreater(snapshot.absorbed_regen_kw, 0.0)
 
     def test_regen_absorption_feedback_and_waste_all_conserve_energy(self) -> None:
-        solver = DCTractionPowerFlowSolver(load_line9_power_network(TOPOLOGY))
+        network = load_line9_power_network(TOPOLOGY)
+        network.operate_switch("SW-TIE-0902", "CLOSED")
+        solver = DCTractionPowerFlowSolver(network)
         snapshot = solver.solve(
             [
                 TrainElectricalLoad("TRACTION", "UP", 2200.0, 18.0, traction_force_n=95_000.0, aux_power_kw=60.0),
@@ -197,7 +205,13 @@ class PowerAcceptanceTests(unittest.TestCase):
             ],
             dt_sec=0.25,
         )
-        split = snapshot.absorbed_regen_kw + snapshot.feedback_regen_kw + snapshot.wasted_regen_kw
+        split = (
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
+            + snapshot.feedback_regen_kw
+            + snapshot.wasted_regen_kw
+            + snapshot.regen_transfer_losses_kw
+        )
         self.assertAlmostEqual(snapshot.generated_regen_kw, split, places=9)
         self.assertGreater(snapshot.absorbed_regen_kw, 0.0)
         self.assertGreater(snapshot.feedback_regen_kw, 0.0)
@@ -246,7 +260,7 @@ class PowerAcceptanceTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
         network = engine.power_service.network
@@ -268,7 +282,7 @@ class PowerAcceptanceTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
         network = engine.power_service.network

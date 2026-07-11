@@ -84,6 +84,61 @@ class PowerServiceNetworkTests(unittest.TestCase):
             service.update([request], dt_sec=0.25, sim_time_ms=tick * 250)
         self.assertTrue(any(item.status == "OPEN" for item in network.feeders.values()))
 
+    def test_contact_rail_protection_trip_is_effective_in_same_tick(self) -> None:
+        network = load_line9_power_network(ROOT / "data" / "scenarios" / "line9_power_topology.json")
+        target_id = "CR-09-02-UP"
+        network.contact_sections[target_id] = replace(network.contact_sections[target_id], current_limit_a=1.0)
+        service = PowerService(
+            [
+                PowerSection("PWR-09-UP", "Up", max_traction_power_kw=20_000.0, warning_power_kw=15_000.0),
+                PowerSection("PWR-09-DOWN", "Down", max_traction_power_kw=20_000.0, warning_power_kw=15_000.0),
+            ],
+            network=network,
+        )
+        request = TrainPowerRequest(
+            "T1", "PWR-09-UP", speed_mps=18.0, traction_force_n=95_000.0,
+            position_m=2_400.0, direction="UP", aux_power_kw=60.0,
+        )
+
+        for tick in range(7):
+            service.update([request], dt_sec=0.25, sim_time_ms=tick * 250)
+
+        state = service.update([request], dt_sec=0.25, sim_time_ms=1_750)
+        self.assertEqual(network.contact_sections[target_id].status, "DEENERGIZED")
+        assert service.last_network_snapshot is not None
+        train = service.last_network_snapshot.trains[0]
+        self.assertEqual(train.traction_limit_ratio, 0.0)
+        self.assertEqual(state["PWR-09-UP"].traction_limit_ratio, 0.0)
+        self.assertTrue(any(item["type"] == "CONTACT_RAIL_PROTECTION_TRIP" for item in service.last_network_snapshot.alerts))
+
+    def test_invalid_solution_preserves_last_valid_snapshot(self) -> None:
+        network = load_line9_power_network(ROOT / "data" / "scenarios" / "line9_power_topology.json")
+        service = PowerService(
+            [PowerSection("PWR-09-UP", "Up", max_traction_power_kw=20_000.0, warning_power_kw=15_000.0)],
+            network=network,
+        )
+        request = TrainPowerRequest(
+            "T1", "PWR-09-UP", speed_mps=18.0, traction_force_n=95_000.0,
+            position_m=2_400.0, direction="UP", aux_power_kw=60.0,
+        )
+        service.update([request], dt_sec=0.25, sim_time_ms=0)
+        valid = service.last_network_snapshot
+        assert service.solver is not None
+        original_solve = service.solver.solve
+
+        def failed_solve(*args, **kwargs):
+            return replace(original_solve(*args, **kwargs), converged=False, power_balance_error_ratio=0.02)
+
+        service.solver.solve = failed_solve  # type: ignore[method-assign]
+        service.update([request], dt_sec=0.25, sim_time_ms=250)
+
+        self.assertIs(service.last_network_snapshot, valid)
+        self.assertIsNotNone(service.last_failed_network_snapshot)
+        self.assertEqual(
+            service.last_solver_failure["reasons"],
+            ["NOT_CONVERGED", "POWER_BALANCE_EXCEEDED"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

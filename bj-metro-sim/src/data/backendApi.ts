@@ -140,6 +140,19 @@ export interface SimTrainState {
   tractionPercent?: number;
   brakePercent?: number;
   energyKwh?: number;
+  tractionEnergyKwh?: number;
+  auxiliaryEnergyKwh?: number;
+  regenGeneratedKwh?: number;
+  regenSelfConsumedKwh?: number;
+  regenAcceptedKwh?: number;
+  regenWastedKwh?: number;
+  tractionPowerRequestKw?: number;
+  tractionPowerDeliveredKw?: number;
+  auxiliaryPowerKw?: number;
+  regenPowerAvailableKw?: number;
+  regenPowerSelfConsumedKw?: number;
+  regenPowerAcceptedKw?: number;
+  regenPowerWastedKw?: number;
   targetSpeedMps?: number;
   estimatedRunTimeS?: number;
   pathPositionM?: number;
@@ -149,6 +162,12 @@ export interface SimTrainState {
   gradeRatio?: number;
   pathSegmentCount?: number;
   pathConstraintCount?: number;
+  operationMode?: string;
+  trainLengthM: number;
+  headMileageM: number;
+  tailMileageM: number;
+  pantographMileagesM: number[];
+  spannedPowerSectionIds: string[];
 }
 
 export interface SimStationInfo {
@@ -172,6 +191,8 @@ export interface SimPowerState {
   regenEnergyKwh: number;
   absorbedRegenKw: number;
   wastedRegenKw: number;
+  generatedRegenKw?: number;
+  selfConsumedRegenKw?: number;
   minTrainVoltageV?: number;
   maxTrainCurrentA?: number;
   substationCount?: number;
@@ -206,15 +227,30 @@ export interface PowerTopologySubstation {
   overloadCurrentA: number;
   efsCapacityKw: number;
   status: string;
+  rectifierPowerKw: number;
+  feedbackPowerKw: number;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
 }
 
 export interface PowerTopology {
   lineId: string;
   nominalVoltageV: number;
   quality: string;
+  modelVersion: string;
+  provenance: {
+    sources: Array<{
+      sourceId: string;
+      description: string;
+      evidenceLevel: string;
+    }>;
+    parameterDocument: string;
+    limitations: string[];
+  };
   substations: PowerTopologySubstation[];
-  feeders: unknown[];
-  contactRailSections: unknown[];
+  feeders: PowerTopologyFeeder[];
+  contactRailSections: PowerTopologyContactRailSection[];
   returnRailSections?: unknown[];
   switches: unknown[];
 }
@@ -230,6 +266,41 @@ export interface PowerFeederState {
   status: string;
 }
 
+export interface ContactRailPowerFlowState {
+  sectionId: string;
+  direction: string;
+  currentA: number;
+  powerKw: number;
+  loadRatio: number;
+  status: string;
+  rectifierPowerKw?: number;
+  feedbackPowerKw?: number;
+}
+
+export interface PowerTopologyFeeder {
+  feederId: string;
+  substationId: string;
+  direction: string;
+  side: string;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
+}
+
+export interface PowerTopologyContactRailSection {
+  sectionId: string;
+  direction: string;
+  fromMileageM: number;
+  toMileageM: number;
+  resistanceOhmPerKm: number;
+  currentLimitA: number;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
+}
+
 export interface TrainVoltageState {
   trainId: string;
   powerSectionId: string;
@@ -237,6 +308,14 @@ export interface TrainVoltageState {
   voltageV: number;
   currentA: number;
   requestedPowerKw: number;
+  tractionPowerRequestKw: number;
+  tractionPowerDeliveredKw: number;
+  auxiliaryPowerKw: number;
+  regenPowerAvailableKw: number;
+  regenPowerSelfConsumedKw: number;
+  regenPowerExportedKw: number;
+  regenPowerAcceptedKw: number;
+  regenPowerWastedKw: number;
   tractionLimitRatio: number;
   regenLimitRatio: number;
   voltageLevel: string;
@@ -248,12 +327,28 @@ export interface PowerNetworkState {
   simTimeMs?: number;
   substations: PowerSubstationState[];
   feeders: PowerFeederState[];
+  contactRailFlows?: ContactRailPowerFlowState[];
   trainVoltages: TrainVoltageState[];
   regen: {
     generatedKw: number;
+    selfConsumedKw: number;
     absorbedKw: number;
     feedbackKw: number;
     wastedKw: number;
+    transferLossesKw: number;
+    paths: Array<{
+      sourceTrainId: string;
+      sinkType: 'TRAIN' | 'TRAIN_AUXILIARY' | 'SUBSTATION_FEEDBACK' | 'WASTE';
+      sinkId: string;
+      viaSubstationId: string | null;
+      sourceFeederId: string | null;
+      sinkFeederId: string | null;
+      generatedKw: number;
+      deliveredKw: number;
+      lossesKw: number;
+      currentA: number;
+      pathResistanceOhm: number;
+    }>;
   };
   lossesKw: number;
   solver?: {
@@ -280,6 +375,13 @@ export interface PowerNetworkState {
     status: string;
     error?: string;
   }>;
+  solverFailure?: {
+    type: 'POWER_SOLVER_FAILURE';
+    reasons: string[];
+    simTimeMs: number;
+    iterations: number;
+    powerBalanceErrorRatio: number;
+  } | null;
   alerts: Array<Record<string, unknown>>;
   source?: string;
   quality?: string;
@@ -378,4 +480,141 @@ export function simResume(): Promise<unknown> {
 
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
+}
+
+export interface VehicleConfigPayload {
+  formation: string;
+  carMassesKg: number[];
+  headCarLengthM: number;
+  middleCarLengthM: number;
+  wheelRadiusM: number;
+  maxSpeedMps?: number;
+  maxTractionForceN?: number;
+  maxServiceBrakeForceN?: number;
+  emergencyBrakeForceN?: number;
+  pantographOffsetsFromHeadM?: number[];
+}
+
+export interface VehicleConfigResponse {
+  ok: boolean;
+  vehicleConfig: {
+    trainId: string;
+    formation: string;
+    carMassesKg: number[] | null;
+    headCarLengthM: number;
+    middleCarLengthM: number;
+    wheelRadiusM: number;
+    massKg: number;
+    trainLengthM: number;
+    maxSpeedMps: number;
+    maxTractionForceN: number;
+    maxServiceBrakeForceN: number;
+    emergencyBrakeForceN: number;
+    pantographOffsetsFromHeadM: number[];
+  };
+}
+
+export function simSetVehicleConfig(payload: VehicleConfigPayload): Promise<VehicleConfigResponse> {
+  return fetch('/api/sim/vehicle-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<VehicleConfigResponse>;
+  });
+}
+
+export function simSetManualMode(enabled: boolean, trainId?: string): Promise<{ ok: boolean; manualMode: boolean }> {
+  return fetch('/api/sim/manual-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled, trainId }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+  });
+}
+
+export function simSendManualCommand(tractionPercent: number, brakePercent: number, trainId?: string): Promise<unknown> {
+  return fetch('/api/sim/manual-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tractionPercent, brakePercent, trainId }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json();
+  });
+}
+
+export interface AddTrainPayload {
+  trainId: string;
+  initialStationCode: string;
+  direction: 'UP' | 'DOWN';
+  operationMode?: 'ATO' | 'MANUAL';
+  capacityPax?: number;
+  initialLoadPax?: number;
+  vehicleConfig?: VehicleConfigPayload;
+  color?: string;
+}
+
+export interface AddTrainResponse {
+  ok: boolean;
+  train?: SimTrainState;
+  error?: string;
+}
+
+export function simAddTrain(payload: AddTrainPayload): Promise<AddTrainResponse> {
+  return fetch('/api/sim/train/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<AddTrainResponse>;
+  });
+}
+
+export function simRemoveTrain(trainId: string): Promise<{ ok: boolean; removed?: string; error?: string }> {
+  return fetch('/api/sim/train/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean }>;
+  });
+}
+
+export function simSetTrainVehicleConfig(trainId: string, payload: VehicleConfigPayload): Promise<VehicleConfigResponse> {
+  return fetch('/api/sim/train/vehicle-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, ...payload }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<VehicleConfigResponse>;
+  });
+}
+
+export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<{ ok: boolean; manualMode: boolean }> {
+  return fetch('/api/sim/train/manual-mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, enabled }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+  });
+}
+
+export function simSendTrainManualCommand(trainId: string, tractionPercent: number, brakePercent: number): Promise<unknown> {
+  return fetch('/api/sim/train/manual-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, tractionPercent, brakePercent }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json();
+  });
 }
