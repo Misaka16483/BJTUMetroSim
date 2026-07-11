@@ -328,15 +328,62 @@ class StationService:
 
 # ── 兼容旧版 member_d_demo 接口 ──
 
-@dataclass
+@dataclass(frozen=True, init=False)
 class PassengerDemandProfile:
     """旧版客流需求配置（兼容 member_d_demo）。"""
-    station_code: str
+    station_id: str
     direction: str
-    start_time_s: int
-    end_time_s: int
-    hourly_arrival_rate: float
-    alighting_ratio: float = 0.0
+    start_sec: int
+    end_sec: int
+    arrival_rate_pax_per_min: float
+    alighting_ratio: float = 0.12
+
+    def __init__(
+        self,
+        station_id: str | None = None,
+        direction: str = "UP",
+        start_sec: int | None = None,
+        end_sec: int | None = None,
+        arrival_rate_pax_per_min: float | None = None,
+        alighting_ratio: float = 0.12,
+        *,
+        station_code: str | None = None,
+        start_time_s: int | None = None,
+        end_time_s: int | None = None,
+        hourly_arrival_rate: float | None = None,
+    ) -> None:
+        resolved_station_id = station_id or station_code
+        if not resolved_station_id:
+            raise ValueError("station_id or station_code is required")
+        resolved_rate = arrival_rate_pax_per_min
+        if resolved_rate is None and hourly_arrival_rate is not None:
+            resolved_rate = hourly_arrival_rate / 60.0
+        object.__setattr__(self, "station_id", resolved_station_id)
+        object.__setattr__(self, "direction", direction)
+        object.__setattr__(self, "start_sec", int(start_sec if start_sec is not None else start_time_s or 0))
+        object.__setattr__(self, "end_sec", int(end_sec if end_sec is not None else end_time_s or 86400))
+        object.__setattr__(self, "arrival_rate_pax_per_min", float(resolved_rate or 0.0))
+        object.__setattr__(self, "alighting_ratio", float(alighting_ratio))
+
+    @property
+    def station_code(self) -> str:
+        return self.station_id
+
+    @property
+    def start_time_s(self) -> int:
+        return self.start_sec
+
+    @property
+    def end_time_s(self) -> int:
+        return self.end_sec
+
+    @property
+    def hourly_arrival_rate(self) -> float:
+        return self.arrival_rate_pax_per_min * 60.0
+
+    def active_at(self, sim_time_ms: int) -> bool:
+        sim_sec = sim_time_ms / 1000.0
+        return self.start_sec <= sim_sec < self.end_sec
 
 
 class PassengerFlowGenerator(PoissonPassengerFlowGenerator):
@@ -346,23 +393,46 @@ class PassengerFlowGenerator(PoissonPassengerFlowGenerator):
     """
 
     def __init__(self, profiles: list[PassengerDemandProfile]) -> None:
-        scenario = FlowScenario(
-            scenario_id="legacy_member_d",
-            description="Legacy member_d demo flow",
-            day_type=DayType.NORMAL_WEEKDAY,
-            stations=[
-                StationFlowConfig(
-                    station_id=p.station_code,
-                    direction=p.direction,
-                    start_time_sec=p.start_time_s,
-                    end_time_sec=p.end_time_s,
-                    base_arrival_rate_pph=p.hourly_arrival_rate,
-                    alighting_ratio=p.alighting_ratio,
-                )
-                for p in profiles
-            ],
+        self.profiles = profiles
+        self._station_configs = [
+            StationFlowConfig(
+                station_id=profile.station_id,
+                direction=profile.direction,
+                base_arrival_rate_pax_per_min=profile.arrival_rate_pax_per_min,
+                alighting_ratio=profile.alighting_ratio,
+            )
+            for profile in profiles
+        ]
+        super().__init__(
+            self._station_configs,
+            FlowScenario(day_type=DayType.MON_THU),
+            use_poisson=False,
         )
-        super().__init__(scenario)
+        self._residual_by_key: dict[tuple[str, str], float] = {}
+
+    def arrivals(self, station_id: str, direction: str, sim_time_ms: int, dt_sec: float) -> int:
+        rate = sum(
+            profile.arrival_rate_pax_per_min
+            for profile in self.profiles
+            if profile.station_id == station_id
+            and profile.direction == direction
+            and profile.active_at(sim_time_ms)
+        )
+        key = (station_id, direction)
+        expected = rate * dt_sec / 60.0 + self._residual_by_key.get(key, 0.0)
+        arrivals = int(expected)
+        self._residual_by_key[key] = expected - arrivals
+        return arrivals
+
+    def alighting_ratio(self, station_id: str, direction: str, sim_time_ms: int) -> float:
+        ratios = [
+            profile.alighting_ratio
+            for profile in self.profiles
+            if profile.station_id == station_id
+            and profile.direction == direction
+            and profile.active_at(sim_time_ms)
+        ]
+        return sum(ratios) / len(ratios) if ratios else 0.12
 
 
 

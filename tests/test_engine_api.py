@@ -22,7 +22,7 @@ class EngineStateContractTests(unittest.TestCase):
         self.assertEqual(engine.snapshot().clock_state, "RUNNING")
         engine.stop()
 
-    def test_stop_resets_runtime_but_preserves_configured_roster_for_restart(self) -> None:
+    def test_stop_clears_runtime_and_allows_new_roster_for_restart(self) -> None:
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
@@ -35,12 +35,10 @@ class EngineStateContractTests(unittest.TestCase):
         stopped = engine.snapshot()
         self.assertEqual(stopped.clock_state, "STOPPED")
         self.assertEqual(stopped.tick, 0)
-        self.assertEqual([train["trainId"] for train in stopped.trains], ["UP-1"])
-        self.assertEqual(stopped.trains[0]["speedMps"], 0)
-        self.assertEqual(stopped.trains[0]["energyKwh"], 0)
+        self.assertEqual(stopped.trains, [])
         self.assertTrue(engine.add_train({"trainId": "DOWN-1", "initialStationCode": "GTG", "direction": "DOWN"})["ok"])
         engine.start()
-        self.assertEqual({train["trainId"] for train in engine.snapshot().trains}, {"UP-1", "DOWN-1"})
+        self.assertEqual({train["trainId"] for train in engine.snapshot().trains}, {"DOWN-1"})
         engine.stop()
 
     def test_add_train_validates_station_code_direction_and_terminus(self) -> None:

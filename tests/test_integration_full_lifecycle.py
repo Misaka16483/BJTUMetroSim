@@ -867,4 +867,7 @@ if failed == 0:
 else:
     print(f"  {RED('FAILURES')}  ({passed}/{total_all}, {failed} failed)")
 print("=" * 64)
-sys.exit(0 if failed == 0 else 1)
+if __name__ == "__main__":
+    sys.exit(0 if failed == 0 else 1)
+if failed:
+    raise AssertionError(f"full lifecycle audit failed: {failed} checks")
