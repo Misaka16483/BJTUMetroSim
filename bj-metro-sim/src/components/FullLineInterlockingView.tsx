@@ -176,9 +176,10 @@ export default function FullLineInterlockingView() {
   const canvasWrapRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [scale, setScale] = useState(0.35);
-  const offsetRef = useRef({ x: 120, y: 0 });
+  const [scale, setScale] = useState(1);
+  const offsetRef = useRef({ x: 0, y: 0 });
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const centeredRef = useRef(false);
 
   const [simState, setSimState] = useState<SimStateResponse | null>(null);
   const [trackMap, setTrackMap] = useState<TrackMapData | null>(null);
@@ -352,11 +353,41 @@ export default function FullLineInterlockingView() {
     ctx.restore();
   }, [scale, interlockingData, trackMap, simState]);
 
+  // 居中计算：将内容水平和垂直居中于容器
+  function centerView() {
+    const c = canvasWrapRef.current;
+    if (!c || !interlockingData) return;
+    const containerW = c.clientWidth;
+    const containerH = c.clientHeight;
+    const contentW = interlockingData.bounds.width * scale;
+    const contentH = interlockingData.bounds.height * scale;
+    offsetRef.current.x = Math.round((containerW - contentW) / 2);
+    offsetRef.current.y = Math.round((containerH - contentH) / 2);
+    centeredRef.current = true;
+  }
+
   // 事件处理
   const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
-    setScale(s => Math.max(0.3, Math.min(3, s * (e.deltaY > 0 ? 0.9 : 1.1))));
-  }, []);
+    const c = canvasWrapRef.current;
+    if (!c || !interlockingData) return;
+
+    // 鼠标在容器中的位置
+    const rect = c.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+
+    // 当前缩放下，鼠标位置对应的内容坐标
+    const oldScale = scale;
+    const oldContentX = (mouseX - offsetRef.current.x) / oldScale;
+
+    const newScale = Math.max(0.3, Math.min(3, oldScale * (e.deltaY > 0 ? 0.9 : 1.1)));
+
+    // 保持鼠标下方的内容点不动
+    const newOffsetX = mouseX - oldContentX * newScale;
+    offsetRef.current.x = newOffsetX;
+
+    setScale(newScale);
+  }, [scale, interlockingData]);
 
   // Canvas DOM 滚轮监听（绕过 React passive 限制）
   useEffect(() => {
@@ -402,6 +433,9 @@ export default function FullLineInterlockingView() {
     c.height = h * 2;
     c.style.width = w + 'px';
     c.style.height = h + 'px';
+    if (!centeredRef.current) {
+      centerView();
+    }
     draw();
   }, [draw]);
 
@@ -411,9 +445,24 @@ export default function FullLineInterlockingView() {
     return () => window.removeEventListener('resize', updateSize);
   }, [updateSize]);
 
+  // 数据加载完成后居中 + 初始化画布大小
+  useEffect(() => {
+    if (!loading) {
+      updateSize();
+    }
+  }, [loading, updateSize]);
+
   const zoomTo = (s: number) => {
     setScale(Math.max(0.3, Math.min(3, s)));
     setTimeout(draw, 0);
+  };
+
+  const resetView = () => {
+    setScale(1);
+    centeredRef.current = false;
+    setTimeout(() => {
+      updateSize();
+    }, 0);
   };
 
   if (loading) {
@@ -439,7 +488,7 @@ export default function FullLineInterlockingView() {
           <button onClick={() => zoomTo(scale / 1.3)} className="px-2 py-1 text-[13px] bg-[#0d1424] border border-[#1a2240] text-[#8b949e] hover:text-white cursor-pointer">
             -
           </button>
-          <button onClick={() => zoomTo(0.35)} className="px-2 py-1 text-[11px] bg-[#0d1424] border border-[#1a2240] text-[#8b949e] hover:text-white cursor-pointer">
+          <button onClick={resetView} className="px-2 py-1 text-[11px] bg-[#0d1424] border border-[#1a2240] text-[#8b949e] hover:text-white cursor-pointer">
             重置
           </button>
           <span className="text-[11px] text-[#3a4a60] ml-1 font-mono">{Math.round(scale * 100)}%</span>
