@@ -483,6 +483,7 @@ function drawConnectionProfile(
   const gapX1 = connTrack.x;
   const gapW = connTrack.width;
   const segMap = new Map(trackMap.segments.map(s => [s.id, s]));
+  const buildProfile = (ids: number[]) => {
     const segs = ids.map(id => segMap.get(id)).filter(Boolean) as { id: number; lengthM: number }[];
     if (segs.length === 0) return null;
     let cum = 0;

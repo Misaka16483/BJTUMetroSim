@@ -1960,8 +1960,9 @@ class SimulationEngine:
             clock_state=self.clock.state.value,
             trains=[t.to_dict() for t in self.trains],
             stations=[
-                self._station_snapshot(stn)
+                s
                 for stn in self._station_list
+                for s in [self._station_snapshot(stn, "UP"), self._station_snapshot(stn, "DOWN")]
             ],
             power=[self._power_snapshot(state) for state in self._last_power_states.values()],
             power_network=self._power_network_snapshot(),
@@ -2228,9 +2229,8 @@ class SimulationEngine:
     def _absolute_sim_time_ms(self) -> int:
         return self.scenario.start_time_ms + int(self.clock.sim_time_seconds * 1000)
 
-    def _station_snapshot(self, station: JsonDict) -> JsonDict:
+    def _station_snapshot(self, station: JsonDict, direction: str = "UP") -> JsonDict:
         code = str(station.get("code", ""))
-        direction = "UP"
         platform = self.station_service.ensure_platform(code, direction)
         arrivals = self._last_arrivals_by_platform.get((code, direction), 0)
         return {
