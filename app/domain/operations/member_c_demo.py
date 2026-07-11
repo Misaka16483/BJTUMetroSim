@@ -26,7 +26,7 @@ from app.domain.interlocking.rule_engine import InterlockingRuleEngine
 from app.domain.interlocking.section_occupation import SectionOccupationService
 from app.domain.interlocking.signal_resolver import SignalAspectResolver
 from app.domain.interlocking.switch_lock import SwitchLockService
-from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.line.services import LineMapRepository, PathTrackQuery, TrackQueryService
 from app.domain.signal.models import TrainState
 from app.domain.vehicle.models import CommandSource, ControlCommand, VehicleConfig
 from app.domain.vehicle.services import SimpleVehicleModel
@@ -52,12 +52,17 @@ class MemberCDemoRunner:
     TRAIN_ID = "T0901"
     TRAIN_LENGTH_M = 120.0
     TRAIN_COLOR = "#e74c3c"
+    # Keep one movement authority for the train and two route sections ahead.
+    # This lets the signal resolver show the normal GREEN -> YELLOW -> RED
+    # progression instead of a permanently single-route YELLOW authority.
+    ROUTE_LOOKAHEAD = 3
     # 让 B 的模型提供足够牵引力（180t × 1.2m/s² ≈ 216kN）
     TRACTION_FORCE_N = 216_000.0
 
     def __init__(self, cache_path: str | Path) -> None:
         # ---- 加载线路数据 ----
         line_map = LineMapRepository(cache_path).load()
+        self._line_map = line_map
         self.track = TrackQueryService(line_map)
 
         # ---- 联锁子系统（全部成员C的模块） ----
@@ -84,6 +89,7 @@ class MemberCDemoRunner:
 
         # ---- 构建 Seg 链（用于前端渲染和里程计算） ----
         self._seg_chain = self._build_mainline_chain(line_map)
+        self.path_track = PathTrackQuery(self.track, self._seg_chain)
         self._seg_mileage = self._build_seg_mileage()
 
         # ---- 硬编码的进路链（sig9(F5)出发，沿9号线上行方向7条连续通路） ----
@@ -100,6 +106,12 @@ class MemberCDemoRunner:
 
         # ---- 已办理的进路防重复 ----
         self._requested_routes: set[str] = set()
+        self._manual_mode: str | None = None
+        self._manual_route_id: str | None = None
+        self._manual_end_mileage: float = 0.0
+        self._manual_finished = False
+        self._events: list[JsonDict] = []
+        self._event_seq = 0
 
         # ---- 运行时状态 ----
         self.tick: int = 0
@@ -138,18 +150,35 @@ class MemberCDemoRunner:
         self.sim_time_ms += int(self.DT_SEC * 1000)
         ts = self._train_state
 
+        if self._manual_mode == "free" or (
+            self._manual_mode == "route"
+            and not self.route_svc.is_locked(self._manual_route_id or "")
+        ):
+            self.section_occ.update([self._train_state], self.path_track)
+            self.route_svc.update()
+            self.signal_resolver.refresh()
+            return
+
         # ① ATO决策：根据当前位置和目标距离决定牵引/制动
         cmd = self._ato_decision(ts)
         # ② B的车辆动力学：传入当前TrainState、控制指令和时间步长
         new_state = self._vehicle.step(ts, cmd, dt_s=self.DT_SEC)
+        position_m = new_state.position_m
+        speed_mps = new_state.speed_mps
+        if self._manual_mode == "route" and position_m >= self._manual_end_mileage:
+            position_m = self._manual_end_mileage
+            speed_mps = 0.0
+            if not self._manual_finished:
+                self._manual_finished = True
+                self._add_event("列车已通过所选进路并停在终端信号前", "通过")
         # 将里程位置映射回 Seg
-        seg_id, offset_m = self._mileage_to_seg(new_state.position_m)
+        seg_id, offset_m = self._mileage_to_seg(position_m)
         self._train_state = TrainState(
             train_id=new_state.train_id,
             sim_time_ms=self.sim_time_ms,
             seg_id=seg_id, offset_m=offset_m,
-            position_m=new_state.position_m,
-            speed_mps=new_state.speed_mps,
+            position_m=position_m,
+            speed_mps=speed_mps,
             acceleration_mps2=new_state.acceleration_mps2,
             direction="FORWARD", length_m=self.TRAIN_LENGTH_M,
             operation_mode="ATO",
@@ -158,10 +187,11 @@ class MemberCDemoRunner:
         )
 
         # ③ 更新区段占用 —— SectionOccupationService（成员C）
-        self.section_occ.update([self._train_state], self.track)
+        self.section_occ.update([self._train_state], self.path_track)
 
         # ④ 自动进路办理：当列车接近下一个信号时申请进路
-        self._auto_request_routes(self._train_state)
+        if self._manual_mode is None:
+            self._auto_request_routes(self._train_state)
 
         # ⑤ 进路释放检查 —— RouteService（成员C）
         self.route_svc.update()
@@ -177,7 +207,7 @@ class MemberCDemoRunner:
 
         # 列车覆盖的Seg着色
         seg_train_colors: dict[int, str] = {}
-        covered = self.section_occ._segments_covered_by_train(self._train_state, self.track)
+        covered = self.section_occ._segments_covered_by_train(self._train_state, self.path_track)
         for sid in covered:
             seg_train_colors[sid] = self.TRAIN_COLOR
 
@@ -247,7 +277,173 @@ class MemberCDemoRunner:
             "lockedRouteCount": len(self.route_svc.locked_routes()),
             "nextRouteIdx": self._next_route_idx,
             "requestedRoutesCount": len(self._requested_routes),
+            "manualMode": self._manual_mode,
+            "manualRouteId": self._manual_route_id,
+            "events": list(self._events),
         }
+
+    # ==================================================================
+    # 手动联锁检验接口
+    # ==================================================================
+
+    def place_manual_train(self, segment_id: int) -> JsonDict:
+        """在任意 Seg 起点放置一列静态检验车。"""
+        segment = self.track.get_segment(segment_id)
+        if segment is None:
+            return {"ok": False, "error": "SEGMENT_NOT_FOUND"}
+        self._manual_mode = "free"
+        self._manual_route_id = None
+        self._manual_finished = False
+        self._configure_manual_path([int(segment_id)], int(segment_id))
+        self._add_event(f"已在 S{segment_id} 起点放置检验小车", "放置")
+        self.section_occ.update([self._train_state], self.path_track)
+        self.signal_resolver.refresh()
+        return {"ok": True, "state": self.state_snapshot()}
+
+    def place_train_for_route(self, route_id: str) -> JsonDict:
+        """在进路始端信号前放车，等待显式的办理请求。"""
+        route = self.catalog.get(str(route_id))
+        if route is None:
+            return {"ok": False, "error": "ROUTE_NOT_FOUND"}
+        start_segment = self._signal_seg_for_id(route.start_signal_id)
+        path = self._path_for_route(route.route_id, start_segment, route.end_signal_id)
+        if not path:
+            return {"ok": False, "error": "ROUTE_PATH_UNAVAILABLE"}
+        self._manual_mode = "route"
+        self._manual_route_id = route.route_id
+        self._manual_finished = False
+        self._configure_manual_path(path, start_segment)
+        self._manual_end_mileage = max(0.0, sum(
+            float((self.track.get_segment(segment_id) or {}).get("lengthM", 0.0))
+            for segment_id in path
+        ) - 1.0)
+        self._add_event(
+            f"已在进路 {route.route_id} 始端信号前放置检验小车", "放置"
+        )
+        self.section_occ.update([self._train_state], self.path_track)
+        self.signal_resolver.refresh()
+        return {"ok": True, "state": self.state_snapshot()}
+
+    def request_manual_route(self, route_id: str | None = None) -> JsonDict:
+        """在当前联锁现场办理指定进路，不重置既有锁闭状态。"""
+        if self._manual_mode is None:
+            return {"ok": False, "error": "NO_MANUAL_ROUTE"}
+        requested_route_id = str(route_id or self._manual_route_id or "")
+        if not self.catalog.get(requested_route_id):
+            return {"ok": False, "error": "ROUTE_NOT_FOUND"}
+        if self.route_svc.is_locked(requested_route_id):
+            return {"ok": True, "state": self.state_snapshot(), "alreadyLocked": True}
+        result = self.route_svc.request(RouteRequest(
+            request_id=f"MANUAL-{self.tick:05d}-{requested_route_id}",
+            route_id=requested_route_id,
+            train_id=self.TRAIN_ID,
+            source="API",
+        ))
+        if result.accepted:
+            self._requested_routes.add(requested_route_id)
+            if requested_route_id == self._manual_route_id:
+                self._next_route_idx = 1
+            self._add_event(f"进路 {requested_route_id} 办理成功，已锁闭道岔和区段", "锁闭")
+        else:
+            self._add_event(
+                f"进路 {requested_route_id} 办理失败：{self._failure_reason_text(result.failure_reason)}", "失败"
+            )
+        self.signal_resolver.refresh()
+        return {"ok": result.accepted, "error": result.failure_reason, "state": self.state_snapshot()}
+
+    def _configure_manual_path(self, path: list[int], start_segment: int) -> None:
+        self._seg_chain = list(dict.fromkeys(path))
+        self.path_track = PathTrackQuery(self.track, self._seg_chain)
+        self._seg_mileage = self._build_seg_mileage()
+        self._route_chain = []
+        self._route_end_mileage = {}
+        self._requested_routes.clear()
+        self._next_route_idx = 0
+        self.tick = 0
+        self.sim_time_ms = 0
+        start_length = float((self.track.get_segment(start_segment) or {}).get("lengthM", 1.0))
+        offset_m = min(1.0, max(0.0, start_length - 0.1))
+        self._train_state = TrainState(
+            train_id=self.TRAIN_ID, sim_time_ms=0,
+            seg_id=start_segment, offset_m=offset_m, position_m=offset_m,
+            speed_mps=0.0, direction="FORWARD", length_m=self.TRAIN_LENGTH_M,
+            operation_mode="ATO", sim_time_s=0.0,
+        )
+
+    def _path_for_route(
+        self, route_id: str, start_segment: int, end_signal_id: int,
+    ) -> list[int]:
+        route = self.catalog.get(route_id)
+        if route is None:
+            return []
+        section_segments = {
+            str(section.get("id")): [int(seg) for seg in section.get("segmentIds", [])]
+            for section in self._line_map.get("axleSections", [])
+            if section.get("id") is not None
+        }
+        raw: list[int] = []
+        for section_id in route.axle_section_ids:
+            for segment_id in section_segments.get(str(section_id), []):
+                if segment_id not in raw:
+                    raw.append(segment_id)
+        if not raw:
+            return [start_segment]
+
+        covered = set(raw)
+        neighbors: dict[int, set[int]] = {segment_id: set() for segment_id in covered}
+        for segment_id in covered:
+            segment = self.track.get_segment(segment_id) or {}
+            for field in (
+                "startForwardSegId", "startDivergingSegId",
+                "endForwardSegId", "endDivergingSegId",
+            ):
+                target = segment.get(field)
+                if target is not None and int(target) in covered:
+                    neighbors[segment_id].add(int(target))
+
+        end_segment = self._signal_seg_for_id(end_signal_id)
+        starts = [start_segment] if start_segment in covered else [
+            segment_id for segment_id, links in neighbors.items() if start_segment in links
+        ]
+        ends = [end_segment] if end_segment in covered else [
+            segment_id for segment_id, links in neighbors.items() if end_segment in links
+        ]
+        starts = starts or [raw[0]]
+        ends = ends or [raw[-1]]
+        ordered: list[int] | None = None
+        for first in starts:
+            queue: list[list[int]] = [[first]]
+            while queue:
+                candidate = queue.pop(0)
+                current = candidate[-1]
+                if current in ends:
+                    ordered = candidate
+                    break
+                for target in sorted(neighbors[current] - set(candidate)):
+                    queue.append(candidate + [target])
+            if ordered:
+                break
+        result = ordered or raw
+        return ([start_segment] if start_segment not in result else []) + result
+
+    def _add_event(self, message: str, category: str) -> None:
+        self._event_seq += 1
+        self._events.insert(0, {
+            "id": self._event_seq,
+            "tick": self.tick,
+            "category": category,
+            "message": message,
+        })
+        del self._events[100:]
+
+    @staticmethod
+    def _failure_reason_text(reason: str | None) -> str:
+        return {
+            "CONFLICT_ROUTE_LOCKED": "存在敌对进路已锁闭",
+            "SECTION_OCCUPIED": "进路区段当前被占用",
+            "SWITCH_UNAVAILABLE": "所需道岔不可用",
+            "ROUTE_NOT_FOUND": "进路不存在",
+        }.get(reason or "", "未知原因")
 
     # ==================================================================
     # ATO 决策 —— 简化的规则控制器（决定牵引/制动/惰行）
@@ -259,9 +455,12 @@ class MemberCDemoRunner:
         ATO 目标 = 下一条待办理进路的终点信号里程（查 _route_end_mileage）。
         所有进路办完后目标 = 最后一条进路终点后 500m。
         """
-        # 找当前阶段的目标距离（下条进路的终点，或者链尾+500m）
+        # 手动模式的移动授权终点就是已办理进路的终端信号。
+        # 单条进路时始端黄灯允许通过，但必须在终端红灯前停车。
         cur_m = ts.position_m
-        if self._next_route_idx < len(self._route_chain):
+        if self._manual_mode == "route":
+            dist = max(0.0, self._manual_end_mileage - cur_m)
+        elif self._next_route_idx < len(self._route_chain):
             target_rid = self._route_chain[self._next_route_idx]
             target_m = self._route_end_mileage.get(target_rid, cur_m + 1000)
             dist = max(0, target_m - cur_m)
@@ -298,38 +497,42 @@ class MemberCDemoRunner:
             return ControlCommand.coast(self.TRAIN_ID, source=CommandSource.ATO)
 
     # ==================================================================
-    # 自动进路办理 —— 按预发现的进路链逐条办理
+    # 自动进路办理 —— 按预发现的进路链保持前方进路预告量
     # ==================================================================
 
     def _auto_request_routes(self, train_state: TrainState) -> None:
-        """按 _discover_route_chain 发现的连续进路链，逐条办理。
+        """维持当前列车及前方的连续进路预告量。
 
-        办理条件：上一条进路已被列车**进入**（has_entered），才申请下一条。
-        已办理过的进路（_next_route_idx 之前的）或已锁闭的不再重复申请。
+        调度端可以预先办理连续、无敌对关系的后续进路；联锁仍会对每一条
+        请求独立检查占压、敌对进路和道岔状态。保留三条锁闭进路可使信号
+        按真实的前方授权关系呈现 GREEN -> YELLOW -> RED。
         """
-        if self._next_route_idx >= len(self._route_chain):
-            return
+        locked_count = sum(
+            1 for route_id in self._route_chain if self.route_svc.is_locked(route_id)
+        )
 
-        # 前一条进路还未被列车进入 → 不申请下一条
-        if self._next_route_idx > 0:
-            prev_rid = self._route_chain[self._next_route_idx - 1]
-            prev_state = self.route_svc._routes.get(prev_rid)
-            if prev_state is None or not prev_state.has_entered:
-                return
+        while (
+            locked_count < self.ROUTE_LOOKAHEAD
+            and self._next_route_idx < len(self._route_chain)
+        ):
+            next_rid = self._route_chain[self._next_route_idx]
+            if self.route_svc.is_locked(next_rid):
+                self._next_route_idx += 1
+                continue
 
-        next_rid = self._route_chain[self._next_route_idx]
+            result = self.route_svc.request(RouteRequest(
+                request_id=f"AUTO-{self.tick:05d}-{self._next_route_idx}",
+                route_id=next_rid, train_id=self.TRAIN_ID,
+                source="DISPATCH",
+            ))
+            if not result.accepted:
+                # Preserve route order. A rejected route is retried next tick
+                # after occupation or conflicting locks may have changed.
+                break
 
-        # 已锁闭 → 跳过
-        if self.route_svc.is_locked(next_rid):
-            return
-
-        result = self.route_svc.request(RouteRequest(
-            request_id=f"AUTO-{self.tick:05d}",
-            route_id=next_rid, train_id=self.TRAIN_ID,
-            source="DISPATCH",
-        ))
-        if result.accepted:
+            self._requested_routes.add(next_rid)
             self._next_route_idx += 1
+            locked_count += 1
 
     # ==================================================================
     # 进路链自动发现 —— 从进路表数据找最长通路（不硬编码任何 ID）
@@ -414,19 +617,15 @@ class MemberCDemoRunner:
             if seg is not None:
                 seg_by_id[sid] = seg
 
-        if not seg_by_id: return result
-        start = self._seg_chain[0]
-        queue: list[tuple[int, float]] = [(start, 0.0)]
-        while queue:
-            sid, dist = queue.pop(0)
-            if sid in result: continue
-            result[sid] = dist
+        if not seg_by_id:
+            return result
+        distance_m = 0.0
+        for sid in self._seg_chain:
             seg = seg_by_id.get(sid)
-            if seg is None: continue
-            for key in ("endForwardSegId", "endDivergingSegId"):
-                nxt = seg.get(key)
-                if nxt is not None and int(nxt) not in result:
-                    queue.append((int(nxt), dist + float(seg.get("lengthM", 0))))
+            if seg is None:
+                continue
+            result[sid] = distance_m
+            distance_m += float(seg.get("lengthM", 0))
         return result
 
     def _build_platform_targets(self) -> dict[int, float]:
@@ -459,28 +658,88 @@ class MemberCDemoRunner:
 
     def _build_mainline_chain(self, line_map: JsonDict) -> list[int]:
         """BFS覆盖全部可达 Seg，确保列车移动范围覆盖所有进路涉及的 Seg。"""
-        up_platforms = sorted(
-            [p for p in line_map.get("platforms", [])
-             if p.get("direction") == "0x55"],
-            key=lambda p: p.get("mileageM", 0),
-        )
-        if not up_platforms: return []
-        start_seg = int(up_platforms[0]["segmentId"])
-        seg_by_id = {s["id"]: s for s in line_map.get("segments", [])}
+        seg_by_id = {
+            int(segment["id"]): segment
+            for segment in line_map.get("segments", [])
+            if segment.get("id") is not None
+        }
+        signal_segments = {
+            int(signal["id"]): int(signal["segmentId"])
+            for signal in line_map.get("signals", [])
+            if signal.get("id") is not None and signal.get("segmentId") is not None
+        }
+        axle_segments = {
+            str(section["id"]): [int(sid) for sid in section.get("segmentIds", []) if sid is not None]
+            for section in line_map.get("axleSections", [])
+            if section.get("id") is not None
+        }
+        neighbors: dict[int, set[int]] = {sid: set() for sid in seg_by_id}
+        for sid, segment in seg_by_id.items():
+            for field in (
+                "startForwardSegId", "startDivergingSegId",
+                "endForwardSegId", "endDivergingSegId",
+            ):
+                target = segment.get(field)
+                if target is not None and int(target) in seg_by_id:
+                    neighbors[sid].add(int(target))
+                    neighbors[int(target)].add(sid)
+
+        def ordered_segments(route: JsonDict) -> list[int]:
+            raw: list[int] = []
+            for section_id in route.get("axleSectionIds", []):
+                for sid in axle_segments.get(str(section_id), []):
+                    if sid not in raw:
+                        raw.append(sid)
+            if len(raw) < 2:
+                return raw
+            covered = set(raw)
+            start_signal_seg = signal_segments.get(int(route.get("startSignalId", 0)), 0)
+            end_signal_seg = signal_segments.get(int(route.get("endSignalId", 0)), 0)
+
+            def candidates(signal_seg: int) -> list[int]:
+                if signal_seg in covered:
+                    return [signal_seg]
+                return [sid for sid in raw if signal_seg in neighbors[sid]]
+
+            starts = candidates(start_signal_seg)
+            ends = candidates(end_signal_seg)
+            endpoints = [sid for sid in raw if len(neighbors[sid] & covered) <= 1]
+            starts = starts or endpoints or [raw[0]]
+            ends = ends or endpoints or [raw[-1]]
+            best: list[int] | None = None
+            for start in starts:
+                queue: list[list[int]] = [[start]]
+                visited = {start}
+                while queue:
+                    path = queue.pop(0)
+                    current = path[-1]
+                    if current in ends:
+                        if best is None or len(path) > len(best):
+                            best = path
+                        continue
+                    for target in sorted(neighbors[current] & covered):
+                        if target not in visited:
+                            visited.add(target)
+                            queue.append(path + [target])
+            return best if best is not None and set(best) == covered else raw
+
+        routes_by_id = {
+            str(route["id"]): route
+            for route in line_map.get("routes", []) if route.get("id") is not None
+        }
         chain: list[int] = []
-        visited: set[int] = set()
-        queue = [start_seg]
-        while queue:
-            sid = queue.pop(0)
-            if sid in visited: continue
-            visited.add(sid)
-            chain.append(sid)
-            seg = seg_by_id.get(sid)
-            if seg is None: continue
-            for key in ("endForwardSegId", "endDivergingSegId"):
-                nxt = seg.get(key)
-                if nxt is not None and int(nxt) not in visited:
-                    queue.append(int(nxt))
+        for route_id in self._discover_route_chain_fallback():
+            route = routes_by_id.get(route_id)
+            if route is None:
+                continue
+            start_segment = signal_segments.get(int(route.get("startSignalId", 0)))
+            if not chain and start_segment is not None:
+                chain.append(start_segment)
+            elif start_segment is not None and chain[-1] != start_segment:
+                chain.append(start_segment)
+            for sid in ordered_segments(route):
+                if not chain or chain[-1] != sid:
+                    chain.append(sid)
         return chain
 
     # -- 旧 Demo API 兼容 --------

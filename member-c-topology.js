@@ -3,6 +3,9 @@
   var staticSignalBySeg = {};
   var switchByFrog = {};
   var switchConnectionByPair = {};
+  var selectedSegmentId = null;
+  var chineseEvents = [];
+  var seenServerEvents = {};
 
   function segmentPairKey(first, second) {
     return first < second ? first + ':' + second : second + ':' + first;
@@ -60,9 +63,139 @@
     return result;
   }
 
+  function lockedRouteMap() {
+    var result = {};
+    if (!RD || !S) return result;
+    ((S.routes || [])).forEach(function (state) {
+      if (state.state !== 'LOCKED' && state.state !== 'APPROACH_LOCKED') return;
+      var route = (RD.routes || []).find(function (item) { return item.id === state.routeId; });
+      if (route) result[route.id] = route;
+    });
+    return result;
+  }
+
+  function segmentIdsForRoutes(routes) {
+    var result = {};
+    Object.keys(routes).forEach(function (routeId) {
+      (routes[routeId].pathSegs || []).forEach(function (segmentId) { result[segmentId] = true; });
+    });
+    return result;
+  }
+
+  function selectedSignalRoles() {
+    var result = {};
+    Object.keys(selRoutes || {}).forEach(function (routeId) {
+      var route = selRoutes[routeId];
+      if (!route) return;
+      if (route.startSig != null) result[route.startSig] = result[route.startSig] || 'start';
+      if (route.endSig != null) result[route.endSig] = result[route.endSig] === 'start' ? 'both' : 'end';
+    });
+    return result;
+  }
+
+  function isReverseSignal(signal) {
+    return String(signal.direction || '').toLowerCase() === '0xaa';
+  }
+
+  function signalOffsetRatio(signal, segment) {
+    var length = Number(segment.lengthM) || 0;
+    var offset = Number(signal.offsetM) || 0;
+    if (length <= 0) return 0.5;
+    return Math.max(0.08, Math.min(0.92, offset / length));
+  }
+
   function colorForAspect(aspect) {
     return aspect === 'GREEN' ? '#3fb950' : aspect === 'YELLOW' ? '#d29922' : '#f85149';
   }
+
+  function addChineseEvent(category, message, tick) {
+    var key = String(tick) + '|' + category + '|' + message;
+    if (seenServerEvents[key]) return;
+    seenServerEvents[key] = true;
+    chineseEvents.unshift({ category: category, message: message, tick: tick || 0 });
+    chineseEvents = chineseEvents.slice(0, 100);
+  }
+
+  function failureText(reason) {
+    return {
+      CONFLICT_ROUTE_LOCKED: '存在敌对进路已锁闭',
+      SECTION_OCCUPIED: '进路区段当前被占用',
+      SWITCH_UNAVAILABLE: '所需道岔不可用',
+      ROUTE_NOT_FOUND: '进路不存在'
+    }[reason] || reason || '未知原因';
+  }
+
+  function renderChineseLog() {
+    if (!S) return;
+    ((S.events || [])).forEach(function (event) {
+      addChineseEvent(event.category || '事件', event.message || '', event.tick);
+    });
+    if (prev && S.routes && prev.routes) {
+      var before = {}, after = {};
+      prev.routes.forEach(function (route) { before[route.routeId] = route; });
+      S.routes.forEach(function (route) { after[route.routeId] = route; });
+      Object.keys(after).forEach(function (routeId) {
+        var oldState = before[routeId] || { state: 'IDLE' };
+        var newState = after[routeId];
+        if (oldState.state !== newState.state) {
+          if (newState.state === 'LOCKED') addChineseEvent('锁闭', '进路 ' + routeId + ' 已锁闭', S.tick);
+          else if (newState.state === 'IDLE' && oldState.state !== 'IDLE') addChineseEvent('释放', '进路 ' + routeId + ' 已释放', S.tick);
+          else if (newState.state === 'FAILED') addChineseEvent('失败', '进路 ' + routeId + ' 办理失败：' + failureText(newState.failureReason), S.tick);
+        }
+      });
+    }
+    var list = document.getElementById('log-list');
+    if (!list) return;
+    list.innerHTML = chineseEvents.length ? chineseEvents.map(function (event) {
+      return '<div class="' + (event.category === '失败' ? 'occ' : event.category === '锁闭' ? 'lock' : event.category === '释放' ? 'rel' : 'sig') + '">[' + event.tick + '] ' + event.message + '</div>';
+    }).join('') : '<div class="empty-note">暂无事件。可点击轨道放置小车，再选择进路办理。</div>';
+    document.getElementById('lcnt').textContent = chineseEvents.length;
+  }
+
+  function postManual(path, payload) {
+    return fetch(A + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {})
+    }).then(function (response) { return response.json(); }).then(function (data) {
+      if (data.state) {
+        prev = S;
+        S = data.state;
+      }
+      if (!data.ok) addChineseEvent('失败', '操作失败：' + failureText(data.error), S ? S.tick : 0);
+      updateRouteList(document.getElementById('route-filter').value);
+      draw();
+      return data;
+    }).catch(function () {
+      addChineseEvent('失败', '无法连接手动联锁接口', S ? S.tick : 0);
+      renderChineseLog();
+    });
+  }
+
+  window.placeFreeTrain = function () {
+    if (selectedSegmentId == null) return;
+    postManual('/api/phase2/member-c/manual/place', { segmentId: selectedSegmentId });
+  };
+
+  window.placeRouteTrain = function (routeId) {
+    postManual('/api/phase2/member-c/manual/place-route', { routeId: routeId });
+  };
+
+  window.placeAndRequestRoute = function (routeId) {
+    postManual('/api/phase2/member-c/manual/place-route', { routeId: routeId })
+      .then(function (data) {
+        if (data && data.ok) return postManual('/api/phase2/member-c/manual/request-route', { routeId: routeId });
+        return null;
+      });
+  };
+
+  window.requestRoute = function (routeId) {
+    postManual('/api/phase2/member-c/manual/request-route', { routeId: routeId });
+  };
+
+  window.requestSelectedRoute = function () {
+    var routeIds = Object.keys(selRoutes || {});
+    var routeId = routeIds.length ? routeIds[routeIds.length - 1] : (S && S.manualRouteId);
+    if (routeId) requestRoute(routeId);
+  };
 
   window.fit = function () {
     if (!RD || !RD.segments) return;
@@ -109,25 +242,45 @@
     if (!RD || !RD.routes) return;
     var query = (filter || '').toLowerCase();
     var routes = RD.routes.filter(function (route) {
-      return !query || route.id.toLowerCase().indexOf(query) >= 0 || route.name.toLowerCase().indexOf(query) >= 0;
+      var related = selectedSegmentId == null || (route.pathSegs || []).indexOf(selectedSegmentId) >= 0;
+      var matches = !query || route.id.toLowerCase().indexOf(query) >= 0 || route.name.toLowerCase().indexOf(query) >= 0;
+      return related && matches;
     });
-    document.getElementById('route-list').innerHTML = routes.map(function (route) {
+    var inspector = document.getElementById('route-inspector');
+    if (selectedSegmentId == null) {
+      inspector.innerHTML = '点击图中的轨道以查看经过该 Seg 的进路。';
+    } else {
+      var segment = (RD.segments || []).find(function (item) { return item.id === selectedSegmentId; }) || {};
+      var platformText = segment.platformIds && segment.platformIds.length ? '，站台 ' + segment.platformIds.join('、') : '';
+      inspector.innerHTML = '<b>S' + selectedSegmentId + '</b>　长度 ' + (segment.lengthM || 0) + ' m' + platformText +
+        '<div class="route-actions"><button onclick="placeFreeTrain()">在 S' + selectedSegmentId + ' 起点放置小车</button>' +
+        (S && S.manualMode === 'route' ? '<button class="warn" onclick="requestSelectedRoute()">办理当前选择进路</button>' : '') + '</div>';
+    }
+    document.getElementById('route-list').innerHTML = routes.length ? routes.map(function (route) {
       var selected = selRoutes[route.id] ? ' sel' : '';
-      var detail = 'sig' + route.startSig + ' -> sig' + route.endSig + ' | ' + route.pathSegs.length + ' Seg';
-      return '<div class="' + selected + '" onclick="clickRoute(\'' + route.id + '\')"><span><b>' + route.id + '</b> ' + route.name + '</span><span class="m">' + detail + '</span></div>';
-    }).join('');
-    document.getElementById('rcnt').textContent = routes.length + '/' + RD.routes.length;
+      var detail = '信号 ' + route.startSigName + ' -> ' + route.endSigName + '，' + route.pathSegs.length + ' 个 Seg';
+      return '<div class="route-item' + selected + '" onclick="clickRoute(\'' + route.id + '\')">' +
+        '<div class="route-title"><span><b>' + route.id + '</b> ' + route.name + '</span><span>' + detail + '</span></div>' +
+        '<div class="route-actions"><button onclick="event.stopPropagation();placeRouteTrain(\'' + route.id + '\')">在始端放车</button>' +
+        '<button class="warn" onclick="event.stopPropagation();placeAndRequestRoute(\'' + route.id + '\')">放车并办理</button>' +
+        '<button onclick="event.stopPropagation();requestRoute(\'' + route.id + '\')">仅办理（不换车）</button></div></div>';
+    }).join('') : '<div class="empty-note">该 Seg 没有匹配的进路。</div>';
+    document.getElementById('rcnt').textContent = selectedSegmentId == null ? routes.length + '/' + RD.routes.length : routes.length + ' 条相关进路';
   };
 
   window.draw = function () {
     resize();
     cx.clearRect(0, 0, c.width, c.height);
     if (!RD || !RD.segments) return;
+    renderChineseLog();
 
     var byId = {};
     var liveSegments = {};
     var liveSignalById = dynamicSignals();
     var chosen = selectedSegmentIds();
+    var lockedRoutes = lockedRouteMap();
+    var lockedSegments = segmentIdsForRoutes(lockedRoutes);
+    var signalRoles = selectedSignalRoles();
     var trainColors = (S && S.segTrainColors) || {};
     var trains = (S && S.trains) || [];
     RD.segments.forEach(function (segment) { byId[segment.id] = segment; });
@@ -171,6 +324,26 @@
       drawLink(segment, segment.endDiverging, true);
     });
 
+    Object.keys(lockedRoutes).forEach(function (routeId) {
+      var path = lockedRoutes[routeId].pathSegs || [];
+      if (path.length < 2) return;
+      cx.beginPath();
+      path.forEach(function (segmentId, index) {
+        var segment = byId[segmentId];
+        if (!segment) return;
+        var pos = topologyPosition(segment);
+        if (index === 0) cx.moveTo(pos.x + pos.w / 2, pos.y);
+        else cx.lineTo(pos.x + pos.w / 2, pos.y);
+      });
+      cx.strokeStyle = '#20c997';
+      cx.globalAlpha = 0.9;
+      cx.lineWidth = 3.2;
+      cx.setLineDash([5, 3]);
+      cx.stroke();
+      cx.setLineDash([]);
+      cx.globalAlpha = 1;
+    });
+
     Object.keys(selRoutes || {}).forEach(function (routeId) {
       var route = selRoutes[routeId];
       var path = (route && route.pathSegs) || [];
@@ -192,10 +365,11 @@
 
     RD.segments.forEach(function (segment) {
       var pos = topologyPosition(segment);
-      var active = !!chosen[segment.id];
+      var active = !!chosen[segment.id] || segment.id === selectedSegmentId;
+      var locked = !!lockedSegments[segment.id];
       var trainColor = trainColors[segment.id];
-      cx.strokeStyle = active ? '#58a6ff' : trainColor || '#6e8599';
-      cx.lineWidth = active ? 5 : trainColor ? 4 : 2.4;
+      cx.strokeStyle = segment.id === selectedSegmentId ? '#f0c040' : active ? '#58a6ff' : trainColor || (locked ? '#20c997' : '#6e8599');
+      cx.lineWidth = active ? 5 : trainColor ? 4 : locked ? 3.4 : 2.4;
       cx.beginPath();
       cx.moveTo(pos.x, pos.y);
       cx.lineTo(pos.x + pos.w, pos.y);
@@ -230,16 +404,64 @@
       }
       (staticSignalBySeg[segment.id] || []).forEach(function (signal, index) {
         var live = liveSignalById[signal.id] || { aspect: 'RED' };
-        var sy = pos.y - 10 - (index % 3) * 9;
-        cx.fillStyle = colorForAspect(live.aspect);
+        var reverse = isReverseSignal(signal);
+        var sameDirectionIndex = (staticSignalBySeg[segment.id] || [])
+          .filter(function (item) { return isReverseSignal(item) === reverse; })
+          .findIndex(function (item) { return item.id === signal.id; });
+        var lane = sameDirectionIndex < 0 ? index : sameDirectionIndex;
+        var sigX = pos.x + pos.w * signalOffsetRatio(signal, segment);
+        var side = reverse ? 1 : -1;
+        var sy = pos.y + side * (12 + (lane % 3) * 10);
+        var aspectColor = colorForAspect(live.aspect);
+        var role = signalRoles[signal.id];
+        var selectedSignal = !!role;
+
+        cx.strokeStyle = selectedSignal ? (role === 'end' ? '#a371f7' : '#58a6ff') : '#3a4a5a';
+        cx.lineWidth = selectedSignal ? 1.3 : 0.6;
         cx.beginPath();
-        cx.arc(pos.x + 7 + (index % 2) * 10, sy, 2.5, 0, Math.PI * 2);
+        cx.moveTo(sigX, pos.y);
+        cx.lineTo(sigX, sy - side * 3);
+        cx.stroke();
+
+        cx.fillStyle = aspectColor;
+        cx.globalAlpha = selectedSignal ? 0.24 : 0.16;
+        cx.beginPath();
+        cx.arc(sigX, sy, selectedSignal ? 6.8 : 5.2, 0, Math.PI * 2);
         cx.fill();
-        if (sc >= 0.72 && (chosen[segment.id] || index === 0)) {
-          cx.fillStyle = '#a7bacb';
+        cx.globalAlpha = 1;
+
+        cx.fillStyle = aspectColor;
+        cx.beginPath();
+        cx.arc(sigX, sy, selectedSignal ? 3.2 : 2.5, 0, Math.PI * 2);
+        cx.fill();
+
+        if (selectedSignal) {
+          cx.strokeStyle = role === 'end' ? '#a371f7' : '#58a6ff';
+          cx.lineWidth = 1.2;
+          cx.beginPath();
+          cx.arc(sigX, sy, 7.4, 0, Math.PI * 2);
+          cx.stroke();
+        }
+
+        cx.fillStyle = selectedSignal ? (role === 'end' ? '#d2b8ff' : '#b9dcff') : '#8094a8';
+        cx.beginPath();
+        if (reverse) {
+          cx.moveTo(sigX - 7, sy);
+          cx.lineTo(sigX - 2, sy - 3.5);
+          cx.lineTo(sigX - 2, sy + 3.5);
+        } else {
+          cx.moveTo(sigX + 7, sy);
+          cx.lineTo(sigX + 2, sy - 3.5);
+          cx.lineTo(sigX + 2, sy + 3.5);
+        }
+        cx.closePath();
+        cx.fill();
+
+        if (sc >= 0.72 && (selectedSignal || chosen[segment.id] || index === 0)) {
+          cx.fillStyle = selectedSignal ? '#d7ebff' : '#a7bacb';
           cx.font = '7px monospace';
-          cx.textAlign = 'left';
-          cx.fillText(signal.name || ('Sig' + signal.id), pos.x + 11, sy - 3);
+          cx.textAlign = reverse ? 'right' : 'left';
+          cx.fillText(signal.name || ('Sig' + signal.id), sigX + (reverse ? -10 : 10), sy - side * 5);
         }
       });
     });
@@ -264,7 +486,7 @@
     document.getElementById('lc').textContent = S ? S.lockedRouteCount : '0';
     var openSignals = ((S && S.signals) || []).filter(function (signal) { return signal.aspect !== 'RED'; }).length;
     document.getElementById('sc').textContent = openSignals + '/' + ((RD && RD.signals) || []).length;
-    document.getElementById('foot').textContent = RD.segments.length + ' Seg | ' + RD.signals.length + ' signals | ' + RD.switches.length + ' switches | ' + RD.routes.length + ' routes | grey=normal, amber=diverging';
+    document.getElementById('foot').textContent = RD.segments.length + ' Seg | ' + RD.signals.length + ' signals | ' + RD.switches.length + ' switches | ' + RD.routes.length + ' routes | cyan=dangqian locked route | grey=normal, amber=diverging';
   };
 
   function loadTopology() {
@@ -278,6 +500,23 @@
       })
       .catch(function (error) { console.error('topology load failed', error); });
   }
+
+  c.addEventListener('click', function (event) {
+    if (!RD || !RD.segments) return;
+    var bounds = c.getBoundingClientRect();
+    var x = (event.clientX - bounds.left - ox) / sc;
+    var y = (event.clientY - bounds.top - oy) / sc;
+    var hit = null;
+    (RD.segments || []).forEach(function (segment) {
+      var pos = topologyPosition(segment);
+      if (x >= pos.x - 4 && x <= pos.x + pos.w + 4 && y >= pos.y - 12 && y <= pos.y + 12) hit = segment;
+    });
+    if (!hit) return;
+    selectedSegmentId = hit.id;
+    switchTab('route');
+    updateRouteList(document.getElementById('route-filter').value);
+    draw();
+  });
 
   loadTopology();
 }());

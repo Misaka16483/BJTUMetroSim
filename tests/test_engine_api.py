@@ -23,8 +23,8 @@ class EngineStateContractTests(unittest.TestCase):
         snapshot = engine.snapshot()
         assert snapshot is not None
         self.assertEqual(snapshot.clock_state, "RUNNING")
-        self.assertEqual(len(snapshot.trains), 5)
-        self.assertTrue(all("pantographVoltageV" in item for item in snapshot.trains))
+        # Dynamic train management deliberately starts with no pre-created train.
+        self.assertEqual(snapshot.trains, [])
         self.assertIn("solver", snapshot.power_network)
 
 

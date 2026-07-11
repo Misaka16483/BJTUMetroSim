@@ -293,6 +293,17 @@ class Line9DataService:
         self._sim_runner = MemberCDemoRunner(self.cache_path)
         return self.sim_runner.state_snapshot()
 
+    def member_c_place_train(self, segment_id: int) -> JsonDict:
+        self._sim_runner = MemberCDemoRunner(self.cache_path)
+        return self._sim_runner.place_manual_train(segment_id)
+
+    def member_c_place_train_for_route(self, route_id: str) -> JsonDict:
+        self._sim_runner = MemberCDemoRunner(self.cache_path)
+        return self._sim_runner.place_train_for_route(route_id)
+
+    def member_c_request_manual_route(self, route_id: str | None = None) -> JsonDict:
+        return self.sim_runner.request_manual_route(route_id)
+
     def member_c_static_routes(self) -> JsonDict:
         """返回全部进路静态数据 + 完整拓扑图（基于原始 Segment 连接字段）。
 
@@ -416,6 +427,85 @@ class Line9DataService:
                     pending.append((remaining[0], next_row, 0))
                     next_row += 1
 
+        # The first pass preserves every directed relation but gives each branch
+        # its own row.  Compact those row fragments into reusable side lanes.
+        # The two longest chains remain the main tracks; fragments with
+        # non-overlapping horizontal spans can share a lane without appearing
+        # connected.  Fully isolated fragments are grouped after a visible gap.
+        row_segments: dict[int, list[int]] = {}
+        for sid, (row, _) in assigned.items():
+            row_segments.setdefault(row, []).append(sid)
+        for segment_ids in row_segments.values():
+            segment_ids.sort(key=lambda item: assigned[item][1])
+
+        main_rows = {
+            row for row, _ in sorted(
+                row_segments.items(), key=lambda item: (-len(item[1]), item[0])
+            )[:2]
+        }
+        row_by_segment = {sid: row for sid, (row, _) in assigned.items()}
+        fragment_neighbors: dict[int, set[int]] = {
+            row: set() for row in row_segments
+        }
+        for sid, segment in seg_by_id.items():
+            source_row = row_by_segment[sid]
+            for field in (
+                "startForwardSegId", "startDivergingSegId",
+                "endForwardSegId", "endDivergingSegId",
+            ):
+                neighbor = seg_ref(segment, field)
+                if neighbor is None:
+                    continue
+                target_row = row_by_segment[neighbor]
+                if target_row != source_row:
+                    fragment_neighbors[source_row].add(target_row)
+
+        def fragment_span(row: int) -> tuple[int, int]:
+            columns = [assigned[sid][1] for sid in row_segments[row]]
+            return min(columns), max(columns)
+
+        side_rows = sorted(
+            row for row in row_segments
+            if row not in main_rows and fragment_neighbors[row]
+        )
+        side_rows.sort(key=lambda row: (*fragment_span(row), row))
+        lane_spans: list[list[tuple[int, int]]] = []
+        compact_row: dict[int, int] = {}
+        for row in side_rows:
+            start, end = fragment_span(row)
+            for lane_index, spans in enumerate(lane_spans):
+                if all(end + 2 < used_start or start - 2 > used_end for used_start, used_end in spans):
+                    spans.append((start, end))
+                    compact_row[row] = 2 + lane_index
+                    break
+            else:
+                lane_spans.append([(start, end)])
+                compact_row[row] = 2 + len(lane_spans) - 1
+
+        main_max_column = max(
+            assigned[sid][1]
+            for row in main_rows for sid in row_segments[row]
+        )
+        island_rows = sorted(
+            row for row in row_segments
+            if row not in main_rows and not fragment_neighbors[row]
+        )
+        island_row = 2 + len(lane_spans) + (1 if lane_spans else 0)
+        island_cursor = main_max_column + 6
+        compact_column: dict[int, int] = {}
+        for row in island_rows:
+            start, end = fragment_span(row)
+            compact_row[row] = island_row
+            for sid in row_segments[row]:
+                compact_column[sid] = island_cursor + assigned[sid][1] - start
+            island_cursor += end - start + 5
+
+        for sid, (row, column) in list(assigned.items()):
+            if row in main_rows:
+                assigned[sid] = (0 if row == min(main_rows) else 1, column)
+            else:
+                assigned[sid] = (compact_row[row], compact_column.get(sid, column))
+
         segs_out = []
         for sid, segment in sorted(seg_by_id.items()):
             row, col = assigned[sid]
@@ -440,6 +530,9 @@ class Line9DataService:
             signals.append({
                 "id": int(sig_id), "name": str(s.get("name", "")),
                 "segId": int(seg_id),
+                "offsetM": float(s.get("offsetM") or 0),
+                "direction": str(s.get("direction", "")),
+                "type": s.get("type"),
             })
 
         # 5) 道岔
@@ -565,7 +658,10 @@ class Line9DataService:
         return {
             "segments": segs_out, "signals": signals, "switches": switches,
             "routes": routes,
-            "layout": {"rows": next_row, "segmentCount": len(segs_out)},
+            "layout": {
+                "rows": max(row for row, _ in assigned.values()) + 1,
+                "segmentCount": len(segs_out),
+            },
         }
 
     def _load_station_catalog(self) -> list[JsonDict]:
@@ -708,6 +804,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.member_d_phase2_full_demo())
             elif path == "/api/phase2/member-c/demo":
                 self._serve_html_file(ROOT / "member-c-demo.html")
+            elif path == "/api/phase2/member-c/member-c-topology.js":
+                self._serve_static_file(
+                    ROOT / "member-c-topology.js", "application/javascript; charset=utf-8"
+                )
             elif path == "/api/phase2/member-c/routes":
                 self._serve_html_file(ROOT / "member-c-routes.html")
             elif path == "/api/phase2/member-c/state":
@@ -730,7 +830,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
-            if path == "/api/sim/start" or path == "/api/sim/pause" or path == "/api/sim/resume" or path == "/api/sim/stop":
+            if path == "/api/phase2/member-c/manual/place":
+                payload = self._read_json_body()
+                self._send_json(self.service.member_c_place_train(int(payload.get("segmentId", 0))))
+                return
+            if path == "/api/phase2/member-c/manual/place-route":
+                payload = self._read_json_body()
+                self._send_json(self.service.member_c_place_train_for_route(str(payload.get("routeId", ""))))
+                return
+            if path == "/api/phase2/member-c/manual/request-route":
+                payload = self._read_json_body()
+                self._send_json(self.service.member_c_request_manual_route(
+                    str(payload["routeId"]) if payload.get("routeId") is not None else None
+                ))
+                return
+
+            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop"}:
                 if not self.engine:
                     self._send_json(
                         {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
@@ -991,10 +1106,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _serve_html_file(self, file_path: Path) -> None:
+        self._serve_static_file(file_path, "text/html; charset=utf-8")
+
+    def _serve_static_file(self, file_path: Path, content_type: str) -> None:
         body = file_path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")

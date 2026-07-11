@@ -252,6 +252,39 @@ class TrackQueryService:
         return low <= offset <= high
 
 
+class PathTrackQuery:
+    """Route-aware view of the immutable track topology.
+
+    A train's approved route is represented as an ordered Seg sequence.  This
+    adapter keeps static attributes in ``TrackQueryService`` while resolving
+    forward/backward neighbours only within that approved sequence.  It lets
+    consumers such as section-occupation detection follow the train's actual
+    path through a locked turnout instead of guessing from the global graph.
+    """
+
+    def __init__(self, track: TrackQueryService, segment_ids: list[int] | tuple[int, ...]) -> None:
+        self.track = track
+        self.segment_ids = tuple(int(segment_id) for segment_id in segment_ids)
+        if len(set(self.segment_ids)) != len(self.segment_ids):
+            raise ValueError("path segment IDs must be unique")
+        self._index_by_segment = {
+            segment_id: index for index, segment_id in enumerate(self.segment_ids)
+        }
+
+    def get_segment(self, seg_id: int) -> JsonDict | None:
+        return self.track.get_segment(seg_id)
+
+    def get_next_segments(self, seg_id: int, direction: str = "forward") -> list[JsonDict]:
+        index = self._index_by_segment.get(int(seg_id))
+        if index is None:
+            return []
+        next_index = index + 1 if direction == "forward" else index - 1
+        if next_index < 0 or next_index >= len(self.segment_ids):
+            return []
+        segment = self.track.get_segment(self.segment_ids[next_index])
+        return [segment] if segment is not None else []
+
+
 class PathPlanner:
     def __init__(self, line_map: JsonDict, default_speed_limit_mps: float = DEFAULT_SPEED_LIMIT_MPS) -> None:
         self.line_map = line_map

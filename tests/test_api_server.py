@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from app.api_server import Line9DataService
+from app.domain.operations.member_c_demo import MemberCDemoRunner
 
 
 class ApiServerTests(unittest.TestCase):
@@ -45,9 +46,86 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(len(topology["switches"]), 60)
         self.assertTrue(all("row" in segment and "col" in segment for segment in topology["segments"]))
         self.assertTrue(all(route["pathOrderComplete"] for route in topology["routes"]))
+        positions = {(segment["row"], segment["col"]) for segment in topology["segments"]}
+        self.assertEqual(len(positions), 319)
+        self.assertLessEqual(topology["layout"]["rows"], 24)
 
         route_seven = next(route for route in topology["routes"] if route["id"] == "7")
         self.assertEqual(route_seven["pathSegs"], [11, 12, 36, 34, 32, 31])
+
+    def test_member_c_demo_train_chain_follows_route_topology(self) -> None:
+        runner = MemberCDemoRunner(self.service.cache_path)
+        chain = runner._seg_chain
+        self.assertEqual(chain[:8], [13, 14, 17, 44, 43, 45, 46, 48])
+        self.assertNotIn(18, chain)
+        for current, following in zip(chain, chain[1:]):
+            segment = runner.track.get_segment(current)
+            assert segment is not None
+            self.assertIn(
+                following,
+                {
+                    segment.get("startForwardSegId"),
+                    segment.get("startDivergingSegId"),
+                    segment.get("endForwardSegId"),
+                    segment.get("endDivergingSegId"),
+                },
+            )
+
+    def test_member_c_demo_occupancy_follows_active_route(self) -> None:
+        runner = MemberCDemoRunner(self.service.cache_path)
+        for _ in range(90):
+            runner.step()
+            if runner.state_snapshot()["trains"][0]["segId"] == 43:
+                break
+        snapshot = runner.state_snapshot()
+        covered = {int(segment_id) for segment_id in snapshot["segTrainColors"]}
+
+        self.assertEqual(snapshot["trains"][0]["segId"], 43)
+        self.assertTrue({43, 44}.issubset(covered))
+        self.assertFalse({39, 40, 41} & covered)
+
+    def test_member_c_demo_prelocks_routes_for_signal_progression(self) -> None:
+        runner = MemberCDemoRunner(self.service.cache_path)
+        runner.step()
+        snapshot = runner.state_snapshot()
+
+        locked = {
+            route["routeId"] for route in snapshot["routes"]
+            if route["state"] == "LOCKED"
+        }
+        aspects = {signal["id"]: signal["aspect"] for signal in snapshot["signals"]}
+
+        self.assertTrue({"9", "28", "29"}.issubset(locked))
+        self.assertEqual(aspects[61], "GREEN")
+        self.assertEqual(aspects[62], "YELLOW")
+
+    def test_member_c_manual_route_waits_for_lock_before_moving(self) -> None:
+        runner = MemberCDemoRunner(self.service.cache_path)
+        placed = runner.place_train_for_route("9")
+        self.assertTrue(placed["ok"])
+        initial_position = runner.state_snapshot()["trains"][0]["positionM"]
+
+        runner.step()
+        self.assertEqual(runner.state_snapshot()["trains"][0]["positionM"], initial_position)
+
+        requested = runner.request_manual_route()
+        self.assertTrue(requested["ok"])
+        runner.step()
+        snapshot = runner.state_snapshot()
+        self.assertGreater(snapshot["trains"][0]["positionM"], initial_position)
+        self.assertTrue(any("办理成功" in event["message"] for event in snapshot["events"]))
+
+    def test_member_c_manual_request_rejects_conflicting_route(self) -> None:
+        runner = MemberCDemoRunner(self.service.cache_path)
+        self.assertTrue(runner.place_manual_train(1)["ok"])
+        self.assertTrue(runner.request_manual_route("25")["ok"])
+
+        result = runner.request_manual_route("24")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "CONFLICT_ROUTE_LOCKED")
+        self.assertTrue(runner.route_svc.is_locked("25"))
+        self.assertFalse(runner.route_svc.is_locked("24"))
 
     def test_member_d_demo_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

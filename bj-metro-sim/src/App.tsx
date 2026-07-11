@@ -10,6 +10,7 @@ import OperationalLoopPanel from './components/OperationalLoopPanel';
 import PowerNetworkPanel from './components/PowerNetworkPanel';
 import PowerSystemView from './components/PowerSystemView';
 import TrainManagementPanel from './components/TrainManagementPanel';
+import MemberCInterlockingDemo from './components/MemberCInterlockingDemo';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -54,7 +55,9 @@ export default function App() {
           ? 3
           : viewMode === 'driver'
             ? 4
-            : 5;
+            : viewMode === 'power'
+              ? 5
+              : 6;
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
@@ -208,8 +211,8 @@ export default function App() {
           <div
             className="absolute top-0 rounded-full"
             style={{
-              left: `${modeIndex * (100 / 6)}%`,
-              width: `${100 / 6}%`,
+              left: `${modeIndex * (100 / 7)}%`,
+              width: `${100 / 7}%`,
               bottom: 0,
               background: viewMode === 'macro'
                 ? 'rgba(74,158,255,0.35)'
@@ -221,7 +224,9 @@ export default function App() {
                       ? 'rgba(255,152,0,0.35)'
                       : viewMode === 'driver'
                         ? 'rgba(168,214,74,0.38)'
-                        : 'rgba(88,166,255,0.36)',
+                        : viewMode === 'power'
+                          ? 'rgba(88,166,255,0.36)'
+                          : 'rgba(32,201,151,0.36)',
               transition: 'left 280ms cubic-bezier(0.33, 1, 0.68, 1), background 280ms ease',
             }}
           />
@@ -231,6 +236,7 @@ export default function App() {
           <button type="button" onClick={() => setViewMode('fullLine')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'fullLine' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>全线</button>
           <button type="button" onClick={() => setViewMode('driver')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>驾驶</button>
           <button type="button" onClick={() => setViewMode('power')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'power' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>供电</button>
+          <button type="button" onClick={() => setViewMode('memberCDemo')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'memberCDemo' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>TEST</button>
         </div>
         </div>
 
@@ -329,6 +335,8 @@ export default function App() {
               ? <DriverConsole fullPage />
               : viewMode === 'power'
                 ? <PowerSystemView />
+                : viewMode === 'memberCDemo'
+                  ? <MemberCInterlockingDemo />
                 : viewMode === 'interlocking'
                   ? <StationInterlockingView />
                   : viewMode === 'fullLine'

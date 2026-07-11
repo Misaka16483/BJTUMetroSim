@@ -31,6 +31,11 @@ canvas{display:block}
 #route-list div:hover{background:#1a2640}
 #route-list div.sel{background:#1a2e40;border-left:2px solid #58a6ff;color:#58a6ff}
 #route-list div .m{font-size:9px;color:#484f58}
+#route-inspector{padding:10px 14px;border-bottom:1px solid #172436;font-size:11px;color:#a7bacb;line-height:1.7}
+#route-inspector b{color:#d7ebff}.route-actions{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.route-actions button{padding:3px 6px;border:1px solid #31506d;border-radius:3px;background:#111d2b;color:#b9dcff;font-size:10px;cursor:pointer}
+.route-actions button:hover{background:#1b3047;color:#fff}.route-actions button.warn{border-color:#9b6a20;color:#f0c040}
+.route-item{white-space:normal!important;padding:7px 14px!important}.route-item .route-title{display:flex;justify-content:space-between;gap:8px}.route-item .route-title span:last-child{color:#5f7088;font-size:9px}.empty-note{padding:12px 14px;color:#5f7088;font-size:11px;line-height:1.6}
 #log-list .occ{color:#f85149}#log-list .lock{color:#d29922}#log-list .rel{color:#3fb950}
 #log-list .ent{color:#f0c040}#log-list .sig{color:#58a6ff}#log-list .vac{color:#3a4a5a}
 #foot{display:flex;align-items:center;padding:4px 16px;background:#0d1424;border-top:1px solid #172436;font-size:10px;color:#3a4a5a;gap:16px;flex-shrink:0}
@@ -61,15 +66,16 @@ canvas{display:block}
   </div>
   <div id="log">
     <div id="tab-bar">
-      <button onclick="switchTab('log')" id="tab-log" class="on">Event Log</button>
-      <button onclick="switchTab('route')" id="tab-route">Routes</button>
+      <button onclick="switchTab('log')" id="tab-log" class="on">事件日志</button>
+      <button onclick="switchTab('route')" id="tab-route">进路检查</button>
     </div>
     <div id="log-content">
-      <h3>Event Log <span id="lcnt" style="color:#3a4a5a;font-weight:400;font-size:10px;margin-left:8px">0</span></h3>
+      <h3>事件日志 <span id="lcnt" style="color:#3a4a5a;font-weight:400;font-size:10px;margin-left:8px">0</span></h3>
       <div id="log-list"></div>
     </div>
     <div id="route-tab" style="display:none">
-      <h3>Routes <span id="rcnt" style="color:#3a4a5a;font-weight:400;font-size:10px;margin-left:8px">0</span></h3>
+      <h3>轨道与进路 <span id="rcnt" style="color:#3a4a5a;font-weight:400;font-size:10px;margin-left:8px">0</span></h3>
+      <div id="route-inspector">点击图中的轨道以查看相关进路。</div>
       <div style="padding:4px 10px"><input id="route-filter" placeholder="搜索进路..." style="width:100%;padding:4px 8px;border:1px solid #1a2240;border-radius:3px;background:#0d1117;color:#c9d1d9;font-size:10px;font-family:monospace;outline:none" oninput="filterRoutes()"></div>
       <div id="route-list"></div>
     </div>
@@ -78,7 +84,7 @@ canvas{display:block}
 
 <script>
 /* ═══════════════════════════ 全局变量 ═══════════════════════════ */
-var A='http://127.0.0.1:8002', S=null, prev=null, tm=null, spd=10;
+var A=(new URLSearchParams(location.search).get('api')||'http://127.0.0.1:8010'), S=null, prev=null, tm=null, spd=10;
 var c=document.getElementById('c'), cx=c.getContext('2d');
 var sc=1, ox=0, oy=0, dr=null, w=document.getElementById('canvas-wrap');
 var BM=60, UY=90, DY=140, SY=60;
