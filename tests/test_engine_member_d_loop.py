@@ -10,7 +10,7 @@ class EngineMemberDLoopTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             "data/scenarios/line9_single.json",
             "data/cache/line_map.json",
-            "MetroDynamicsJavaDemo/data/stations.csv",
+            "data/line9/stations.csv",
         )
         engine.load()
         result = engine.add_train({

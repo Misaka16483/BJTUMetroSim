@@ -1,4 +1,4 @@
-"""仿真引擎 — 成员A: 时钟驱动 + 域服务编排 + 事件发布 + 数据记录."""
+"""浠跨湡寮曟搸 鈥?鎴愬憳A: 鏃堕挓椹卞姩 + 鍩熸湇鍔＄紪鎺?+ 浜嬩欢鍙戝竷 + 鏁版嵁璁板綍."""
 
 from __future__ import annotations
 
@@ -15,16 +15,21 @@ from app.core.message_bus import Envelope, MessageBus
 from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
 from app.domain.control.services import ATOController
-from app.domain.dispatch.services import DispatchContext, DispatchDecision, RuleBasedDispatchService
+from app.domain.dispatch.kpi import DispatchKpiTracker
+from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
+from app.domain.dispatch.timetable import HeadwayConfig, TimetableService
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.services import (
     BoardingResult,
+    DayType,
     DwellPlan,
     DwellTimeConfig,
-    PassengerDemandProfile,
-    PassengerFlowGenerator,
+    FlowScenario,
+    PlatformCrowdState,
+    PoissonPassengerFlowGenerator,
+    StationFlowConfig,
     StationService,
     TrainLoadState,
 )
@@ -40,7 +45,7 @@ from app.infra.recorder import RunRecorder
 
 JsonDict = dict[str, Any]
 
-# ── 列车运行阶段 ──
+# 鈹€鈹€ 鍒楄溅杩愯闃舵 鈹€鈹€
 APPROACHING = "APPROACHING"     # 进站制动
 DWELLING = "DWELLING"           # 停站上下客
 DEPARTING = "DEPARTING"         # 出站加速
@@ -50,10 +55,10 @@ IDLE = "IDLE"                   # 尚未启动或已完成
 
 @dataclass
 class SimTrainState:
-    """列车实时状态."""
+    """鍒楄溅瀹炴椂鐘舵€?"""
     train_id: str
     line_id: str
-    station_index: int           # 当前所在站序号 (0-based)
+    station_index: int           # 褰撳墠鎵€鍦ㄧ珯搴忓彿 (0-based)
     direction: str               # "UP" or "DOWN"
     current_station_code: str = ""
     next_station_code: str = ""
@@ -68,18 +73,18 @@ class SimTrainState:
     load_factor: float = 0.0
     current_station_name: str = ""
     next_station_name: str = ""
-    segment_progress: float = 0.0  # 0→1 between current and next station
+    segment_progress: float = 0.0  # 0鈫? between current and next station
     last_dispatch_action: str = "FOLLOW_TIMETABLE"
     last_dispatch_reason: str = "NO_ADJUSTMENT_NEEDED"
     dispatch_hold_applied_station_index: int | None = None
-    # ── 驾驶模式 ──
+    # 鈹€鈹€ 椹鹃┒妯″紡 鈹€鈹€
     operation_mode: str = "ATO"  # "ATO" or "MANUAL"
-    # ── 驾驶台反馈字段 ──
+    # 鈹€鈹€ 椹鹃┒鍙板弽棣堝瓧娈?鈹€鈹€
     traction_percent: float = 0.0
     brake_percent: float = 0.0
     energy_kwh: float = 0.0
     target_speed_mps: float = 0.0
-    estimated_run_time_s: float = 0.0   # 预计区间运行时间，由速度曲线积分得出
+    estimated_run_time_s: float = 0.0   # 棰勮鍖洪棿杩愯鏃堕棿锛岀敱閫熷害鏇茬嚎绉垎寰楀嚭
     path_position_m: float = 0.0
     path_total_length_m: float = 0.0
     current_segment_id: int | None = None
@@ -107,7 +112,7 @@ class SimTrainState:
     _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
     _path_origin_station_index: int | None = field(default=None, repr=False, compare=False)
     _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
-    # ── 手动驾驶 per-train 指令 ──
+    # 鈹€鈹€ 鎵嬪姩椹鹃┒ per-train 鎸囦护 鈹€鈹€
     _manual_command: ControlCommand | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> JsonDict:
@@ -186,7 +191,7 @@ class PowerCommand:
 
 @dataclass
 class TickSnapshot:
-    """每个 tick 的完整快照，供 API 读取."""
+    """姣忎釜 tick 鐨勫畬鏁村揩鐓э紝渚?API 璇诲彇."""
     tick: int = 0
     sim_time_ms: int = 0
     sim_time_str: str = "08:00:00"
@@ -200,10 +205,10 @@ class TickSnapshot:
 
 
 class SimulationEngine:
-    """Phase 1 仿真引擎：单车为主，预留多车接口."""
+    """Phase 1 浠跨湡寮曟搸锛氬崟杞︿负涓伙紝棰勭暀澶氳溅鎺ュ彛."""
 
-    # ── 速度曲线参数 ──
-    CRUISE_SPEED_MPS = 22.22  # 80 km/h 巡航
+    # 鈹€鈹€ 閫熷害鏇茬嚎鍙傛暟 鈹€鈹€
+    CRUISE_SPEED_MPS = 22.22  # 80 km/h 宸¤埅
 
     def __init__(
         self,
@@ -224,7 +229,7 @@ class SimulationEngine:
                 f"but scenario uses line {scenario.line_id}"
             )
 
-        # 核心组件
+        # 鏍稿績缁勪欢
         self.clock = SimulationClock(tick_seconds=scenario.tick_seconds)
         self.bus = MessageBus()
         self.track_query = TrackQueryService(line_map)
@@ -233,19 +238,42 @@ class SimulationEngine:
             allowed_segment_ids=line_scope.segment_ids if line_scope is not None else None,
         )
 
-        # ── 构建车站运行索引 ──
+        # 鈹€鈹€ 鏋勫缓杞︾珯杩愯绱㈠紩 鈹€鈹€
         self._station_list: list[JsonDict] = self._build_station_list()
         self._station_distances: list[float] = self._build_station_distances()
         self._station_platform_ids: dict[int, tuple[int, ...]] = self._build_station_platform_ids()
 
-        # ── 列车状态 ──
+        # 鈹€鈹€ 鍒楄溅鐘舵€?鈹€鈹€
         self.trains: list[SimTrainState] = []
+        # User-owned train configuration survives stop/start; runtime states do not.
+        self._train_specs: dict[str, JsonDict] = ({
+            cfg.train_id: {
+                "trainId": cfg.train_id,
+                "initialStationCode": cfg.initial_station_code,
+                "direction": cfg.direction,
+                "operationMode": "ATO",
+                "capacityPax": cfg.capacity_pax,
+                "initialLoadPax": cfg.initial_load_pax,
+            }
+            for cfg in scenario.trains
+        } if scenario.auto_spawn_trains else {})
         self._run_id: int | None = None
 
-        # ── 域服务 ──
+        # 鈹€鈹€ 鍩熸湇鍔?鈹€鈹€
         self.station_service = self._build_station_service()
         self.power_service: PowerService = self._build_power_service()
-        self.dispatch_service = RuleBasedDispatchService()
+        self.dispatch_service = RuleBasedDispatchService(
+            DispatchRuleConfig(
+                min_headway_sec=90.0,
+                max_headway_sec=300.0,
+                overload_threshold=1.20,
+                left_behind_threshold_pax=80,
+            )
+        )
+        self.kpi_tracker = DispatchKpiTracker()
+        self.timetable_service = TimetableService(
+            headway_config=HeadwayConfig(min_headway_sec=90.0),
+        )
         self._last_arrivals_by_platform: dict[tuple[str, str], int] = {}
         self._last_power_states: dict[str, Any] = {}
         self._last_dispatch_decisions: list[DispatchDecision] = []
@@ -254,7 +282,7 @@ class SimulationEngine:
         self._power_command_results: list[JsonDict] = []
         self._recorded_power_command_ids: set[str] = set()
 
-        # ── 物理模型：PathPlan-aware ATO + DCDP 规划曲线 ──
+        # 鈹€鈹€ 鐗╃悊妯″瀷锛歅athPlan-aware ATO + DCDP 瑙勫垝鏇茬嚎 鈹€鈹€
         self._ato_config = AtoConfig(
             target_cruise_speed_mps=self.CRUISE_SPEED_MPS,
             expected_deceleration_mps2=0.6,
@@ -265,29 +293,28 @@ class SimulationEngine:
         )
         self.ato = ATOController(self._ato_config)
         self._ato_by_train: dict[str, ATOController] = {}
-        self._dcdp_curve_data: dict[str, list[dict[str, Any]]] = {}     # 规划曲线
+        self._dcdp_curve_data: dict[str, list[dict[str, Any]]] = {}     # 瑙勫垝鏇茬嚎
         self._dcdp_curve_meta: dict[str, dict[str, Any]] = {}
-        self._profile_run_times: dict[str, float] = {}                  # 预计区间运行时间
+        self._profile_run_times: dict[str, float] = {}                  # 棰勮鍖洪棿杩愯鏃堕棿
 
-        # ── 用户配置的车辆参数（per-train） ──
+        # 鈹€鈹€ 鐢ㄦ埛閰嶇疆鐨勮溅杈嗗弬鏁帮紙per-train锛?鈹€鈹€
         self._vehicle_config_by_train: dict[str, VehicleConfig] = {}
 
-        # ── 手动驾驶模式（per-train） ──
+        # 鈹€鈹€ 鎵嬪姩椹鹃┒妯″紡锛坧er-train锛?鈹€鈹€
         self._manual_mode_by_train: dict[str, bool] = {}
 
-        # ── 线程安全 ──
+        # 鈹€鈹€ 绾跨▼瀹夊叏 鈹€鈹€
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._power_lock = threading.RLock()
         self._snapshot: TickSnapshot | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
-    # ═══════════════════════════════════════════════════════════
-    #  公共接口
-    # ═══════════════════════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  鍏叡鎺ュ彛
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     def set_vehicle_config(self, data: JsonDict) -> VehicleConfig:
-        """接收前端传来的车辆参数并保存（默认用于所有新车）."""
+        """鎺ユ敹鍓嶇浼犳潵鐨勮溅杈嗗弬鏁板苟淇濆瓨锛堥粯璁ょ敤浜庢墍鏈夋柊杞︼級."""
         train_id = data.get("trainId", self.trains[0].train_id if self.trains else "T0901")
         vcfg = VehicleConfig.from_user_config(train_id, data)
         self._vehicle_config_by_train[train_id] = vcfg
@@ -300,7 +327,7 @@ class SimulationEngine:
         return vcfg
 
     def set_train_vehicle_config(self, train_id: str, data: JsonDict) -> VehicleConfig:
-        """为指定列车设置车辆参数."""
+        """涓烘寚瀹氬垪杞﹁缃溅杈嗗弬鏁?"""
         vcfg = VehicleConfig.from_user_config(train_id, data)
         self._vehicle_config_by_train[train_id] = vcfg
         for train in self.trains:
@@ -311,7 +338,7 @@ class SimulationEngine:
         return vcfg
 
     def set_manual_mode(self, train_id: str, enabled: bool) -> dict:
-        """切换指定列车的 MANUAL/ATO 模式."""
+        """鍒囨崲鎸囧畾鍒楄溅鐨?MANUAL/ATO 妯″紡."""
         for train in self.trains:
             if train.train_id == train_id:
                 train.operation_mode = "MANUAL" if enabled else "ATO"
@@ -323,7 +350,7 @@ class SimulationEngine:
         return {"ok": False, "error": "TRAIN_NOT_FOUND"}
 
     def set_manual_command(self, train_id: str, traction_percent: float, brake_percent: float) -> dict:
-        """接收指定列车的手动驾驶指令."""
+        """鎺ユ敹鎸囧畾鍒楄溅鐨勬墜鍔ㄩ┚椹舵寚浠?"""
         for train in self.trains:
             if train.train_id == train_id:
                 if train.operation_mode != "MANUAL":
@@ -366,7 +393,7 @@ class SimulationEngine:
         )
 
     def _manual_override(self, ato_cmd: ControlCommand, train_id: str) -> ControlCommand:
-        """如果该列车处于手动模式，用其手动指令替代 ATO 指令."""
+        """濡傛灉璇ュ垪杞﹀浜庢墜鍔ㄦā寮忥紝鐢ㄥ叾鎵嬪姩鎸囦护鏇夸唬 ATO 鎸囦护."""
         for train in self.trains:
             if train.train_id == train_id:
                 if train.operation_mode != "MANUAL" or train._manual_command is None:
@@ -381,7 +408,7 @@ class SimulationEngine:
         return ato_cmd
 
     def add_train(self, payload: JsonDict) -> JsonDict:
-        """动态添加一列车."""
+        """鍔ㄦ€佹坊鍔犱竴鍒楄溅."""
         train_id = str(payload.get("trainId", ""))
         if not train_id:
             return {"ok": False, "error": "MISSING_TRAIN_ID"}
@@ -408,6 +435,17 @@ class SimulationEngine:
         direction = str(payload.get("direction", "UP")).upper()
         if direction not in {"UP", "DOWN"}:
             return {"ok": False, "error": "INVALID_DIRECTION"}
+        station_codes = [str(item.get("code", "")) for item in self._station_list]
+        station_index = station_codes.index(initial_station_code)
+        required_start_index = 0 if direction == "UP" else len(station_codes) - 1
+        if station_index != required_start_index:
+            return {
+                "ok": False,
+                "error": "INITIAL_STATION_MUST_MATCH_DIRECTION_ORIGIN",
+                "stationCode": initial_station_code,
+                "requiredStationCode": station_codes[required_start_index],
+                "direction": direction,
+            }
         operation_mode = str(payload.get("operationMode", "ATO")).upper()
         if operation_mode not in ("ATO", "MANUAL"):
             return {"ok": False, "error": "INVALID_OPERATION_MODE"}
@@ -437,7 +475,7 @@ class SimulationEngine:
         if vehicle_data and isinstance(vehicle_data, dict):
             vcfg = VehicleConfig.from_user_config(train_id, vehicle_data)
             self._vehicle_config_by_train[train_id] = vcfg
-            train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
+            train.mass_kg = vcfg.mass_kg
 
         self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self.trains.append(train)
@@ -445,23 +483,27 @@ class SimulationEngine:
         return {"ok": True, "train": train.to_dict()}
 
     def remove_train(self, train_id: str) -> JsonDict:
-        """动态删除一列车."""
+        """鍔ㄦ€佸垹闄や竴鍒楄溅."""
         before = len(self.trains)
+        existed_in_specs = train_id in self._train_specs
         self.trains = [t for t in self.trains if t.train_id != train_id]
+        self._train_specs.pop(train_id, None)
         self._vehicle_config_by_train.pop(train_id, None)
         self._manual_mode_by_train.pop(train_id, None)
         self._dcdp_curve_data.pop(train_id, None)
         self._dcdp_curve_meta.pop(train_id, None)
         self._profile_run_times.pop(train_id, None)
         self._ato_by_train.pop(train_id, None)
-        if len(self.trains) == before:
+        if len(self.trains) == before and not existed_in_specs:
             return {"ok": False, "error": "TRAIN_NOT_FOUND"}
         self._snapshot = self._build_snapshot()
         return {"ok": True, "removed": train_id}
 
     def load(self) -> None:
-        """Load the scenario, optionally creating its declared initial fleet."""
+        """Load a clean runtime from the persistent configured fleet."""
         self.clock.load()
+        self.station_service = self._build_station_service()
+        self.power_service = self._build_power_service()
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
         self._last_dispatch_decisions = []
@@ -475,6 +517,7 @@ class SimulationEngine:
         self._recorded_power_command_ids = set()
         self._manual_mode_by_train = {}
         self._vehicle_config_by_train = {}
+        self.kpi_tracker.reset()
         self.trains = (
             [self._create_train(cfg) for cfg in self.scenario.trains]
             if self.scenario.auto_spawn_trains
@@ -505,14 +548,32 @@ class SimulationEngine:
             if self.power_service.network is not None:
                 self.recorder.upsert_power_topology(self.power_service.network.topology_dict())
 
-    def start(self) -> None:
-        """启动仿真（后台线程）."""
-        if self.clock.state.value != "LOADED":
-            self.load()
-        self.clock.start()
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
+    def start(self) -> str:
+        """鍚姩浠跨湡锛堝悗鍙扮嚎绋嬶級."""
+        with self._lifecycle_lock:
+            if self.clock.state.value == "RUNNING":
+                self._snapshot = self._build_snapshot()
+                return "ALREADY_RUNNING"
+            if self.clock.state.value == "PAUSED":
+                self.clock.resume()
+                self._snapshot = self._build_snapshot()
+                return "RESUMED"
+            if self.clock.state.value == "IDLE":
+                self.load()
+            elif self.clock.state.value == "STOPPED":
+                # stop() 已保留 self.trains 并重置了 clock tick；仅需切到 LOADED
+                self.clock.load()
+                self.kpi_tracker.reset()
+                self._snapshot = self._build_snapshot()
+            self.clock.start()
+            # Publish RUNNING synchronously before the first tick. Otherwise a GET
+            # between start() and _tick() can still return the LOADED snapshot.
+            self._snapshot = self._build_snapshot()
+            self._stop_event.clear()
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run_loop, daemon=True)
+                self._thread.start()
+            return "STARTED"
 
     def pause(self) -> None:
         self.clock.pause()
@@ -696,26 +757,40 @@ class SimulationEngine:
             return switch
 
     def stop(self) -> None:
-        self._stop_event.set()
-        if self.clock.state.value not in ("STOPPED", "IDLE"):
-            self.clock.stop()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-        # 刷新快照以反映当前状态
-        self._snapshot = self._build_snapshot()
+        with self._lifecycle_lock:
+            self._stop_event.set()
+            if self.clock.state.value not in ("STOPPED", "IDLE"):
+                self.clock.stop()
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+                self._thread = None
+            # Stop clears all runtime/transient state but preserves the configured roster.
+            self.clock.current_tick = 0
+            self.clock.sim_time_seconds = 0.0
+            self.station_service = self._build_station_service()
+            self.power_service = self._build_power_service()
+            self._last_arrivals_by_platform = {}
+            self._last_power_states = self._empty_power_states()
+            self._last_dispatch_decisions = []
+            self._ato_by_train = {}
+            self._dcdp_curve_data = {}
+            self._dcdp_curve_meta = {}
+            self._profile_run_times = {}
+            self._power_commands.clear()
+            self._power_command_results = []
+            self._recorded_power_command_ids = set()
+            self.kpi_tracker.reset()
+            self.trains = []
+            self._snapshot = self._build_snapshot()
 
     def snapshot(self) -> TickSnapshot | None:
-        """线程安全读取当前快照."""
+        """绾跨▼瀹夊叏璇诲彇褰撳墠蹇収."""
         with self._lock:
             return self._snapshot
 
-    # ═══════════════════════════════════════════════════════════
-    #  仿真主循环
-    # ═══════════════════════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  浠跨湡涓诲惊鐜?    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     def _run_loop(self) -> None:
-        """后台仿真线程."""
+        """鍚庡彴浠跨湡绾跨▼."""
         while not self._stop_event.is_set():
             if self.clock.state.value == "PAUSED":
                 time.sleep(0.1)
@@ -729,7 +804,7 @@ class SimulationEngine:
             time.sleep(sleep_sec)
 
     def _tick(self) -> None:
-        """单步仿真."""
+        """鍗曟浠跨湡."""
         self.clock.step()
         tick = self.clock.current_tick
         sim_time_ms = self._absolute_sim_time_ms()
@@ -737,11 +812,16 @@ class SimulationEngine:
         # External topology operations are serialized at the tick boundary.
         self._apply_power_commands(sim_time_ms)
 
-        # 1) 客流先到达，停站处理生成的载荷供本tick车辆请求使用。
+        # 1) 客流先到达，停站处理生成的载荷供本 tick 车辆请求使用。
         self._last_arrivals_by_platform = self.station_service.update_arrivals(
             sim_time_ms,
             dt_sec=self.clock.tick_seconds,
         )
+
+        # 2a) KPI: 记录各列车满载率
+        for train in self.trains:
+            if train.onboard_pax > 0 or train.phase != IDLE:
+                self.kpi_tracker.record_load(train.load_factor)
 
         # 2) 生成全部列车控制与候选牵引/再生请求，不推进位置。
         prepared_steps: dict[str, PreparedTrainStep] = {}
@@ -753,7 +833,7 @@ class SimulationEngine:
             if prepared is not None:
                 prepared_steps[train.train_id] = prepared
 
-        # 3) 同时求解全部列车负荷，得到本tick电压、限牵和再生能力。
+        # 3) 同时求解全部列车负载，得到本 tick 电压、限牵和再生能力。
         power_states = self._update_power(sim_time_ms, prepared_steps)
         self._last_power_states = power_states
         solver_failure = self.power_service.last_solver_failure
@@ -774,18 +854,18 @@ class SimulationEngine:
             for item in (self.power_service.last_network_snapshot.trains if self.power_service.last_network_snapshot else [])
         }
 
-        # 4) 使用本tick供电反馈分配实际牵引/电制动/空气制动并推进动力学。
+        # 4) 使用本 tick 供电反馈分配实际牵引/电制动力 + 空气制动并推进行车动力学。
         for prepared in prepared_steps.values():
             self._apply_prepared_train_step(prepared, train_power_flows.get(prepared.train.train_id), sim_time_ms)
         for train in self.trains:
             if train.train_id not in handled_train_ids:
                 self._advance_train(train, sim_time_ms)
 
-        # 5) 调度决策
+        # 5) 璋冨害鍐崇瓥
         decisions = self._make_dispatch_decisions(sim_time_ms, power_states)
         self._last_dispatch_decisions = decisions
 
-        # 6) 发布事件
+        # 6) 鍙戝竷浜嬩欢
         for train in self.trains:
             self.bus.publish(
                 "train.state",
@@ -795,7 +875,7 @@ class SimulationEngine:
             )
         self.bus.publish("clock.tick", {"tick": tick, "simTimeMs": sim_time_ms}, source="engine", tick=tick)
 
-        # 7) 记录到 SQLite
+        # 7) 璁板綍鍒?SQLite
         if self.recorder is not None and self._run_id is not None:
             for train in self.trains:
                 self.recorder.record_event(
@@ -938,13 +1018,11 @@ class SimulationEngine:
                             tick=tick,
                         )
 
-        # 8) 更新快照
+        # 8) 鏇存柊蹇収
         self._snapshot = self._build_snapshot()
 
-    # ═══════════════════════════════════════════════════════════
-    #  列车推进逻辑
-    # ═══════════════════════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  鍒楄溅鎺ㄨ繘閫昏緫
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     def _prepare_train_step(
         self,
         train: SimTrainState,
@@ -956,11 +1034,7 @@ class SimulationEngine:
         if (train.direction == "UP" and train.station_index >= n - 1) or (
             train.direction == "DOWN" and train.station_index <= 0
         ):
-            train.phase = IDLE
-            train.speed_mps = 0.0
-            train.traction_percent = 0.0
-            train.brake_percent = 0.0
-            return True, None
+            self._turn_train_at_terminal(train)
 
         next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
         if next_idx < 0 or next_idx >= n:
@@ -1103,7 +1177,7 @@ class SimulationEngine:
             train.speed_mps = max(0.0, train.speed_mps - 0.8 * self.clock.tick_seconds)
 
     def _advance_train(self, train: SimTrainState, sim_time_ms: int) -> None:
-        """每 tick 推进一辆列车 — ATO 决策 + 牛顿物理模型."""
+        """姣?tick 鎺ㄨ繘涓€杈嗗垪杞?鈥?ATO 鍐崇瓥 + 鐗涢】鐗╃悊妯″瀷."""
         dt = self.clock.tick_seconds
         stations = self._station_list
         n = len(stations)
@@ -1135,7 +1209,7 @@ class SimulationEngine:
             self._advance_train_on_path(train, next_idx, next_stn, path_plan, sim_time_ms, dist, dt)
             return
 
-        # ── DWELLING ──
+        # 鈹€鈹€ DWELLING 鈹€鈹€
         if train.phase in (DWELLING, IDLE):
             train.speed_mps = 0
             train.distance_to_next_m = dist
@@ -1155,12 +1229,12 @@ class SimulationEngine:
                 train.dwell_remaining_sec = max(0, train.dwell_remaining_sec - dt)
                 return
             train.dwell_remaining_sec = 0
-            # 应用预计运行时间
+            # 搴旂敤棰勮杩愯鏃堕棿
             train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
             train.phase = DEPARTING
             # fall through to physics
 
-        # ── 物理模型推进 ──
+        # 鈹€鈹€ 鐗╃悊妯″瀷鎺ㄨ繘 鈹€鈹€
         try:
             cur_mileage = self._station_distances[train.station_index]
             next_mileage = self._station_distances[next_idx]
@@ -1176,7 +1250,7 @@ class SimulationEngine:
                 net_energy_kwh=train.energy_kwh,
             )
 
-            # ── ATO 目标：profile 作为跟踪目标 + 线路限速作为上限 ──
+            # 鈹€鈹€ ATO 鐩爣锛歱rofile 浣滀负璺熻釜鐩爣 + 绾胯矾闄愰€熶綔涓轰笂闄?鈹€鈹€
             profile_result = self._lookup_profile_speed(train.train_id, position_m)
             if profile_result is not None:
                 profile_speed, profile_mode = profile_result
@@ -1207,18 +1281,18 @@ class SimulationEngine:
             vm = SimpleVehicleModel(vcfg)
             result = vm.step(state, cmd, dt)
 
-            # ── 写回 ──
+            # 鈹€鈹€ 鍐欏洖 鈹€鈹€
             train.speed_mps = max(0.0, result.speed_mps)
             train.traction_percent = cmd.traction_percent
             train.brake_percent = cmd.brake_percent
             train.target_speed_mps = self.ato.last_target_speed_mps
             train.energy_kwh = result.net_energy_kwh
 
-            # ── 位置更新 ──
+            # 鈹€鈹€ 浣嶇疆鏇存柊 鈹€鈹€
             new_progress = (result.position_m - cur_mileage) / interval_m if interval_m > 0 else 1.0
 
             if new_progress >= 1.0:
-                # 到站
+                # 鍒扮珯
                 train.speed_mps = 0
                 train.segment_progress = 0
                 train.station_index = next_idx
@@ -1230,12 +1304,11 @@ class SimulationEngine:
                 train.brake_percent = 20.0
                 train.target_speed_mps = 0.0
 
-                # 清除当前曲线 + 触发标志
+                # 娓呴櫎褰撳墠鏇茬嚎 + 瑙﹀彂鏍囧織
                 self._dcdp_curve_data.pop(train.train_id, None)
                 self._dcdp_curve_meta.pop(train.train_id, None)
                 self._profile_run_times.pop(train.train_id, None)
-                train._profile_triggered = False  # 下一站允许触发
-                self.ato.reset()  # 重置 PID 积分 + profile cache
+                train._profile_triggered = False  # 涓嬩竴绔欏厑璁歌Е鍙?                self.ato.reset()  # 閲嶇疆 PID 绉垎 + profile cache
 
                 new_next_idx = next_idx + 1 if train.direction == "UP" else next_idx - 1
                 if 0 <= new_next_idx < n:
@@ -1256,7 +1329,7 @@ class SimulationEngine:
             else:
                 train.segment_progress = new_progress
                 train.distance_to_next_m = target_position_m - result.position_m if train.direction == "UP" else result.position_m - target_position_m
-                # Phase 更新
+                # Phase 鏇存柊
                 if train.speed_mps >= self.CRUISE_SPEED_MPS * 0.95:
                     train.phase = CRUISING
                 elif cmd.brake_percent > 5 and train.speed_mps > 0.5:
@@ -1282,7 +1355,7 @@ class SimulationEngine:
         dist: float,
         dt: float,
     ) -> None:
-        """按 PathPlan 局部坐标推进一辆车."""
+        """鎸?PathPlan 灞€閮ㄥ潗鏍囨帹杩涗竴杈嗚溅."""
         if train.phase in (DWELLING, IDLE):
             train.speed_mps = 0.0
             train.path_position_m = 0.0
@@ -1427,6 +1500,10 @@ class SimulationEngine:
         self._ato_for_train(train.train_id).reset()
 
         stations = self._station_list
+        if (train.direction == "UP" and next_idx == len(stations) - 1) or (
+            train.direction == "DOWN" and next_idx == 0
+        ):
+            self._turn_train_at_terminal(train)
         new_next_idx = next_idx + 1 if train.direction == "UP" else next_idx - 1
         if 0 <= new_next_idx < len(stations):
             new_next_stn = stations[new_next_idx]
@@ -1446,6 +1523,22 @@ class SimulationEngine:
             train.distance_to_next_m = 0.0
 
         self._process_station_stop(train, sim_time_ms)
+
+    def _turn_train_at_terminal(self, train: SimTrainState) -> None:
+        """At either terminal, reverse service direction and continue after the dwell."""
+        train.direction = "DOWN" if train.direction == "UP" else "UP"
+        train.phase = DWELLING
+        train.speed_mps = 0.0
+        train.traction_percent = 0.0
+        train.brake_percent = 20.0
+        train.target_speed_mps = 0.0
+        train.segment_progress = 0.0
+        train.path_position_m = 0.0
+        train.path_total_length_m = 0.0
+        train._path_plan = None
+        train._path_origin_station_index = None
+        train._path_destination_station_index = None
+        train._profile_triggered = False
 
     def _ato_for_train(self, train_id: str) -> ATOController:
         controller = self._ato_by_train.get(train_id)
@@ -1602,7 +1695,7 @@ class SimulationEngine:
 
 
     def _lookup_profile_speed(self, train_id: str, position_m: float) -> tuple[float, str] | None:
-        """从规划曲线中线性插值当前位置的目标速度和运行模式."""
+        """浠庤鍒掓洸绾夸腑绾挎€ф彃鍊煎綋鍓嶄綅缃殑鐩爣閫熷害鍜岃繍琛屾ā寮?"""
         points = self._dcdp_curve_data.get(train_id)
         if not points or len(points) < 2:
             return None
@@ -1619,19 +1712,16 @@ class SimulationEngine:
         return (points[-1]["speedMps"], points[-1].get("mode", ""))
 
     def export_speed_profile(self, train_id: str) -> list[dict[str, Any]]:
-        """返回指定列车的 DCDP 规划速度曲线数据."""
+        """杩斿洖鎸囧畾鍒楄溅鐨?DCDP 瑙勫垝閫熷害鏇茬嚎鏁版嵁."""
         return self._dcdp_curve_data.get(train_id, [])
 
     def export_speed_profile_meta(self, train_id: str) -> dict[str, Any]:
-        """返回指定列车速度曲线来源与终端质量."""
+        """杩斿洖鎸囧畾鍒楄溅閫熷害鏇茬嚎鏉ユ簮涓庣粓绔川閲?"""
         return self._dcdp_curve_meta.get(train_id, {})
 
-    # ═══════════════════════════════════════════════════════════
-    #  域服务调用
-    # ═══════════════════════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  鍩熸湇鍔¤皟鐢?    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     def _process_station_stop(self, train: SimTrainState, sim_time_ms: int) -> None:
-        """处理列车停站上下客."""
+        """澶勭悊鍒楄溅鍋滅珯涓婁笅瀹?"""
         try:
             result, dwell_plan = self.station_service.process_train_stop(
                 sim_time_ms=sim_time_ms,
@@ -1644,7 +1734,7 @@ class SimulationEngine:
                 ),
                 platform_area_m2=120.0,
             )
-            # 取较大的停站时间（客流驱动 or 默认值）
+            # 鍙栬緝澶х殑鍋滅珯鏃堕棿锛堝娴侀┍鍔?or 榛樿鍊硷級
             effective_dwell = max(
                 dwell_plan.estimated_dwell_sec,
                 float(self._station_list[train.station_index].get("dwellSeconds", 30)),
@@ -1653,17 +1743,22 @@ class SimulationEngine:
             train.onboard_pax = result.updated_load.onboard_pax
             train.load_factor = result.updated_load.load_factor
 
-            # 记录到 SQLite
+            # 璁板綍鍒?SQLite
             if self.recorder is not None and self._run_id is not None:
+                platform = self.station_service.ensure_platform(result.station_id, result.direction)
+                arrivals = self._last_arrivals_by_platform.get((result.station_id, result.direction), 0)
                 self.recorder.record_station_passenger(
                     self._run_id,
                     sim_time_ms=sim_time_ms,
                     station_id=result.station_id,
                     direction=result.direction,
+                    arrivals=arrivals,
                     boarding=result.boarding,
                     alighting=result.alighting,
                     waiting=result.waiting,
                     left_behind=result.left_behind,
+                    platform_density_pax_per_m2=platform.platform_density_pax_per_m2,
+                    crowding_level=platform.crowding_level,
                 )
                 self.recorder.record_train_load(
                     self._run_id,
@@ -1695,7 +1790,7 @@ class SimulationEngine:
         sim_time_ms: int,
         prepared_steps: dict[str, PreparedTrainStep] | None = None,
     ) -> dict[str, Any]:
-        """更新供电状态."""
+        """鏇存柊渚涚數鐘舵€?"""
         if not self.power_service.sections:
             return {}
         requests: list[TrainPowerRequest] = []
@@ -1747,7 +1842,7 @@ class SimulationEngine:
     def _make_dispatch_decisions(
         self, sim_time_ms: int, power_states: dict[str, Any]
     ) -> list[DispatchDecision]:
-        """生成调度决策."""
+        """鐢熸垚璋冨害鍐崇瓥."""
         decisions: list[DispatchDecision] = []
         for train in self.trains:
             if train.phase != DWELLING:
@@ -1778,10 +1873,8 @@ class SimulationEngine:
             decisions.append(decision)
         return decisions
 
-    # ═══════════════════════════════════════════════════════════
-    #  快照构建
-    # ═══════════════════════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  蹇収鏋勫缓
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     def _build_snapshot(self) -> TickSnapshot:
         total_sec = self._absolute_sim_time_ms() // 1000
         h = (total_sec // 3600) % 24
@@ -1803,7 +1896,7 @@ class SimulationEngine:
             power=[self._power_snapshot(state) for state in self._last_power_states.values()],
             power_network=self._power_network_snapshot(),
             dispatch_decisions=[self._dispatch_snapshot(item) for item in self._last_dispatch_decisions],
-            kpi={
+            kpi=dict({
                 "activeTrains": len(active),
                 "totalTrains": len(self.trains),
                 "avgSpeed": (
@@ -1846,24 +1939,21 @@ class SimulationEngine:
                 "lineScopeEnforced": self.line_scope is not None,
                 "lineScopeId": self.line_scope.scope_id if self.line_scope is not None else None,
                 "lineScopeSegmentCount": len(self.line_scope.segment_ids) if self.line_scope is not None else 0,
-            },
+            }, **self.kpi_tracker.snapshot(self._absolute_sim_time_ms() / 1000.0).to_dict()),
         )
 
-    # ═══════════════════════════════════════════════════════════
-    #  初始化辅助
-    # ═══════════════════════════════════════════════════════════
-
+    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  鍒濆鍖栬緟鍔?    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
     def _build_station_list(self) -> list[JsonDict]:
-        """构建按里程排序的车站列表."""
+        """鏋勫缓鎸夐噷绋嬫帓搴忕殑杞︾珯鍒楄〃."""
         stations = sorted(self.station_catalog, key=lambda s: float(s.get("mileageM", 0)))
         return stations
 
     def _build_station_distances(self) -> list[float]:
-        """各站累计里程 (m)."""
+        """鍚勭珯绱閲岀▼ (m)."""
         return [float(stn.get("mileageM", 0)) for stn in self._station_list]
 
     def _build_station_platform_ids(self) -> dict[int, tuple[int, ...]]:
-        """按车站里程把线路站台表映射到 station_index."""
+        """鎸夎溅绔欓噷绋嬫妸绾胯矾绔欏彴琛ㄦ槧灏勫埌 station_index."""
         platforms_by_mileage: dict[float, list[int]] = {}
         for platform in self.line_map.get("platforms", []):
             platform_id = platform.get("id")
@@ -1890,12 +1980,16 @@ class SimulationEngine:
         return mapping
 
     def _create_train(self, cfg: TrainConfig) -> SimTrainState:
-        """根据配置初始化一辆列车."""
+        """根据配置初始化一列列车."""
         # 查找起点站序号
         idx = next(
             (i for i, stn in enumerate(self._station_list) if stn.get("code") == cfg.initial_station_code),
-            0,
+            -1,
         )
+        if idx < 0:
+            raise ValueError(f"INVALID_INITIAL_STATION:{cfg.initial_station_code}")
+        if cfg.direction not in ("UP", "DOWN"):
+            raise ValueError(f"INVALID_DIRECTION:{cfg.direction}")
         stn = self._station_list[idx]
         next_idx = min(idx + 1, len(self._station_list) - 1) if cfg.direction == "UP" else max(idx - 1, 0)
         next_stn = self._station_list[next_idx]
@@ -1916,7 +2010,7 @@ class SimulationEngine:
             phase=DWELLING,
             speed_mps=0.0,
             target_distance_m=dist,
-            dwell_remaining_sec=5.0,  # 初始等待5秒后发车
+            dwell_remaining_sec=5.0,  # 鍒濆绛夊緟5绉掑悗鍙戣溅
             distance_to_next_m=dist,
             onboard_pax=cfg.initial_load_pax,
             capacity_pax=cfg.capacity_pax,
@@ -1926,26 +2020,50 @@ class SimulationEngine:
             next_station_name=next_stn.get("name", ""),
         )
 
+    def _create_train_from_spec(self, spec: JsonDict) -> SimTrainState:
+        """Create a fresh runtime state from persistent user configuration."""
+        train_id = str(spec["trainId"])
+        cfg = TrainConfig(
+            train_id=train_id,
+            line_id="9",
+            initial_station_code=str(spec["initialStationCode"]),
+            direction=str(spec["direction"]),
+            capacity_pax=int(spec.get("capacityPax", 600)),
+            initial_load_pax=int(spec.get("initialLoadPax", 0)),
+        )
+        train = self._create_train(cfg)
+        train.operation_mode = str(spec.get("operationMode", "ATO"))
+        self._manual_mode_by_train[train_id] = train.operation_mode == "MANUAL"
+        vehicle_config = self._vehicle_config_by_train.get(train_id)
+        if vehicle_config is not None:
+            train.mass_kg = vehicle_config.mass_kg + cfg.initial_load_pax * 65.0
+        return train
+
     def _build_station_service(self) -> StationService:
-        """构建客流服务."""
+        """构建客流服务 — 使用 Poisson 客流生成器 + 六时段多日型."""
+        station_configs = [
+            StationFlowConfig("GGZ", base_arrival_rate_pax_per_min=60.0, alighting_ratio=0.05, direction="UP"),
+            StationFlowConfig("FSP", base_arrival_rate_pax_per_min=72.0, alighting_ratio=0.10, direction="UP"),
+            StationFlowConfig("KYL", base_arrival_rate_pax_per_min=48.0, alighting_ratio=0.12, direction="UP"),
+            StationFlowConfig("FTN", base_arrival_rate_pax_per_min=55.0, alighting_ratio=0.15, direction="UP"),
+            StationFlowConfig("FTD", base_arrival_rate_pax_per_min=40.0, alighting_ratio=0.15, direction="UP"),
+            StationFlowConfig("QLZ", base_arrival_rate_pax_per_min=65.0, alighting_ratio=0.18, direction="UP"),
+            StationFlowConfig("LLQ", base_arrival_rate_pax_per_min=90.0, alighting_ratio=0.20, direction="UP"),
+            StationFlowConfig("LLE", base_arrival_rate_pax_per_min=50.0, alighting_ratio=0.18, direction="UP"),
+            StationFlowConfig("BWR", base_arrival_rate_pax_per_min=120.0, alighting_ratio=0.25, direction="UP"),
+            StationFlowConfig("JBG", base_arrival_rate_pax_per_min=80.0, alighting_ratio=0.20, direction="UP"),
+            StationFlowConfig("BDZ", base_arrival_rate_pax_per_min=35.0, alighting_ratio=0.15, direction="UP"),
+            StationFlowConfig("BQS", base_arrival_rate_pax_per_min=45.0, alighting_ratio=0.15, direction="UP"),
+            StationFlowConfig("GTG", base_arrival_rate_pax_per_min=70.0, alighting_ratio=0.25, direction="UP"),
+        ]
+
+        flow_generator = PoissonPassengerFlowGenerator(
+            station_configs=station_configs,
+            scenario=FlowScenario(day_type=DayType.MON_THU, line_scale=1.0, random_seed=42),
+            use_poisson=True,
+        )
         return StationService(
-            PassengerFlowGenerator(
-                [
-                    PassengerDemandProfile("GGZ", "UP", 7 * 3600, 9 * 3600, 60.0, alighting_ratio=0.08),
-                    PassengerDemandProfile("FSP", "UP", 7 * 3600, 9 * 3600, 72.0, alighting_ratio=0.14),
-                    PassengerDemandProfile("KYL", "UP", 7 * 3600, 9 * 3600, 48.0, alighting_ratio=0.16),
-                    PassengerDemandProfile("FTN", "UP", 7 * 3600, 9 * 3600, 55.0, alighting_ratio=0.15),
-                    PassengerDemandProfile("FTD", "UP", 7 * 3600, 9 * 3600, 40.0, alighting_ratio=0.12),
-                    PassengerDemandProfile("QLZ", "UP", 7 * 3600, 9 * 3600, 65.0, alighting_ratio=0.18),
-                    PassengerDemandProfile("LLQ", "UP", 7 * 3600, 9 * 3600, 90.0, alighting_ratio=0.20),
-                    PassengerDemandProfile("LLE", "UP", 7 * 3600, 9 * 3600, 50.0, alighting_ratio=0.14),
-                    PassengerDemandProfile("BWR", "UP", 7 * 3600, 9 * 3600, 120.0, alighting_ratio=0.25),
-                    PassengerDemandProfile("JBG", "UP", 7 * 3600, 9 * 3600, 80.0, alighting_ratio=0.22),
-                    PassengerDemandProfile("BDZ", "UP", 7 * 3600, 9 * 3600, 35.0, alighting_ratio=0.12),
-                    PassengerDemandProfile("BQS", "UP", 7 * 3600, 9 * 3600, 45.0, alighting_ratio=0.15),
-                    PassengerDemandProfile("GTG", "UP", 7 * 3600, 9 * 3600, 70.0, alighting_ratio=0.30),
-                ]
-            ),
+            flow_generator,
             DwellTimeConfig(base_dwell_sec=30.0, door_capacity_pax_per_sec=3.0),
         )
 

@@ -13,7 +13,7 @@ def load_engine(scenario_name: str) -> SimulationEngine:
     engine = SimulationEngine.load_from_files(
         scenario_path=ROOT / "data" / "scenarios" / scenario_name,
         line_map_path=ROOT / "data" / "cache" / "line_map.json",
-        stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+        stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
     )
     engine.load()
     return engine

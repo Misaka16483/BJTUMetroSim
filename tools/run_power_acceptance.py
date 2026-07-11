@@ -23,7 +23,7 @@ from app.infra.recorder import RunRecorder
 SCENARIO = ROOT / "data" / "scenarios" / "line9_5train_power.json"
 TOPOLOGY = ROOT / "data" / "scenarios" / "line9_power_topology.json"
 LINE_MAP = ROOT / "data" / "cache" / "line_map.json"
-STATIONS = ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
+STATIONS = ROOT / "data" / "line9" / "stations.csv"
 
 
 def percentile(values: list[float], ratio: float) -> float:

@@ -16,7 +16,7 @@ class MainlineScopeIntegrationTests(unittest.TestCase):
         self.engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
 
     def test_scenario_enforces_versioned_mainline_scope(self) -> None:

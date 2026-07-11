@@ -180,6 +180,8 @@ interface SimState {
 let tickCount = 0;
 let simSecAccum = 7 * 3600; // 07:00:00 起点
 let currentRunDirection: 'UP' | 'DOWN' = 'DOWN';
+let backendStartPromise: Promise<void> | null = null;
+let awaitingRunConfirmation = false;
 
 // ── 9号线 polyline 缓存（用于列车地图位置插值）──
 let cachedPolyline: [number, number][] | null = null;
@@ -728,6 +730,10 @@ export const useSimStore = create<SimState>((set, get) => ({
   updateFromBackend: (data: SimStateResponse) => {
     const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions } = data;
     const state = get();
+    // A GET started before POST /start may arrive later with a stale LOADED or
+    // STOPPED snapshot. Do not let it overwrite the acknowledged start state.
+    if (awaitingRunConfirmation && clock.state !== 'RUNNING') return;
+    if (clock.state === 'RUNNING') awaitingRunConfirmation = false;
     const isEngineRunning = clock.state === 'RUNNING';
 
     // 如果有车但没有选中，自动选第一辆
@@ -892,8 +898,23 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
 
   startBackendSim: async () => {
-    await simStart();
-    set({ isRunning: true, engineClockState: 'RUNNING' });
+    if (get().engineClockState === 'RUNNING') return;
+    if (backendStartPromise) return backendStartPromise;
+    backendStartPromise = (async () => {
+      awaitingRunConfirmation = true;
+      try {
+        await simStart();
+        set({ isRunning: true, engineClockState: 'RUNNING' });
+      } catch (error) {
+        awaitingRunConfirmation = false;
+        throw error;
+      }
+    })();
+    try {
+      await backendStartPromise;
+    } finally {
+      backendStartPromise = null;
+    }
   },
 
   pauseBackendSim: async () => {
@@ -907,6 +928,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
 
   stopBackendSim: async () => {
+    awaitingRunConfirmation = false;
     await simStop();
     set({
       isRunning: false,
@@ -921,6 +943,26 @@ export const useSimStore = create<SimState>((set, get) => ({
       speedRunsByTrain: {},
       activeSpeedRunIdByTrain: {},
       viewedSpeedRunIdByTrain: {},
+      simStations: [],
+      simPower: [],
+      simPowerNetwork: null,
+      dispatchDecisions: [],
+      totalWaitingPax: 0,
+      maxPlatformDensity: 0,
+      totalTractionEnergyKwh: 0,
+      minTractionLimitRatio: 1,
+      minTrainVoltageV: 750,
+      totalAbsorbedRegenKw: 0,
+      totalWastedRegenKw: 0,
+      powerLossesKw: 0,
+      totalBoarded: 0,
+      avgWaitTime: 0,
+      currentSpeedMps: 0,
+      tractionPercent: 0,
+      brakePercent: 0,
+      energyKwh: 0,
+      pathPositionM: 0,
+      segmentProgress: 0,
     });
   },
 

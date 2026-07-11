@@ -20,7 +20,7 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
         result = engine.add_train({
@@ -48,7 +48,7 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
 
@@ -68,7 +68,7 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
             engine = SimulationEngine.load_from_files(
                 scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
                 line_map_path=ROOT / "data" / "cache" / "line_map.json",
-                stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
                 recorder=recorder,
             )
             engine.load()
