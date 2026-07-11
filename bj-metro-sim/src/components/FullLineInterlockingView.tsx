@@ -427,7 +427,8 @@ export default function FullLineInterlockingView() {
         <div ref={containerRef} className="h-full">
           <canvas
             ref={canvasRef}
-            className="block"
+            className="block outline-none"
+            tabIndex={0}
             onMouseDown={handleMouseDown}
           />
         </div>
