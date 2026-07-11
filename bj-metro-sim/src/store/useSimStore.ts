@@ -17,7 +17,7 @@ import type {
 } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
 
-type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power';
+type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow';
 
 /** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {

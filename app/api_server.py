@@ -24,6 +24,7 @@ from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
 from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
 from app.domain.operations.phase1_member_d_demo import Phase1MemberDDemoRunner
 from app.domain.operations.phase2_member_d_full_demo import Phase2MemberDFullDemoRunner
+from app.domain.station.independent_sim import IndependentPassengerSimulation
 from app.infra.recorder import RunRecorder
 
 
@@ -78,6 +79,13 @@ class Line9DataService:
         self._mainline_scope: LineScope | None = None
         self._sim_runner: MemberCDemoRunner | None = None
         self._power_topology: JsonDict | None = None
+        self._passenger_sim: IndependentPassengerSimulation | None = None
+
+    @property
+    def passenger_sim(self) -> IndependentPassengerSimulation:
+        if self._passenger_sim is None:
+            self._passenger_sim = IndependentPassengerSimulation(self.stations)
+        return self._passenger_sim
 
     @property
     def line_map(self) -> JsonDict:
@@ -433,6 +441,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.power_topology())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
+            elif path == "/api/passenger-sim/state":
+                self._send_json(self.service.passenger_sim.snapshot())
             elif path == "/api/sim/power/state":
                 self._send_json(self._sim_power_state())
             elif path == "/api/sim/power/commands":
@@ -492,6 +502,20 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+            if path.startswith("/api/passenger-sim/"):
+                payload = self._read_json_body()
+                sim = self.service.passenger_sim
+                action = path.rsplit("/", 1)[-1]
+                if action == "start": sim.start()
+                elif action == "pause": sim.pause()
+                elif action == "resume": sim.resume()
+                elif action == "stop": sim.stop()
+                elif action == "step": sim.step(int(payload.get("seconds", 1)))
+                else:
+                    self._send_json({"ok": False, "error": "UNKNOWN_PASSENGER_SIM_ACTION"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._send_json({"ok": True, "action": action, "state": sim.snapshot()})
+                return
 
             if path == "/api/sim/start" or path == "/api/sim/pause" or path == "/api/sim/resume" or path == "/api/sim/stop":
                 if not self.engine:
