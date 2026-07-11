@@ -51,6 +51,38 @@ function getCombinedInterlockingData(): StationInterlockingData {
   const availGap = targetCanvasW - totalStationW;
   const scaleMile = availGap / totalReal;
 
+  // 区间 seg 列表（UP 方向：GGZ → GTG）
+  const UP_SEGMENT_IDS: number[][] = [
+    [22, 23, 235],                                    // GGZ → FSP
+    [25, 54],                                          // FSP → KYL
+    [56, 57],                                          // KYL → FTN
+    [59, 60, 61],                                      // FTN → FTD
+    [63, 64, 66, 67, 82, 83],                          // FTD → QLZ
+    [85, 86, 87],                                      // QLZ → LLQ
+    [89, 90, 92, 93, 94, 96, 125],                     // LLQ → LLE
+    [127, 128],                                        // LLE → BWR
+    [130, 131, 133, 134, 169],                         // BWR → JBG
+    [171, 172, 173],                                   // JBG → BDZ
+    [178, 203],                                        // BDZ → BQS
+    [205, 206],                                        // BQS → GTG
+  ];
+
+  // 区间 seg 列表（DN 方向：GTG → GGZ）
+  const DN_SEGMENT_IDS: number[][] = [
+    [219, 218],                                        // GTG → BQS
+    [195, 194, 192, 191, 190, 188, 187, 186],           // BQS → BDZ
+    [184, 183, 182, 181],                              // BDZ → JBG
+    [179, 146, 145, 144, 142, 141, 140],                // JBG → BWR
+    [138, 137],                                        // BWR → LLE
+    [135, 116, 115, 113, 112, 111, 109, 108, 106, 105, 104], // LLE → LLQ
+    [102, 101, 100, 99],                               // LLQ → QLZ
+    [97, 81, 79, 78],                                  // QLZ → FTD
+    [76, 75, 74, 73],                                  // FTD → FTN
+    [71, 70],                                          // FTN → KYL
+    [68, 52],                                          // KYL → FSP
+    [50, 49, 48, 46, 45, 43, 41, 40],                   // FSP → GGZ
+  ];
+
   // 预计算各站绝对偏移
   const offsets: number[] = [];
   const gaps: number[] = [];
@@ -93,14 +125,14 @@ function getCombinedInterlockingData(): StationInterlockingData {
       const endX = off + cfg.width;
       const mileDiff = Math.round(STATION_CONFIGS[i + 1].mileage - cfg.mileage);
       allTracks.push(
-        { id: `conn-up-${i}`,  label: `区间 ${mileDiff}m`, y: 140, x: endX, width: gap, dir: 'up',   segmentIds: [] },
-        { id: `conn-dn-${i}`,  label: `区间 ${mileDiff}m`, y: 220, x: endX, width: gap, dir: 'down', segmentIds: [] },
+        { id: `conn-up-${i}`,  label: `区间 ${mileDiff}m`, y: 140, x: endX - 30, width: gap + 60, dir: 'up',   segmentIds: UP_SEGMENT_IDS[i] },
+        { id: `conn-dn-${i}`,  label: `区间 ${mileDiff}m`, y: 220, x: endX - 30, width: gap + 60, dir: 'down', segmentIds: DN_SEGMENT_IDS[i] },
       );
-      // 区间标签
+      // 区间标签（置于轨道外侧，远离数据标注区域）
       const midX = endX + gap / 2;
       allLabels.push(
-        { id: `conn-up-lbl-${i}`, x: midX, y: 115, text: `── 区间 ${mileDiff}m ──`, fontSize: 8, color: '#5a7a9a', align: 'center', font: 'monospace' },
-        { id: `conn-dn-lbl-${i}`, x: midX, y: 300, text: `── 区间 ${mileDiff}m ──`, fontSize: 8, color: '#5a7a9a', align: 'center', font: 'monospace' },
+        { id: `conn-up-lbl-${i}`, x: midX, y: 90, text: `── 区间 ${mileDiff}m ──`, fontSize: 8, color: '#5a7a9a', align: 'center', font: 'monospace' },
+        { id: `conn-dn-lbl-${i}`, x: midX, y: 310, text: `── 区间 ${mileDiff}m ──`, fontSize: 8, color: '#5a7a9a', align: 'center', font: 'monospace' },
       );
     }
     // 站台
@@ -285,11 +317,11 @@ export default function FullLineInterlockingView() {
       ctx.fillText(lbl.text, lbl.x, lbl.y);
     }
 
-    // 绘制连接区间的坡度 + 限速（对所有区间）
+    // 绘制连接区间的坡度 + 限速 + 信号（对所有区间）
     if (trackMap) {
-      const connTracks = interlockingData.tracks.filter(t => t.id.startsWith('conn-up-'));
+      const connTracks = interlockingData.tracks.filter(t => t.id.startsWith('conn-up-') || t.id.startsWith('conn-dn-'));
       for (const ct of connTracks) {
-        drawConnectionProfile(ctx, trackMap, ct.x, ct.x + ct.width);
+        drawConnectionProfile(ctx, trackMap, ct);
       }
     }
 
@@ -439,28 +471,27 @@ export default function FullLineInterlockingView() {
   );
 }
 
-// ===== 连接区间坡度 + 限速绘制 =====
+// ===== 连接区间坡度 + 限速绘制 + 区间信号 =====
 function drawConnectionProfile(
   ctx: CanvasRenderingContext2D,
   trackMap: TrackMapData,
-  gapX1: number,
-  gapX2: number,
+  connTrack: { id: string; x: number; width: number; y: number; dir: string; segmentIds: number[] },
 ) {
-  const gapW = gapX2 - gapX1; // 260px
-  const segMap = new Map(trackMap.segments.map(s => [s.id, s]));
+  const segIds = connTrack.segmentIds;
+  if (!segIds || segIds.length === 0) return;
 
-  // 上/下行连接段 ID 及累计里程
-  function buildProfile(segIds: number[]) {
-    const segs = segIds.map(id => segMap.get(id)).filter(Boolean) as { id: number; lengthM: number }[];
+  const gapX1 = connTrack.x;
+  const gapW = connTrack.width;
+  const segMap = new Map(trackMap.segments.map(s => [s.id, s]));
+    const segs = ids.map(id => segMap.get(id)).filter(Boolean) as { id: number; lengthM: number }[];
     if (segs.length === 0) return null;
-    // 每个 segment 的累计起始里程
     let cum = 0;
     const cumStarts = segs.map(s => { const start = cum; cum += s.lengthM; return { segId: s.id, start, len: s.lengthM }; });
     const totalLen = cum;
 
-    // 收集该方向上相关的 gradients
+    // 坡度：用 startSegmentId/endSegmentId 匹配
     const grads = trackMap.gradients
-      .filter(g => segIds.includes(g.startSegmentId) || segIds.includes(g.endSegmentId))
+      .filter(g => ids.includes(g.startSegmentId) || ids.includes(g.endSegmentId))
       .map(g => {
         const sEntry = cumStarts.find(c => c.segId === g.startSegmentId);
         const eEntry = cumStarts.find(c => c.segId === g.endSegmentId);
@@ -470,9 +501,8 @@ function drawConnectionProfile(
       })
       .sort((a, b) => a.absStart - b.absStart);
 
-    // 收集 speedRestrictions
     const speeds = trackMap.speedRestrictions
-      .filter(s => segIds.includes(s.segmentId))
+      .filter(s => ids.includes(s.segmentId))
       .map(s => {
         const entry = cumStarts.find(c => c.segId === s.segmentId);
         const absStart = entry ? entry.start + s.startOffsetM : 0;
@@ -481,81 +511,99 @@ function drawConnectionProfile(
       })
       .sort((a, b) => a.absStart - b.absStart);
 
-    return { totalLen, grads, speeds };
+    // 区间信号：计算每个信号在区间内的绝对里程
+    const sigs: { absPos: number; signal: typeof trackMap.signals[0] }[] = [];
+    for (const sig of trackMap.signals) {
+      if (!ids.includes(sig.segmentId)) continue;
+      const entry = cumStarts.find(c => c.segId === sig.segmentId);
+      if (!entry) continue;
+      const absPos = entry.start + sig.offsetM;
+      sigs.push({ absPos, signal: sig });
+    }
+    sigs.sort((a, b) => a.absPos - b.absPos);
+
+    return { totalLen, grads, speeds, sigs };
   }
 
-  const upProfile = buildProfile([22, 23]);
-  const dnProfile = buildProfile([31, 50]);
+  const profile = buildProfile(segIds);
+  if (!profile) return;
 
-  // 将里程映射到 canvas X
-  const mileToX = (m: number, totalLen: number) => gapX1 + (m / totalLen) * gapW;
+  const mileToX = (m: number) => gapX1 + (m / profile.totalLen) * gapW;
+  const trackY = connTrack.y;
+  // sign: UP 轨道(y=140) 绘制在下方(-1)，DN 轨道(y=220) 绘制在上方(+1)
+  const sign = connTrack.dir === 'up' ? -1 : 1;
 
-  // 绘制单个剖面
-  function drawOneProfile(
-    profile: NonNullable<ReturnType<typeof buildProfile>>,
-    baseY: number,  // 参考轨道的 Y
-    barH: number,   // 色条高度
-    sign: number,   // +1 表示色条在轨道上方, -1 在下方
-    gapFromTrack: number, // 距轨道的像素间距
-  ) {
-    // --- 坡度色条 ---
-    for (const g of profile.grads) {
-      const x1 = mileToX(g.absStart, profile.totalLen);
-      const x2 = mileToX(g.absEnd, profile.totalLen);
-      const w = Math.max(x2 - x1, 2);
-      const barY = baseY - sign * gapFromTrack;
+  // 第一层：坡度标签（靠近轨道）
+  for (const g of profile.grads) {
+    const x1 = mileToX(g.absStart);
+    const x2 = mileToX(g.absEnd);
+    const midX = (x1 + x2) / 2;
+    const w = x2 - x1;
 
-      let color = '#5f7088'; // flat
-      if (g.slope > 0) color = '#e0554a';      // 上坡 红
-      else if (g.slope < 0) color = '#4a90d9'; // 下坡 蓝
+    // 变坡点竖线标记
+    ctx.strokeStyle = '#5a7a9a';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x1, trackY - sign * 4);
+    ctx.lineTo(x1, trackY + sign * 4);
+    ctx.stroke();
 
-      ctx.fillStyle = color;
-      ctx.globalAlpha = 0.55;
-      ctx.fillRect(x1, barY, w, barH);
-      ctx.globalAlpha = 1;
-
-      // 坡度值标签
-      if (w > 30) {
-        ctx.fillStyle = '#aab8cc';
-        ctx.font = '8px monospace';
-        ctx.textAlign = 'center';
-        const label = g.slope > 0 ? `+${g.slope}‰` : g.slope < 0 ? `${g.slope}‰` : '0‰';
-        ctx.fillText(label, (x1 + x2) / 2, barY + barH - 2);
-      }
-    }
-
-    // --- 限速标签 ---
-    for (const sp of profile.speeds) {
-      const x1 = mileToX(sp.absStart, profile.totalLen);
-      const x2 = mileToX(sp.absEnd, profile.totalLen);
-      const midX = (x1 + x2) / 2;
-      const tagY = baseY - sign * (gapFromTrack + barH + 6);
-
-      if (x2 - x1 > 10) {
-        // 限速区间底色
-        ctx.strokeStyle = 'rgba(255,200,80,0.3)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        ctx.beginPath();
-        ctx.moveTo(x1, baseY - sign * 2);
-        ctx.lineTo(x2, baseY - sign * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // 限速值
-        ctx.fillStyle = '#ffc850';
-        ctx.font = 'bold 9px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(`${sp.speedKmh} km/h`, midX, tagY);
-      }
+    if (w > 30) {
+      ctx.fillStyle = '#aab8cc';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      const label = g.slope > 0 ? `+${g.slope}‰` : g.slope < 0 ? `${g.slope}‰` : '0‰';
+      ctx.fillText(label, midX, trackY - sign * 14);
     }
   }
 
-  if (upProfile) {
-    drawOneProfile(upProfile, 140, 12, +1, 4);
+  // 第二层：限速标签（错开坡度标签）
+  for (const sp of profile.speeds) {
+    const x1 = mileToX(sp.absStart);
+    const x2 = mileToX(sp.absEnd);
+    const midX = (x1 + x2) / 2;
+
+    if (x2 - x1 > 10) {
+      ctx.fillStyle = '#ffc850';
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${sp.speedKmh} km/h`, midX, trackY - sign * 30);
+    }
   }
-  if (dnProfile) {
-    drawOneProfile(dnProfile, 220, 12, -1, 30);
+
+  // 第三层：区间信号机
+  for (const { absPos, signal: sig } of profile.sigs) {
+    const sx = mileToX(absPos);
+    const color = sig.type === 1 ? COLORS.signalMain : sig.type === 2 ? COLORS.signalShunting : COLORS.signalDistant;
+    const sym = SYMBOLS[sig.type] || '●';
+    const sy = sign;
+
+    // 信号机竖线
+    ctx.strokeStyle = '#3a4a5a';
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(sx, trackY);
+    ctx.lineTo(sx, trackY - sy * 14);
+    ctx.stroke();
+
+    // 信号符号
+    ctx.fillStyle = color;
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(sym, sx, trackY - sy * 18 + 4);
+
+    // 信号名称（仅当有足够空间时）
+    const nextSigX = profile.sigs.find(s => s.absPos > absPos);
+    const prevSigX = [...profile.sigs].reverse().find(s => s.absPos < absPos);
+    const minGap = Math.min(
+      nextSigX ? mileToX(nextSigX.absPos) - sx : Infinity,
+      prevSigX ? sx - mileToX(prevSigX.absPos) : Infinity
+    );
+    if (minGap > 40) {
+      ctx.fillStyle = '#6a7a90';
+      ctx.font = '6px monospace';
+      ctx.fillText(sig.name, sx, trackY - sy * 28);
+    }
   }
 }
 
