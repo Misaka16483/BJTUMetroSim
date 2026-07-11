@@ -334,6 +334,14 @@ export default function FullLineInterlockingView() {
     setScale(s => Math.max(0.3, Math.min(3, s * (e.deltaY > 0 ? 0.9 : 1.1))));
   }, []);
 
+  // Canvas DOM 滚轮监听（绕过 React passive 限制）
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     dragRef.current = {
       sx: e.clientX,
@@ -359,13 +367,6 @@ export default function FullLineInterlockingView() {
   useEffect(() => {
     draw();
   }, [draw]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => el.removeEventListener('wheel', handleWheel);
-  }, [handleWheel]);
 
   const updateSize = useCallback(() => {
     const c = canvasRef.current;
@@ -483,7 +484,8 @@ function drawConnectionProfile(
   const gapX1 = connTrack.x;
   const gapW = connTrack.width;
   const segMap = new Map(trackMap.segments.map(s => [s.id, s]));
-  const buildProfile = (ids: number[]) => {
+
+  function buildProfile(ids: number[]) {
     const segs = ids.map(id => segMap.get(id)).filter(Boolean) as { id: number; lengthM: number }[];
     if (segs.length === 0) return null;
     let cum = 0;
