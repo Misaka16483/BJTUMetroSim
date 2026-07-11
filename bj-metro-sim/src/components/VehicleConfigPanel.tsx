@@ -5,9 +5,6 @@ const LABEL_CLASS = 'text-[10px] font-medium';
 const INPUT_CLASS =
   'w-full bg-transparent border rounded-md px-2.5 py-1.5 text-[12px] tabular-nums outline-none transition-colors';
 const INPUT_BORDER = 'border-white/8 focus:border-white/20';
-const READONLY_CLASS =
-  'w-full bg-white/[0.02] border border-white/6 rounded-md px-2.5 py-1.5 text-[12px] tabular-nums text-text-muted';
-
 export default function VehicleConfigPanel() {
   const vehicleConfig = useSimStore((s) => s.vehicleConfig);
   const setVehicleConfig = useSimStore((s) => s.setVehicleConfig);

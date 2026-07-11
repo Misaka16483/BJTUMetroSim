@@ -28,6 +28,7 @@ class ScenarioConfig:
     start_time_ms: int  # e.g. 8:00:00 = 8 * 3600 * 1000
     tick_seconds: float = 1.0
     use_dynamic_programming_profile: bool = True
+    auto_spawn_trains: bool = False
     trains: list[TrainConfig] = field(default_factory=list)
 
     @classmethod
@@ -38,6 +39,7 @@ class ScenarioConfig:
             start_time_ms=data["startTimeMs"],
             tick_seconds=data.get("tickSeconds", 1.0),
             use_dynamic_programming_profile=bool(data.get("useDynamicProgrammingProfile", True)),
+            auto_spawn_trains=bool(data.get("autoSpawnTrains", False)),
             trains=[
                 TrainConfig(
                     train_id=item["trainId"],

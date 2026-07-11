@@ -15,7 +15,7 @@ import type {
   VehicleConfigResponse,
   AddTrainPayload,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSetManualMode, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power';
 
@@ -301,7 +301,7 @@ function _nextTrainColor(used: Set<string>): string {
   }
   return DEF_TRAIN_COLORS[used.size % DEF_TRAIN_COLORS.length];
 }
-function _applyTrainDetail(t: SimTrainState, trainId: string, state?: ReturnType<typeof useSimStore.getState>, forceReset = false) {
+function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimStore.getState>, forceReset = false) {
   const manualMode = t.operationMode === 'MANUAL';
   const base = {
     currentStation: t.currentStation,
@@ -461,7 +461,7 @@ export const useSimStore = create<SimState>((set, get) => ({
     }
     const train = state.trains.find((t) => t.trainId === id);
     if (!train) return;
-    const sel = _applyTrainDetail(train, id, state, true);
+    const sel = _applyTrainDetail(train, state, true);
     set({
       selectedTrainId: id,
       ...sel,
@@ -687,7 +687,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
     if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
       set({ simTime: clock.simTime });
-      const sel = _applyTrainDetail(selTrain, selTrain.trainId, get());
+      const sel = _applyTrainDetail(selTrain, get());
       set({ ...sel, manualMode: selTrain.operationMode === 'MANUAL' });
     }
 
@@ -736,7 +736,7 @@ export const useSimStore = create<SimState>((set, get) => ({
         if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
         set({
           speedHistory: newHistory,
-          speedHistoryByTrain: { ...curState.speedHistoryByTrain, [selId]: newHistory },
+          speedHistoryByTrain: { ...curState.speedHistoryByTrain, [selTrain.trainId]: newHistory },
         });
       }
 
@@ -747,7 +747,7 @@ export const useSimStore = create<SimState>((set, get) => ({
         if (newTimeHistory.length > 500) newTimeHistory.splice(0, newTimeHistory.length - 500);
         set({
           speedTimeHistory: newTimeHistory,
-          speedTimeHistoryByTrain: { ...curState.speedTimeHistoryByTrain, [selId]: newTimeHistory },
+          speedTimeHistoryByTrain: { ...curState.speedTimeHistoryByTrain, [selTrain.trainId]: newTimeHistory },
         });
       }
     }

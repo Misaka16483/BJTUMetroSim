@@ -73,6 +73,7 @@ class SimpleVehicleModelTests(unittest.TestCase):
         self.assertEqual(next_state.speed_mps, 0.0)
         self.assertLess(next_state.acceleration_mps2, 0.0)
         self.assertGreaterEqual(next_state.position_m, state.position_m)
+        self.assertLessEqual(next_state.net_energy_kwh, state.net_energy_kwh)
 
     def test_emergency_brake_is_stronger_than_service_brake(self) -> None:
         model = SimpleVehicleModel()

@@ -272,8 +272,9 @@ class SimulationEngine:
         self._vehicle_config_by_train[train_id] = vcfg
         for train in self.trains:
             if train.train_id == train_id:
-                train.mass_kg = vcfg.mass_kg
+                train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
                 train.capacity_pax = 600
+        self._snapshot = self._build_snapshot()
         return vcfg
 
     def set_train_vehicle_config(self, train_id: str, data: JsonDict) -> VehicleConfig:
@@ -282,7 +283,8 @@ class SimulationEngine:
         self._vehicle_config_by_train[train_id] = vcfg
         for train in self.trains:
             if train.train_id == train_id:
-                train.mass_kg = vcfg.mass_kg
+                train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
+        self._snapshot = self._build_snapshot()
         return vcfg
 
     def set_manual_mode(self, train_id: str, enabled: bool) -> dict:
@@ -293,6 +295,7 @@ class SimulationEngine:
                 if not enabled:
                     train._manual_command = None
                 self._manual_mode_by_train[train_id] = enabled
+                self._snapshot = self._build_snapshot()
                 return {"ok": True, "trainId": train_id, "manualMode": enabled}
         return {"ok": False, "error": "TRAIN_NOT_FOUND"}
 
@@ -311,30 +314,32 @@ class SimulationEngine:
                 return {"ok": True, "trainId": train_id, "tractionPercent": train._manual_command.traction_percent, "brakePercent": train._manual_command.brake_percent}
         return {"ok": False, "error": "TRAIN_NOT_FOUND"}
 
-    def _make_vehicle_config(self, train_id: str) -> VehicleConfig:
-        """构建当前应使用的车辆配置."""
-        vcfg = self._vehicle_config_by_train.get(train_id)
-        if vcfg is not None:
-            return VehicleConfig(
-                train_id=train_id,
-                formation=vcfg.formation,
-                car_masses_kg=vcfg.car_masses_kg,
-                head_car_length_m=vcfg.head_car_length_m,
-                middle_car_length_m=vcfg.middle_car_length_m,
-                wheel_radius_m=vcfg.wheel_radius_m,
-                max_speed_mps=vcfg.max_speed_mps,
-                max_traction_force_n=vcfg.max_traction_force_n,
-                max_service_brake_force_n=vcfg.max_service_brake_force_n,
-                emergency_brake_force_n=vcfg.emergency_brake_force_n,
-                basic_resistance_n=vcfg.basic_resistance_n,
-                motor_count=vcfg.motor_count,
-                gear_ratio=vcfg.gear_ratio,
-                drivetrain_efficiency=vcfg.drivetrain_efficiency,
-                regen_efficiency=vcfg.regen_efficiency,
-                auxiliary_power_kw=vcfg.auxiliary_power_kw,
-                nominal_line_voltage_v=vcfg.nominal_line_voltage_v,
-            )
-        return VehicleConfig(train_id=train_id)
+    def _make_vehicle_config(self, train_id: str, onboard_pax: int = 0) -> VehicleConfig:
+        """Build a per-train configuration including the current passenger mass."""
+        base = self._vehicle_config_by_train.get(train_id, VehicleConfig(train_id=train_id))
+        return VehicleConfig(
+            train_id=train_id,
+            mass_kg=base.empty_mass_kg + max(0, onboard_pax) * base.average_passenger_mass_kg,
+            formation=base.formation,
+            car_masses_kg=None,
+            head_car_length_m=base.head_car_length_m,
+            middle_car_length_m=base.middle_car_length_m,
+            wheel_radius_m=base.wheel_radius_m,
+            max_speed_mps=base.max_speed_mps,
+            max_traction_force_n=base.max_traction_force_n,
+            max_service_brake_force_n=base.max_service_brake_force_n,
+            emergency_brake_force_n=base.emergency_brake_force_n,
+            basic_resistance_n=base.basic_resistance_n,
+            stop_speed_threshold_mps=base.stop_speed_threshold_mps,
+            average_passenger_mass_kg=base.average_passenger_mass_kg,
+            motor_count=base.motor_count,
+            gear_ratio=base.gear_ratio,
+            drivetrain_efficiency=base.drivetrain_efficiency,
+            regen_efficiency=base.regen_efficiency,
+            auxiliary_power_kw=base.auxiliary_power_kw,
+            nominal_line_voltage_v=base.nominal_line_voltage_v,
+            parameter_quality=base.parameter_quality,
+        )
 
     def _manual_override(self, ato_cmd: ControlCommand, train_id: str) -> ControlCommand:
         """如果该列车处于手动模式，用其手动指令替代 ATO 指令."""
@@ -361,18 +366,29 @@ class SimulationEngine:
                 return {"ok": False, "error": "TRAIN_ID_EXISTS"}
 
         initial_station_code = str(payload.get("initialStationCode", self._station_list[0].get("code", "GGZ")))
-        direction = str(payload.get("direction", "UP"))
-        operation_mode = str(payload.get("operationMode", "ATO"))
+        if initial_station_code not in {str(item.get("code", "")) for item in self._station_list}:
+            return {"ok": False, "error": "INVALID_INITIAL_STATION"}
+        direction = str(payload.get("direction", "UP")).upper()
+        if direction not in {"UP", "DOWN"}:
+            return {"ok": False, "error": "INVALID_DIRECTION"}
+        operation_mode = str(payload.get("operationMode", "ATO")).upper()
         if operation_mode not in ("ATO", "MANUAL"):
-            operation_mode = "ATO"
+            return {"ok": False, "error": "INVALID_OPERATION_MODE"}
+
+        capacity_pax = int(payload.get("capacityPax", 600))
+        initial_load_pax = int(payload.get("initialLoadPax", 0))
+        if capacity_pax <= 0:
+            return {"ok": False, "error": "INVALID_CAPACITY"}
+        if initial_load_pax < 0 or initial_load_pax > capacity_pax:
+            return {"ok": False, "error": "INVALID_INITIAL_LOAD"}
 
         cfg = TrainConfig(
             train_id=train_id,
-            line_id="9",
+            line_id=self.scenario.line_id,
             initial_station_code=initial_station_code,
             direction=direction,
-            capacity_pax=int(payload.get("capacityPax", 600)),
-            initial_load_pax=int(payload.get("initialLoadPax", 0)),
+            capacity_pax=capacity_pax,
+            initial_load_pax=initial_load_pax,
         )
         train = self._create_train(cfg)
         train.operation_mode = operation_mode
@@ -384,7 +400,7 @@ class SimulationEngine:
         if vehicle_data and isinstance(vehicle_data, dict):
             vcfg = VehicleConfig.from_user_config(train_id, vehicle_data)
             self._vehicle_config_by_train[train_id] = vcfg
-            train.mass_kg = vcfg.mass_kg
+            train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
 
         self.trains.append(train)
         self._snapshot = self._build_snapshot()
@@ -406,7 +422,7 @@ class SimulationEngine:
         return {"ok": True, "removed": train_id}
 
     def load(self) -> None:
-        """加载场景，初始化仿真（初始无车，由前端动态加车）."""
+        """Load the scenario, optionally creating its declared initial fleet."""
         self.clock.load()
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
@@ -421,7 +437,11 @@ class SimulationEngine:
         self._recorded_power_command_ids = set()
         self._manual_mode_by_train = {}
         self._vehicle_config_by_train = {}
-        self.trains = []  # 初始无车，由前端动态加车
+        self.trains = (
+            [self._create_train(cfg) for cfg in self.scenario.trains]
+            if self.scenario.auto_spawn_trains
+            else []
+        )
         self._snapshot = self._build_snapshot()
 
         if self.recorder is not None:
@@ -431,7 +451,7 @@ class SimulationEngine:
                     "phase": 1,
                     "lineId": self.scenario.line_id,
                     "startTimeMs": self.scenario.start_time_ms,
-                    "trainCount": len(self.scenario.trains),
+                    "trainCount": len(self.trains),
                 },
             )
             if self.power_service.network is not None:
@@ -813,7 +833,7 @@ class SimulationEngine:
         ato = self._ato_for_train(train.train_id)
         command = ato.decide(state, target)
         command = self._manual_override(command, train.train_id)
-        vehicle_config = self._make_vehicle_config(train.train_id)
+        vehicle_config = self._make_vehicle_config(train.train_id, train.onboard_pax)
         demand = TractionDriveModel(vehicle_config).demand(command, train.speed_mps)
         gradient_force_n = vehicle_config.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
         return True, PreparedTrainStep(
@@ -997,7 +1017,7 @@ class SimulationEngine:
             else:
                 cmd = self._manual_override(cmd, train.train_id)
 
-            vcfg = self._make_vehicle_config(train.train_id)
+            vcfg = self._make_vehicle_config(train.train_id, train.onboard_pax)
             vm = SimpleVehicleModel(vcfg)
             result = vm.step(state, cmd, dt)
 
@@ -1128,7 +1148,7 @@ class SimulationEngine:
             ato = self._ato_for_train(train.train_id)
             cmd = ato.decide(state, target)
             cmd = self._manual_override(cmd, train.train_id)
-            vcfg = self._make_vehicle_config(train.train_id)
+            vcfg = self._make_vehicle_config(train.train_id, train.onboard_pax)
             vm = SimpleVehicleModel(vcfg)
             gradient_force_n = vcfg.mass_kg * 9.80665 * path_plan.grade_ratio_at(path_position_m)
             result = vm.step(

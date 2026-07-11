@@ -13,6 +13,12 @@ class EngineMemberDLoopTests(unittest.TestCase):
             "MetroDynamicsJavaDemo/data/stations.csv",
         )
         engine.load()
+        result = engine.add_train({
+            "trainId": "T0901",
+            "initialStationCode": "GGZ",
+            "direction": "UP",
+        })
+        self.assertTrue(result["ok"])
         return engine
 
     def test_snapshot_uses_scenario_start_time(self) -> None:

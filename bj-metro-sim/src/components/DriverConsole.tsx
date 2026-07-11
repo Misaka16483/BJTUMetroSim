@@ -28,7 +28,7 @@ function FullDriverView() {
         fontFamily: "'PingFang SC','Microsoft YaHei','Noto Sans SC',system-ui,sans-serif",
       }}>
       <TopBar lines={metroLines} activeLineId={activeLineId} onSelect={setActiveLineId} color={color} />
-      {hasEngine ? <ActiveCab line9={line!} isBackend={true} /> : <PendingCab line={line} color={color} />}
+      {hasEngine ? <ActiveCab line9={line!} /> : <PendingCab line={line} color={color} />}
     </div>
   );
 }
@@ -90,7 +90,7 @@ function TopBar({ lines, activeLineId, onSelect, color }: {
 }
 
 /* ═══ 活跃驾驶舱 ═══ */
-function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: boolean }) {
+function ActiveCab({ line9 }: { line9: MetroLineData }) {
   const {
     nextStation, distanceToNextStationM, stationIndex, line9Stations,
     runDirection, currentSpeedMps, simTime, avgLoadRate, totalPassengers,
@@ -98,7 +98,7 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
     energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
     speedTimeHistory, estimatedRunTimeS, pathPositionM, pathTotalLengthM,
     currentSegmentId, localSpeedLimitMps, gradeRatio,
-    manualMode, manualTraction, manualBrake, setManualMode,
+    manualMode, setManualMode,
     selectedTrainId, trains, selectTrain, trainColors,
   } = useSimStore();
   const color = lineColor(line9.id);

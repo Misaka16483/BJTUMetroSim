@@ -20,6 +20,12 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
             stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
         )
         engine.load()
+        result = engine.add_train({
+            "trainId": "T0901",
+            "initialStationCode": "GGZ",
+            "direction": "UP",
+        })
+        self.assertTrue(result["ok"])
         train = engine.trains[0]
         train.phase = "DEPARTING"
         train.speed_mps = 10.0

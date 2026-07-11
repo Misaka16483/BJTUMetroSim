@@ -18,7 +18,6 @@ export default function MasterController() {
       const clamped = Math.max(0, Math.min(y, TRACK_H - HANDLE_H));
       const ratio = (NEUTRAL_Y - clamped) / (NEUTRAL_Y);
       if (ratio >= 0) return { traction: Math.round(ratio * 100), brake: 0 };
-      const brakeRatio = clamped / (TRACK_H - HANDLE_H - NEUTRAL_Y) - NEUTRAL_Y / (TRACK_H - HANDLE_H - NEUTRAL_Y);
       const brakeVal = Math.max(0, Math.min(100, Math.round(((clamped - NEUTRAL_Y) / (TRACK_H - HANDLE_H - NEUTRAL_Y)) * 100)));
       return { traction: 0, brake: brakeVal > 0 ? brakeVal : 0 };
     },
