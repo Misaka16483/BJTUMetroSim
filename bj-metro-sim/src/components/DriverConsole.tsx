@@ -120,12 +120,15 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
     };
   }, [fetchCabStatus]);
 
-  const plcActive = cabStatus?.state === 'CONNECTED' && cabStatus?.controlState === 'ACTIVE';
-  const plcInput = plcActive ? cabStatus?.lastInput : null;
+  const plcConnected = cabStatus?.state === 'CONNECTED';
+  const plcControlsSelectedTrain = plcConnected && cabStatus?.trainId === selectedTrainId;
+  const plcInput = plcControlsSelectedTrain ? cabStatus?.lastInput : null;
+  const plcCommand = plcControlsSelectedTrain ? cabStatus?.lastCommand : null;
 
-  // PLC 控制时使用 PLC 回传的牵引/制动百分比
-  const displayTraction = plcInput ? plcInput.tractionPercent : tractionPercent;
-  const displayBrake = plcInput ? plcInput.brakePercent : brakePercent;
+  // 人工/紧制时显示司机台实际下发命令；ATO 时 lastCommand 为 null，
+  // 改用仿真引擎回传的 ATO 牵引/制动输出。
+  const displayTraction = plcCommand ? plcCommand.tractionPercent : tractionPercent;
+  const displayBrake = plcCommand ? plcCommand.brakePercent : brakePercent;
 
   const trainRuns = selectedTrainId ? (speedRunsByTrain[selectedTrainId] ?? []) : [];
   const activeRunId = selectedTrainId ? activeSpeedRunIdByTrain[selectedTrainId] : undefined;
@@ -252,17 +255,17 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
 
 
           {/* ── ATO / 手动 切换 ── */}
-          {plcActive && (
+          {plcControlsSelectedTrain && (
             <div className="flex items-center justify-center gap-2 py-1.5 rounded select-none"
               style={{ border: '1px solid rgba(100,210,255,0.15)', background: 'rgba(100,210,255,0.04)' }}>
               <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: '#64d2ff', boxShadow: '0 0 5px rgba(100,210,255,0.5)' }} />
-              <span className="text-[8px] font-semibold uppercase tracking-[0.1em]" style={{ color: '#64d2ff' }}>PLC 硬线控制</span>
+              <span className="text-[8px] font-semibold uppercase tracking-[0.1em]" style={{ color: '#64d2ff' }}>PLC 模式控制</span>
             </div>
           )}
           <div
-            className={`flex items-center rounded ${plcActive ? 'opacity-40 pointer-events-none' : 'cursor-pointer'}`}
+            className={`flex items-center rounded ${plcControlsSelectedTrain ? 'opacity-40 pointer-events-none' : 'cursor-pointer'}`}
             style={{ border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)' }}
-            onClick={() => { if (!plcActive) setManualMode(!manualMode, selectedTrainId ?? undefined); }}
+            onClick={() => { if (!plcControlsSelectedTrain) setManualMode(!manualMode, selectedTrainId ?? undefined); }}
           >
             <div
               className="flex-1 text-center py-1.5 rounded text-[9px] font-bold uppercase tracking-[0.1em] transition-colors duration-150"
@@ -290,21 +293,23 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
             <DriveBar label="BRAKE" value={displayBrake} color="#ef4444" />
           </div>
 
-          {/* ── PLC 控制时显示司机台输入详情 ── */}
-          {plcActive && plcInput && (
+          {/* ── PLC 连接后显示司机台输入，包括 ATO 启动指令 ── */}
+          {plcControlsSelectedTrain && plcInput && (
             <div className="flex flex-col rounded py-2 px-3" style={{ gap: 4, border: '1px solid rgba(100,210,255,0.08)', background: 'rgba(100,210,255,0.02)' }}>
               <span className="text-[7px] font-semibold uppercase tracking-[0.12em] text-[#64748b] mb-1">司机台输入</span>
               <InfoRow label="DIR" value={plcInput.direction} color="#e2e8f0" />
+              <InfoRow label="HANDLE" value={String(plcInput.handleCode)} color="#e2e8f0" />
               <InfoRow label="TRACTION" value={`${plcInput.tractionPercent.toFixed(0)}%`} color="#22c55e" />
               <InfoRow label="BRAKE" value={`${plcInput.brakePercent.toFixed(0)}%`} color="#ef4444" />
               <InfoRow label="SPEED" value={`${(plcInput.speedMps * 3.6).toFixed(1)} km/h`} color="#00a8ff" />
               <InfoRow label="KEY" value={plcInput.keyActive ? 'ON' : 'OFF'} color={plcInput.keyActive ? '#22c55e' : '#6b7280'} />
+              <InfoRow label="ATO START" value={plcInput.atoStart ? '●' : '○'} color={plcInput.atoStart ? '#64d2ff' : '#6b7280'} />
               <InfoRow label="EB" value={plcInput.emergencyBrake ? '●' : '○'} color={plcInput.emergencyBrake ? '#ef4444' : '#6b7280'} />
             </div>
           )}
 
           {/* ── 手动驾驶：操纵杆 (PLC 控制时隐藏) ── */}
-          {manualMode && !plcActive && (
+          {manualMode && !plcControlsSelectedTrain && (
             <div className="flex justify-center py-2"
               style={{ border: '1px solid rgba(251,191,36,0.08)', borderRadius: 8, background: 'rgba(251,191,36,0.02)' }}>
               <MasterController />

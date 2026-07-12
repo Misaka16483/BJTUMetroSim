@@ -615,14 +615,22 @@ export function simSetVehicleConfig(payload: VehicleConfigPayload): Promise<Vehi
   });
 }
 
-export function simSetManualMode(enabled: boolean, trainId?: string): Promise<{ ok: boolean; manualMode: boolean }> {
+export interface ManualModeResponse {
+  ok: boolean;
+  manualMode?: boolean;
+  error?: string;
+  message?: string;
+  trainId?: string;
+}
+
+export function simSetManualMode(enabled: boolean, trainId?: string): Promise<ManualModeResponse> {
   return fetch('/api/sim/manual-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled, trainId }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+    return resp.json() as Promise<ManualModeResponse>;
   });
 }
 
@@ -687,14 +695,14 @@ export function simSetTrainVehicleConfig(trainId: string, payload: VehicleConfig
   });
 }
 
-export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<{ ok: boolean; manualMode: boolean }> {
+export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<ManualModeResponse> {
   return fetch('/api/sim/train/manual-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ trainId, enabled }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+    return resp.json() as Promise<ManualModeResponse>;
   });
 }
 

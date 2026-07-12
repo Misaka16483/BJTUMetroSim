@@ -1068,7 +1068,13 @@ export const useSimStore = create<SimState>((set, get) => ({
   setManualMode: async (enabled: boolean, trainId?: string) => {
     const id = trainId ?? get().selectedTrainId;
     if (!id) return;
-    await simSetTrainManualMode(id, enabled);
+    const cabStatus = get().cabStatus;
+    if (cabStatus?.state === 'CONNECTED' && cabStatus.trainId === id) return;
+    const response = await simSetTrainManualMode(id, enabled);
+    if (!response.ok) {
+      await get().fetchCabStatus();
+      return;
+    }
     const next = new Set(get().manualTrainIds);
     if (enabled) next.add(id);
     else next.delete(id);

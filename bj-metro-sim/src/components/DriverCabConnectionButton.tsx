@@ -34,8 +34,11 @@ const STATUS_COLOR: Record<DriverCabHardwareStatus['state'], string> = {
 function statusLabel(status: DriverCabHardwareStatus): string {
   if (status.state === 'CONNECTING') return '正在连接';
   if (status.state === 'ERROR') return '重试司机台';
-  if (status.state === 'CONNECTED' && status.controlState === 'ACTIVE') return '司机台控制中';
-  if (status.state === 'CONNECTED') return '等待 T0901';
+  if (status.state === 'CONNECTED' && status.controlState === 'ACTIVE') {
+    return status.lastCommand ? '司机台控制中' : 'ATO 自动驾驶';
+  }
+  if (status.state === 'CONNECTED' && status.lastError === 'T0901_NOT_FOUND') return '等待 T0901';
+  if (status.state === 'CONNECTED') return '司机台已连接';
   return '连接司机台';
 }
 
@@ -43,7 +46,7 @@ function statusDetail(status: DriverCabHardwareStatus): string {
   if (status.state === 'ERROR') return status.lastError ?? '连接失败';
   if (status.state === 'CONNECTED' && status.controlState === 'ACTIVE') {
     const command = status.lastCommand;
-    if (!command) return `${status.framesReceived} 帧`;
+    if (!command) return `T0901 · ${status.framesReceived} 帧`;
     if (command.emergencyBrake) return '紧急制动';
     return `T${command.tractionPercent.toFixed(0)} · B${command.brakePercent.toFixed(0)}`;
   }

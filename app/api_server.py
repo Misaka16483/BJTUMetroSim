@@ -602,7 +602,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_body()
                 enabled = bool(payload.get("enabled", False))
                 train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
-                self._send_json(self.engine.set_manual_mode(train_id, enabled))
+                self._send_json(self._set_manual_mode_from_frontend(train_id, enabled))
             elif path == "/api/sim/manual-command":
                 payload = self._read_json_body()
                 train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
@@ -877,7 +877,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         train_id = str(payload.get("trainId", ""))
         if not train_id:
             return {"ok": False, "error": "MISSING_TRAIN_ID"}
-        return self.engine.set_manual_mode(train_id, bool(payload.get("enabled", False)))
+        return self._set_manual_mode_from_frontend(train_id, bool(payload.get("enabled", False)))
+
+    def _set_manual_mode_from_frontend(self, train_id: str, enabled: bool) -> JsonDict:
+        """Only the PLC driver cab may change driving mode while connected."""
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        controller = self._driver_cab_controller()
+        if controller is not None:
+            status = controller.status().get("status", {})
+            if status.get("state") == "CONNECTED" and status.get("trainId") == train_id:
+                return {
+                    "ok": False,
+                    "error": "DRIVER_CAB_MODE_CONTROL_EXCLUSIVE",
+                    "message": "司机台已连接，驾驶模式只能由司机台切换",
+                    "trainId": train_id,
+                }
+        return self.engine.set_manual_mode(train_id, enabled)
 
     def _send_train_manual_command(self) -> JsonDict:
         if self.engine is None:

@@ -79,6 +79,64 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertEqual(train._manual_command.traction_percent, 0.0)
         self.assertEqual(train._manual_command.brake_percent, 100.0)
 
+    def test_ato_start_input_is_retained_for_frontend_display(self) -> None:
+        controller = DriverCabHardwareController(self.engine)
+        controller.process_input_state(MitsubishiPlcCabParser().parse(bytes(46), train_id="T0901"))
+        frame = bytearray(46)
+        frame[25] = 0b0000_0101
+        frame[34] = 0b1110_0000
+
+        result = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(frame), train_id="T0901")
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["manualMode"])
+        status = controller.status()["status"]
+        self.assertEqual(status["controlState"], "ACTIVE")
+        self.assertTrue(status["lastInput"]["atoStart"])
+        train = next(train for train in self.engine.trains if train.train_id == "T0901")
+        self.assertEqual(train.operation_mode, "ATO")
+
+        released = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(46), train_id="T0901")
+        )
+
+        self.assertTrue(released["ok"])
+        self.assertEqual(released["message"], "ATO_ACTIVE")
+        self.assertFalse(released["manualMode"])
+        status = controller.status()["status"]
+        self.assertEqual(status["controlState"], "ACTIVE")
+        self.assertIsNone(status["lastError"])
+        self.assertIsNone(status["lastCommand"])
+        self.assertEqual(train.operation_mode, "ATO")
+
+    def test_emergency_brake_overrides_ato_without_handle_movement(self) -> None:
+        controller = DriverCabHardwareController(self.engine)
+        ato_frame = bytearray(46)
+        ato_frame[25] = 0b0000_0101
+        ato_frame[34] = 0b1000_0000
+        controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(ato_frame), train_id="T0901")
+        )
+        emergency_frame = bytearray(46)
+        emergency_frame[28] = 0b0000_0001
+
+        result = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(emergency_frame), train_id="T0901")
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["emergencyBrake"])
+        self.assertEqual(result["tractionPercent"], 0.0)
+        self.assertEqual(result["brakePercent"], 100.0)
+        train = next(train for train in self.engine.trains if train.train_id == "T0901")
+        self.assertEqual(train.operation_mode, "MANUAL")
+        self.assertTrue(train._manual_command.emergency_brake)
+        status = controller.status()["status"]
+        self.assertTrue(status["lastInput"]["emergencyBrake"])
+        self.assertTrue(status["lastCommand"]["emergencyBrake"])
+
     def test_connect_runs_in_background_and_reports_error(self) -> None:
         attempted = threading.Event()
         controller = DriverCabHardwareController(

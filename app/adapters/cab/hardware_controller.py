@@ -162,8 +162,16 @@ class DriverCabHardwareController:
           人工模式     → ATO 激活条件满足: 切 ATO
           ATO 模式     → 司机推手柄: 切回人工
         """
+        emergency_brake_requested = input_state.emergency_brake_requested
+
         # —— ATO 激活: 具备 + 激活 + 按下启动按钮 ——
-        if input_state.ato_available and input_state.ato_active and input_state.ato_start_triggered:
+        # 紧急制动优先级高于 ATO，两者同帧时不允许 ATO 覆盖紧制。
+        if (
+            not emergency_brake_requested
+            and input_state.ato_available
+            and input_state.ato_active
+            and input_state.ato_start_triggered
+        ):
             self._ever_armed = True
             if self._manual_mode_armed:
                 self.engine.set_manual_mode(self.train_id, False)
@@ -176,11 +184,36 @@ class DriverCabHardwareController:
             return {"ok": True, "trainId": self.train_id, "manualMode": False, "message": "ATO_ACTIVATED"}
 
         # —— 司机接管: ATO 下操纵主手柄切回人工 ——
-        if not self._manual_mode_armed and input_state.main_handle_code != 0:
+        if not self._manual_mode_armed and (
+            input_state.main_handle_code != 0 or emergency_brake_requested
+        ):
             mode_result = self.engine.set_manual_mode(self.train_id, True)
             if mode_result.get("ok"):
                 self._manual_mode_armed = True
+            else:
+                with self._lock:
+                    self._record_input_locked(input_state)
+                    self._control_state = "WAITING_FOR_TRAIN"
+                    self._last_error = "T0901_NOT_FOUND"
+                    self._last_command = None
+                return mode_result
             # fall through to send the manual command below
+
+        # —— ATO 持续运行: 启动按钮松开后仍保持 ATO ——
+        # ATO 启动指令是瞬时信号。只要司机没有再次推动主手柄，
+        # 后续 PLC 帧就只用于状态显示，不应向 ATO 列车发送人工驾驶命令。
+        if self._ever_armed and not self._manual_mode_armed:
+            with self._lock:
+                self._record_input_locked(input_state)
+                self._control_state = "ACTIVE"
+                self._last_error = None
+                self._last_command = None
+            return {
+                "ok": True,
+                "trainId": self.train_id,
+                "manualMode": False,
+                "message": "ATO_ACTIVE",
+            }
 
         # —— 首次连入: 武装人工模式 (只执行一次) ——
         if not self._ever_armed:
@@ -279,7 +312,7 @@ class DriverCabHardwareController:
             "handleCode": input_state.main_handle_code,
             "tractionPercent": min(input_state.traction_percent_raw, 100),
             "brakePercent": min(input_state.brake_percent_raw, 100),
-            "emergencyBrake": input_state.emergency_brake_button_locked,
+            "emergencyBrake": input_state.emergency_brake_requested,
             "keyActive": input_state.key_switch_locked,
             "atoStart": input_state.ato_start_triggered,
         }
