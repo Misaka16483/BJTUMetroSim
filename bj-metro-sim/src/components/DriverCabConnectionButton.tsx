@@ -23,6 +23,12 @@ const EMPTY_STATUS: DriverCabHardwareStatus = {
   lastError: null,
   lastInput: null,
   lastCommand: null,
+  plcOutput: {
+    atoAvailable: false,
+    atoActive: false,
+    frameLength: 26,
+    speedCmps: null,
+  },
   networkScreenHost: '192.168.100.122',
   networkScreenPort: 8888,
   signalScreenHost: '192.168.100.121',
@@ -118,6 +124,9 @@ function statusLabel(status: DriverCabHardwareStatus): string {
 }
 
 function statusDetail(status: DriverCabHardwareStatus): string {
+  if (status.state === 'CONNECTED' && status.controlState === 'ATO_ACTIVE') {
+    return `PLC · ATO运行 · ${status.framesReceived} RX`;
+  }
   if (status.state === 'CONNECTED' && status.controlState === 'ACTIVE') {
     const command = status.lastCommand;
     if (!command) return `T0901 · ${status.framesReceived} RX`;

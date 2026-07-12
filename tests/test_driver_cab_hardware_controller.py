@@ -45,6 +45,14 @@ class _BlockingPlcClient:
         self.closed.set()
 
 
+class _RecordingPlcOutputClient:
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+
+    def send_output_state(self, state: object, builder: object) -> None:
+        self.frames.append(builder.build(state))
+
+
 class _RecordingDisplayClient:
     def __init__(self, connected: threading.Event, frames: list[bytes]) -> None:
         self.connected = connected
@@ -161,6 +169,56 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertIsNone(status["lastError"])
         self.assertIsNone(status["lastCommand"])
         self.assertEqual(train.operation_mode, "ATO")
+
+    def test_ato_can_restart_after_manual_takeover_and_first_non_neutral_frame(self) -> None:
+        controller = DriverCabHardwareController(self.engine)
+        manual_frame = bytearray(46)
+        _write_word(manual_frame, 38, 1)
+        _write_word(manual_frame, 40, 40)
+
+        first_manual = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(manual_frame), train_id="T0901")
+        )
+
+        self.assertTrue(first_manual["ok"])
+        self.assertTrue(controller.status()["status"]["plcOutput"]["atoAvailable"])
+
+        ato_frame = bytearray(46)
+        ato_frame[34] = 0b1000_0000
+        activated = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(ato_frame), train_id="T0901")
+        )
+        self.assertEqual(activated["message"], "ATO_ACTIVATED")
+
+        takeover = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(manual_frame), train_id="T0901")
+        )
+        self.assertTrue(takeover["ok"])
+        status = controller.status()["status"]
+        self.assertTrue(status["plcOutput"]["atoAvailable"])
+        self.assertFalse(status["plcOutput"]["atoActive"])
+
+        restarted = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(ato_frame), train_id="T0901")
+        )
+        self.assertEqual(restarted["message"], "ATO_ACTIVATED")
+
+    def test_plc_output_uses_documented_28_byte_frame_with_speed(self) -> None:
+        controller = DriverCabHardwareController(self.engine)
+        controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(46), train_id="T0901")
+        )
+        client = _RecordingPlcOutputClient()
+
+        controller._send_plc_output(client)
+
+        self.assertEqual(len(client.frames), 1)
+        frame = client.frames[0]
+        self.assertEqual(len(frame), 28)
+        self.assertEqual(int.from_bytes(frame[4:6], "little"), 28)
+        self.assertEqual(int.from_bytes(frame[6:8], "little"), 4)
+        self.assertEqual(frame[25] & 0b0000_0001, 1)
+        self.assertEqual(controller.status()["status"]["plcOutput"]["frameLength"], 28)
 
     def test_emergency_brake_overrides_ato_without_handle_movement(self) -> None:
         controller = DriverCabHardwareController(self.engine)

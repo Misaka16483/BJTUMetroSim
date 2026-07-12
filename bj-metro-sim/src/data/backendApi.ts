@@ -774,7 +774,7 @@ export interface DriverCabHardwareStatus {
   host: string;
   port: number;
   trainId: string;
-  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'FAIL_SAFE_BRAKE';
+  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'ATO_ACTIVE' | 'FAIL_SAFE_BRAKE';
   framesReceived: number;
   connectedAt: string | null;
   lastFrameAt: string | null;
@@ -788,6 +788,8 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     keyActive: boolean;
     atoStart: boolean;
+    atoAvailableEcho: boolean;
+    atoActiveEcho: boolean;
   } | null;
   lastCommand: {
     tractionPercent: number;
@@ -795,6 +797,12 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     handleMode: string;
   } | null;
+  plcOutput: {
+    atoAvailable: boolean;
+    atoActive: boolean;
+    frameLength: number;
+    speedCmps: number | null;
+  };
   networkScreenHost: string;
   networkScreenPort: number;
   signalScreenHost: string;

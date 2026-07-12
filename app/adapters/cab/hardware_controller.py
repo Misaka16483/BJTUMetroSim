@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from app.adapters.binary import UdpFrameClient
+from app.adapters.binary import TcpFrameClient
 from app.adapters.cab.mitsubishi_plc import (
     MitsubishiPlcCabInputState,
     MitsubishiPlcCabOutputFrameBuilder,
@@ -34,15 +34,15 @@ class ManualControlEngine(Protocol):
 
 
 ClientFactory = Callable[[str, int, float], MitsubishiPlcTcpClient]
-DisplayClientFactory = Callable[[str, int, float], UdpFrameClient]
+DisplayClientFactory = Callable[[str, int, float], TcpFrameClient]
 
 
 def _default_client_factory(host: str, port: int, timeout_s: float) -> MitsubishiPlcTcpClient:
     return MitsubishiPlcTcpClient(host=host, port=port, timeout_s=timeout_s)
 
 
-def _default_display_client_factory(host: str, port: int, timeout_s: float) -> UdpFrameClient:
-    return UdpFrameClient(host=host, port=port, timeout_s=timeout_s)
+def _default_display_client_factory(host: str, port: int, timeout_s: float) -> TcpFrameClient:
+    return TcpFrameClient(host=host, port=port, timeout_s=timeout_s)
 
 
 def _utc_now_iso() -> str:
@@ -82,6 +82,7 @@ class DriverCabHardwareStatus:
     last_error: str | None
     last_input: dict[str, Any] | None
     last_command: dict[str, Any] | None
+    plc_output: dict[str, Any]
     network_screen_host: str
     network_screen_port: int
     signal_screen_host: str
@@ -102,6 +103,7 @@ class DriverCabHardwareStatus:
             "lastError": self.last_error,
             "lastInput": self.last_input,
             "lastCommand": self.last_command,
+            "plcOutput": self.plc_output,
             "networkScreenHost": self.network_screen_host,
             "networkScreenPort": self.network_screen_port,
             "signalScreenHost": self.signal_screen_host,
@@ -156,7 +158,7 @@ class DriverCabHardwareController:
         self._thread: threading.Thread | None = None
         self._client: MitsubishiPlcTcpClient | None = None
         self._display_threads: dict[str, threading.Thread] = {}
-        self._display_clients: dict[str, UdpFrameClient] = {}
+        self._display_clients: dict[str, TcpFrameClient] = {}
         self._display_stop_events: dict[str, threading.Event] = {}
         self._state = "DISCONNECTED"
         self._control_state = "IDLE"
@@ -371,7 +373,11 @@ class DriverCabHardwareController:
             mode_result = self.engine.set_manual_mode(self.train_id, True)
             if mode_result.get("ok"):
                 self._manual_mode_armed = True
-                self._ato_available_sent = False
+                # ATO remains available while the driver is in manual mode.
+                # Clearing this bit here made every later ATO-start pulse
+                # impossible to accept, especially when the first PLC frame
+                # arrived with the master handle away from neutral.
+                self._ato_available_sent = True
                 self._ato_active_sent = False
             else:
                 with self._lock:
@@ -504,7 +510,7 @@ class DriverCabHardwareController:
                         runtime.last_frame_at = _utc_now_iso()
                     if stop_event.wait(self.display_interval_s):
                         break
-            except (OSError, RuntimeError) as exc:
+            except (ConnectionError, OSError, RuntimeError, socket.timeout, ValueError) as exc:
                 if not stop_event.is_set():
                     with self._lock:
                         runtime.state = "RETRYING"
@@ -659,18 +665,17 @@ class DriverCabHardwareController:
                 }
 
     def _send_plc_output(self, client: MitsubishiPlcTcpClient) -> None:
+        train = self._display_train_snapshot()
         output = MitsubishiPlcCabOutputState(
             ato_available=self._ato_available_sent,
             ato_active=self._ato_active_sent,
+            doors_closed_light=train.get("doorState", "CLOSED") == "CLOSED" if train else False,
+            vehicle_speed_cmps=_clamp_u16(max(0.0, float(train.get("speedMps", 0.0))) * 100.0),
         )
-        if self._last_plc_output is not None:
-            if (
-                self._last_plc_output.ato_available == output.ato_available
-                and self._last_plc_output.ato_active == output.ato_active
-            ):
-                return
-        self._last_plc_output = output
+        if self._last_plc_output == output:
+            return
         client.send_output_state(output, builder=self._plc_output_builder)
+        self._last_plc_output = output
 
     def _record_input_locked(self, input_state: MitsubishiPlcCabInputState) -> None:
         self._frames_received += 1
@@ -684,6 +689,8 @@ class DriverCabHardwareController:
             "emergencyBrake": input_state.emergency_brake_requested,
             "keyActive": input_state.key_switch_locked,
             "atoStart": input_state.ato_start_triggered,
+            "atoAvailableEcho": input_state.ato_available,
+            "atoActiveEcho": input_state.ato_active,
         }
 
     def _snapshot_locked(self) -> DriverCabHardwareStatus:
@@ -699,6 +706,21 @@ class DriverCabHardwareController:
             last_error=self._last_error,
             last_input=self._last_input,
             last_command=self._last_command,
+            plc_output={
+                "atoAvailable": self._ato_available_sent,
+                "atoActive": self._ato_active_sent,
+                "frameLength": (
+                    self._plc_output_builder.speed_extension_frame_size_bytes
+                    if self._last_plc_output is not None
+                    and self._last_plc_output.vehicle_speed_cmps is not None
+                    else self._plc_output_builder.strict_frame_size_bytes
+                ),
+                "speedCmps": (
+                    self._last_plc_output.vehicle_speed_cmps
+                    if self._last_plc_output is not None
+                    else None
+                ),
+            },
             network_screen_host=self._network_screen_host,
             network_screen_port=self._network_screen_port,
             signal_screen_host=self._signal_screen_host,
