@@ -2079,7 +2079,11 @@ class SimulationEngine:
         #   forward  →  segment偏移递增方向 = path前进方向
         #   reverse  →  segment偏移递减方向 = path前进方向
         sig_dir = constraint.direction  # "forward" | "reverse"
-        return self.track_query.get_next_signal(constraint.segment_id, seg_offset, sig_dir)
+        # TrackQuery uses an inclusive comparison. Query immediately ahead so
+        # the signal at the train's exact position is not mistaken for the
+        # next signal after departure authority has already been granted.
+        query_offset = seg_offset + (0.01 if sig_dir == "forward" else -0.01)
+        return self.track_query.get_next_signal(constraint.segment_id, query_offset, sig_dir)
 
     def _lookup_profile_speed(self, train_id: str, position_m: float) -> tuple[float, str] | None:
         """浠庤鍒掓洸绾夸腑绾挎€ф彃鍊煎綋鍓嶄綅缃殑鐩爣閫熷害鍜岃繍琛屾ā寮?"""
