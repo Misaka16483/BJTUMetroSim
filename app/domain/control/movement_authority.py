@@ -243,7 +243,7 @@ class MovementAuthorityService:
             if constraint.path_end_m <= position_m or constraint.path_start_m >= max_position_m:
                 continue
             for section_id in self._sections_by_seg.get(constraint.segment_id, []):
-                occupants = self._section_occupation.occupied_by(section_id)
+                occupants = self._section_occupation.axle_occupied_by(section_id)
                 if any(
                     occupant != train_id and occupant not in precisely_located_train_ids
                     for occupant in occupants

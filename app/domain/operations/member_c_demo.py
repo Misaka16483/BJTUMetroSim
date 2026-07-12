@@ -248,7 +248,7 @@ class MemberCDemoRunner:
                 "sectionId": sid,
                 "name": axle_def.name,
                 "segmentIds": sorted(axle_def.segment_ids),
-                "occupied": self.section_occ.is_occupied(sid),
+                "occupied": self.section_occ.is_axle_occupied(sid),
             })
 
         ts = self._train_state

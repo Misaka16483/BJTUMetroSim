@@ -42,6 +42,31 @@ class RouteCatalog:
                 int(s) for s in (raw.get("segmentIds") or []) if s is not None
             )
 
+        # Protection-section IDs live in a different namespace from axle
+        # section IDs.  Keep the explicit relation from the source table; do
+        # not use the numeric protection ID as an axle ID by coincidence.
+        self._protection_axle_sections: dict[str, tuple[str, ...]] = {}
+        for raw in line_map.get("protectionSections", []):
+            protection_id = raw.get("id")
+            if protection_id is None:
+                continue
+            self._protection_axle_sections[str(protection_id)] = tuple(
+                str(section_id)
+                for section_id in (raw.get("axleSectionIds") or [])
+                if section_id is not None
+            )
+
+        self._point_approach_axle_sections: dict[str, tuple[str, ...]] = {}
+        for raw in line_map.get("pointApproachSections", []):
+            approach_id = raw.get("id")
+            if approach_id is None:
+                continue
+            self._point_approach_axle_sections[str(approach_id)] = tuple(
+                str(section_id)
+                for section_id in (raw.get("axleSectionIds") or [])
+                if section_id is not None
+            )
+
         # -- route definitions --
         self._routes: dict[str, RouteDef] = {}
         for raw in line_map.get("routes", []):
@@ -99,6 +124,22 @@ class RouteCatalog:
 
     def conflicts_with(self, route_id: str) -> set[str]:
         return self._conflicts.get(route_id, set())
+
+    def protection_axle_section_ids(self, protection_id: str | int) -> tuple[str, ...]:
+        """Resolve one protection section to its source-defined axle sections."""
+        return self._protection_axle_sections.get(str(protection_id), ())
+
+    def axle_section_ids_covering_segments(self, segment_ids: set[int]) -> tuple[str, ...]:
+        """Return axle sections that contain any of the supplied physical Segs."""
+        return tuple(
+            section_id
+            for section_id, covered_segments in self._axle_section_segs.items()
+            if covered_segments & segment_ids
+        )
+
+    def point_approach_axle_section_ids(self, approach_id: str | int) -> tuple[str, ...]:
+        """Resolve one point-approach section to its axle detector sections."""
+        return self._point_approach_axle_sections.get(str(approach_id), ())
 
     def are_hostile(self, route_a: str, route_b: str) -> bool:
         return route_b in self._conflicts.get(route_a, set())

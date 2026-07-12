@@ -35,6 +35,7 @@ export default function TrainManagementPanel() {
   });
   const [showVehicleForm, setShowVehicleForm] = useState(false);
   const [vehicleForm, setVehicleForm] = useState<VehicleConfigPayload>({ ...DEF_VEHICLE });
+  const [addError, setAddError] = useState<string | null>(null);
 
   const connected = backendStatus === 'connected';
   const trainIdSeq = trains.length + 1;
@@ -54,13 +55,19 @@ export default function TrainManagementPanel() {
     if (showVehicleForm) {
       payload.vehicleConfig = vehicleForm;
     }
-    const ok = await addTrain(payload);
-    if (ok) {
+    const result = await addTrain(payload);
+    if (result.ok) {
+      setAddError(null);
       setShowForm(false);
       setForm((f) => ({
         ...f,
         trainId: `T09${String(trainIdSeq + 1).padStart(2, '0')}`,
       }));
+    } else if (result.error === 'INITIAL_PLACEMENT_OCCUPIED') {
+      const conflicts = result.conflictingTrainIds?.join('、');
+      setAddError(`起点站台已有列车占用${conflicts ? `：${conflicts}` : ''}，请等待其驶离后再加车。`);
+    } else {
+      setAddError(`加车失败：${result.error ?? '未知原因'}`);
     }
   };
 
@@ -102,7 +109,7 @@ export default function TrainManagementPanel() {
           </span>
         </div>
         <button
-          onClick={() => { setShowForm((v) => !v); setShowVehicleForm(false); }}
+          onClick={() => { setShowForm((v) => !v); setShowVehicleForm(false); setAddError(null); }}
           disabled={!connected}
           style={{
             fontSize: 10,
@@ -129,6 +136,11 @@ export default function TrainManagementPanel() {
             borderRadius: 6,
           }}
         >
+          {addError && (
+            <div style={{ color: '#f85149', fontSize: 11, lineHeight: 1.45, marginBottom: 8 }}>
+              {addError}
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
             <Field label="列车ID" small>
               <input

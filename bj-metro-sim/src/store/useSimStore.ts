@@ -14,6 +14,7 @@ import type {
   VehicleConfigPayload,
   VehicleConfigResponse,
   AddTrainPayload,
+  AddTrainResponse,
 } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop, simSetTickInterval, simSetVehicleConfig, simSetManualMode, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
 
@@ -141,7 +142,7 @@ interface SimState {
   setShowVehicleConfig: (show: boolean) => void;
 
   // 列车管理
-  addTrain: (payload: AddTrainPayload) => Promise<boolean>;
+  addTrain: (payload: AddTrainPayload) => Promise<AddTrainResponse>;
   removeTrain: (trainId: string) => Promise<boolean>;
   setTrainColor: (trainId: string, color: string) => void;
 
@@ -810,7 +811,7 @@ export const useSimStore = create<SimState>((set, get) => ({
         set({ selectedTrainId: payload.trainId });
       }
     }
-    return !!resp.ok;
+    return resp;
   },
 
   removeTrain: async (trainId: string) => {

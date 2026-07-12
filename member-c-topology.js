@@ -8,6 +8,12 @@
   var seenServerEvents = {};
   var stationStartBySegment = {};
   var stationCount = 0;
+  var LOG_STORAGE_KEY = 'member-c-topology-log-v1';
+  try { chineseEvents = JSON.parse(window.sessionStorage.getItem(LOG_STORAGE_KEY) || '[]') || []; } catch (error) { chineseEvents = []; }
+
+  function persistChineseLog() {
+    try { window.sessionStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(chineseEvents)); } catch (error) { /* session storage is optional */ }
+  }
 
   function loadStationStarts() {
     if (!window.ENGINE_MODE) return;
@@ -39,6 +45,9 @@
       .then(function (data) { prev = S; S = data; updateRouteList(document.getElementById('route-filter').value); draw(); });
   }
 
+  // The outer React header and this iframe can both start the engine.  Keep one
+  // response-driven loop here so the canvas stays live for either entry point
+  // without accumulating overlapping HTTP requests.
   function scheduleEngineRefresh() {
     if (!window.ENGINE_MODE) return;
     function refreshAfterResponse() {
@@ -61,6 +70,9 @@
       body: JSON.stringify({ trainId: trainId, initialStationCode: start.code, initialSegmentId: selectedSegmentId, direction: direction, operationMode: 'ATO' })
     }).then(function (response) { return response.json(); }).then(function (data) {
       if (!data.ok) {
+        if (data.error === 'INITIAL_PLACEMENT_OCCUPIED') {
+          data.error = '起点站台已有列车占用' + (data.conflictingTrainIds && data.conflictingTrainIds.length ? '（' + data.conflictingTrainIds.join('、') + '）' : '') + '，请等待其驶离后再加车';
+        }
         addChineseEvent('失败', '主引擎加车失败：' + (data.error || '未知原因'), S ? S.tick : 0);
         renderChineseLog();
         return;
@@ -190,6 +202,7 @@
     seenServerEvents[key] = true;
     chineseEvents.unshift({ category: category, message: message, tick: tick || 0 });
     chineseEvents = chineseEvents.slice(0, 100);
+    persistChineseLog();
   }
 
   function failureText(reason) {
@@ -242,6 +255,12 @@
       Object.keys(currentTrains).forEach(function (trainId) {
         var current = currentTrains[trainId];
         var previous = previousTrains[trainId] || {};
+        if (current.phase === 'DWELLING' && previous.phase !== 'DWELLING') {
+          addChineseEvent('到站', '列车 ' + trainId + ' 到达 ' + (current.currentStation || '站台') + '，停站 ' + Math.ceil(current.dwellRemainingSec || 0) + ' 秒', S.tick);
+        }
+        if (previous.phase === 'DWELLING' && current.phase === 'DEPARTING') {
+          addChineseEvent('发车', '列车 ' + trainId + ' 停站结束，出站进路与 MA 已确认', S.tick);
+        }
         if (current.phase === 'WAITING_ROUTE' && previous.phase !== 'WAITING_ROUTE') {
           addChineseEvent('等待', '列车 ' + trainId + ' 等待进路：' + (current.routeFailureReason || '当前不可办理'), S.tick);
         }

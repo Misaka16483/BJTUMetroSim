@@ -222,8 +222,9 @@ class RouteService:
             # ── 状态1：LOCKED → 检查接近区段 → APPROACH_LOCKED ──
             if state.state == "LOCKED":
                 in_approach = any(
-                    train_id in self._section_occ.occupied_by(sid)
-                    for sid in state.approach_sections
+                    train_id in self._section_occ.axle_occupied_by(axle_section_id)
+                    for approach_id in state.approach_sections
+                    for axle_section_id in self._catalog.point_approach_axle_section_ids(approach_id)
                 )
                 if in_approach:
                     state.state = "APPROACH_LOCKED"
@@ -231,7 +232,7 @@ class RouteService:
             # ── 状态2：APPROACH_LOCKED 或 LOCKED → 检查是否已进入进路区段 ──
             if not state.has_entered:
                 entered = any(
-                    train_id in self._section_occ.occupied_by(sid)
+                    train_id in self._section_occ.axle_occupied_by(sid)
                     for sid in state.locked_sections
                 )
                 if not entered:
@@ -270,7 +271,7 @@ class RouteService:
         occupied_indexes = [
             index
             for index, section_id in enumerate(state.locked_sections)
-            if train_id in self._section_occ.occupied_by(section_id)
+            if train_id in self._section_occ.axle_occupied_by(section_id)
         ]
         if occupied_indexes:
             first_occupied = occupied_indexes[0]
@@ -290,6 +291,21 @@ class RouteService:
         ):
             self._do_release(route_id, state, "AUTO")
 
+    def release_routes_owned_by(self, train_id: str) -> list[str]:
+        """Emergency-release routes owned by a train that is being removed.
+
+        Removing a simulated train is equivalent to taking it out of service.
+        Its route locks must not survive the train, otherwise a later train can
+        wait forever on ``CONFLICT_ROUTE_LOCKED`` for an owner that no longer
+        exists.  Only locked routes with this exact owner are released.
+        """
+        released: list[str] = []
+        for route_id, state in list(self._routes.items()):
+            if state.train_id != train_id or state.state not in ("LOCKED", "APPROACH_LOCKED"):
+                continue
+            self.release(route_id, "EMERGENCY")
+            released.append(route_id)
+        return released
     # -- query interface --------------------------------------------------
 
     def state_of(self, route_id: str) -> str:
@@ -307,6 +323,19 @@ class RouteService:
         if state is None or state.state not in ("LOCKED", "APPROACH_LOCKED"):
             return None
         return state.train_id
+
+    def has_entered(self, route_id: str) -> bool:
+        """Whether the owner has entered a currently locked route.
+
+        Signal control uses this to return the departure signal to red after
+        the train has passed it, while the route remains locked for tail clear.
+        """
+        state = self._routes.get(route_id)
+        return bool(
+            state is not None
+            and state.state in ("LOCKED", "APPROACH_LOCKED")
+            and state.has_entered
+        )
 
     def locked_routes(self) -> list[str]:
         """返回所有已锁闭/接近锁闭的进路 ID 列表。"""

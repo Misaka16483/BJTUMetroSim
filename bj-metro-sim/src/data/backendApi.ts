@@ -477,6 +477,7 @@ export interface AddTrainResponse {
   ok: boolean;
   train?: SimTrainState;
   error?: string;
+  conflictingTrainIds?: string[];
 }
 
 export function simAddTrain(payload: AddTrainPayload): Promise<AddTrainResponse> {

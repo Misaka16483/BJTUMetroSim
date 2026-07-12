@@ -12,6 +12,7 @@ from app.domain.interlocking.rule_engine import InterlockingRuleEngine
 from app.domain.interlocking.signal_resolver import SignalAspectResolver
 from app.domain.interlocking.section_occupation import SectionOccupationService
 from app.domain.interlocking.switch_lock import SwitchLockService
+from app.domain.line.services import PathTrackQuery
 from app.domain.signal.models import TrainState
 
 
@@ -123,6 +124,24 @@ class SectionOccupationServiceBasicTests(unittest.TestCase):
         self.svc.update([train], self.track)
         self.assertFalse(self.svc.is_occupied("2"))
 
+    def test_logical_section_id_does_not_overwrite_same_numbered_axle_section(self) -> None:
+        line_map = _tiny_line_map(
+            axle_sections=[{"id": 85, "name": "JZ85", "segmentIds": [100]}],
+            segments=[{"id": 100, "lengthM": 600.0}],
+        )
+        # The workbook uses independent numeric namespaces.  Logical 85 is a
+        # different object and must not hide axle JZ85 from interlocking.
+        line_map["logicalSections"] = [{"id": 85, "name": "15G"}]
+        svc = SectionOccupationService(line_map)
+        track = _fake_track_query({100: {"id": 100, "lengthM": 600.0}})
+
+        svc.update([_make_train(seg_id=100, offset_m=300.0, length_m=20.0)], track)
+
+        self.assertTrue(svc.is_occupied("85"))
+        axle = next(item for item in svc.snapshot() if item["sectionId"] == "85")
+        self.assertEqual(axle["sectionType"], "AXLE")
+        self.assertTrue(axle["occupied"])
+
     def test_two_trains_same_section(self) -> None:
         """Two trains with segs in the same axle section → both listed."""
         t1 = _make_train(train_id="T001", seg_id=13, offset_m=50.0)
@@ -221,6 +240,39 @@ class SectionOccupationServiceTailOverlapTests(unittest.TestCase):
         self.svc.update([train], self.track)
         self.assertFalse(self.svc.is_occupied("1"), "tail is still in seg 14")
         self.assertTrue(self.svc.is_occupied("2"))
+
+    def test_tail_follows_approved_turnout_branch_not_global_first_predecessor(self) -> None:
+        """A train entering S43 through S44 must not project its tail into S41."""
+        line_map = _tiny_line_map(
+            axle_sections=[
+                {"id": 41, "name": "JZ41", "segmentIds": [41]},
+                {"id": 43, "name": "JZ43", "segmentIds": [43]},
+                {"id": 44, "name": "JZ44", "segmentIds": [44]},
+            ],
+            segments=[
+                {"id": 41, "lengthM": 100.0},
+                {"id": 44, "lengthM": 100.0},
+                {"id": 43, "lengthM": 20.0, "startForwardSegId": 41, "startDivergingSegId": 44},
+            ],
+        )
+        track = _fake_track_query({
+            41: {"id": 41, "lengthM": 100.0},
+            44: {"id": 44, "lengthM": 100.0},
+            43: {"id": 43, "lengthM": 20.0, "startForwardSegId": 41},
+        })
+        train = _make_train(seg_id=43, offset_m=20.0, length_m=60.0)
+        train_with_path = TrainState(**{
+            **train.__dict__,
+            "path_track": PathTrackQuery(track, [44, 43]),
+        })
+        svc = SectionOccupationService(line_map)
+
+        svc.update([train_with_path], track)
+
+        self.assertEqual(svc.covered_segments_for("T001"), {43, 44})
+        self.assertFalse(svc.is_occupied("41"))
+        self.assertTrue(svc.is_occupied("43"))
+        self.assertTrue(svc.is_occupied("44"))
 
 
 class SectionOccupationServiceEmptyTests(unittest.TestCase):
@@ -549,6 +601,12 @@ class RouteServiceTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.failure_reason, "CONFLICT_ROUTE_LOCKED")
 
+    def test_remove_owner_releases_its_locked_routes(self) -> None:
+        self.assertTrue(self.svc.request(RouteRequest("REQ-1", "1", "T001")).accepted)
+        released = self.svc.release_routes_owned_by("T001")
+        self.assertEqual(released, ["1"])
+        self.assertFalse(self.svc.is_locked("1"))
+        self.assertEqual(self.svc.release_routes_owned_by("T002"), [])
     def test_cancel_releases_route(self) -> None:
         self.svc.request(RouteRequest("REQ-1", "1", "T001"))
         self.svc.release("1", "CANCEL")
@@ -608,6 +666,49 @@ class RouteServiceTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+    def test_approach_lock_uses_mapped_axle_section_not_same_numbered_id(self) -> None:
+        """Approach-section 18 maps to JZ61, not coincidentally numbered JZ18."""
+        line_map = {
+            "axleSections": [
+                {"id": 18, "name": "JZ18", "segmentIds": [18]},
+                {"id": 61, "name": "JZ61", "segmentIds": [61]},
+                {"id": 62, "name": "JZ62", "segmentIds": [62]},
+            ],
+            "logicalSections": [],
+            "segments": [
+                {"id": 18, "lengthM": 100.0},
+                {"id": 61, "lengthM": 100.0},
+                {"id": 62, "lengthM": 100.0},
+            ],
+            "routes": [{
+                "id": 1, "name": "R-APPROACH", "type": "0x0001",
+                "startSignalId": 5, "endSignalId": 10,
+                "axleSectionIds": [62], "protectionSectionIds": [],
+                "pointApproachSectionIds": [18],
+            }],
+            "switches": [],
+            "pointApproachSections": [{"id": 18, "axleSectionIds": [61]}],
+        }
+        catalog = RouteCatalog(line_map)
+        section_occ = SectionOccupationService(line_map)
+        switch_lock = SwitchLockService([])
+        rules = InterlockingRuleEngine(catalog, section_occ, switch_lock)
+        service = RouteService(catalog, rules, section_occ, switch_lock)
+        self.assertTrue(service.request(RouteRequest("REQ-1", "1", "T001")).accepted)
+
+        section_occ.update(
+            [_make_train(train_id="T001", seg_id=18, offset_m=50.0)],
+            _fake_track_query({18: {"id": 18, "lengthM": 100.0}}),
+        )
+        service.update()
+        self.assertEqual(service.state_of("1"), "LOCKED")
+
+        section_occ.update(
+            [_make_train(train_id="T001", seg_id=61, offset_m=50.0)],
+            _fake_track_query({61: {"id": 61, "lengthM": 100.0}}),
+        )
+        service.update()
+        self.assertEqual(service.state_of("1"), "APPROACH_LOCKED")
 class SignalAspectResolverTests(unittest.TestCase):
     """测试信号机灯色解析逻辑。
 
@@ -677,11 +778,28 @@ class SignalAspectResolverTests(unittest.TestCase):
         self.route_svc.request(RouteRequest("REQ-1", "1", "T001"))
         # 占用区段1
         self.section_occ.update(
-            [_make_train(seg_id=13, offset_m=50.0, length_m=60.0)],
+            [_make_train(train_id="T002", seg_id=13, offset_m=50.0, length_m=60.0)],
             _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
         )
         self.assertEqual(self.resolver.resolve(3), "RED")
 
+    def test_own_entry_section_keeps_departure_signal_open(self) -> None:
+        self.route_svc.request(RouteRequest("REQ-1", "1", "T001"))
+        self.section_occ.update(
+            [_make_train(train_id="T001", seg_id=13, offset_m=50.0, length_m=60.0)],
+            _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
+        )
+        self.assertEqual(self.resolver.resolve(3), "YELLOW")
+
+    def test_departure_signal_returns_red_after_owner_enters_route(self) -> None:
+        self.route_svc.request(RouteRequest("REQ-1", "1", "T001"))
+        self.section_occ.update(
+            [_make_train(train_id="T001", seg_id=13, offset_m=50.0, length_m=60.0)],
+            _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
+        )
+        self.route_svc.update()
+
+        self.assertEqual(self.resolver.resolve(3), "RED")
     def test_signal_fault_forces_red(self) -> None:
         """信号故障 → 强制 RED，不管进路是否锁闭。"""
         self.route_svc.request(RouteRequest("REQ-1", "1", "T001"))

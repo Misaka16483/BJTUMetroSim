@@ -385,12 +385,27 @@ class Line9DataService:
             for segment in self.line_map.get("segments", [])
             if segment.get("id") is not None
         }
+        # The raw platform table contains non-operational placeholder records
+        # (for example S22 / platform 29 has mileage 1m and 0xff flags).  Keep
+        # those IDs for diagnostics, but only mapped passenger platforms may
+        # drive the green platform rendering or topology start controls.
+        raw_platform_by_seg: dict[int, list[int]] = {}
         platform_by_seg: dict[int, list[int]] = {}
+        operational_platform_ids = {
+            int(platform_id)
+            for station in self.station_mappings()
+            for platform_id in station.get("platformIds", [])
+        }
         for platform in self.line_map.get("platforms", []):
             segment_id = platform.get("segmentId")
-            if segment_id is not None:
-                platform_by_seg.setdefault(int(segment_id), []).append(int(platform["id"]))
-
+            platform_id = platform.get("id")
+            if segment_id is None or platform_id is None:
+                continue
+            segment_key = int(segment_id)
+            platform_key = int(platform_id)
+            raw_platform_by_seg.setdefault(segment_key, []).append(platform_key)
+            if platform_key in operational_platform_ids:
+                platform_by_seg.setdefault(segment_key, []).append(platform_key)
         def seg_ref(segment: JsonDict, field: str) -> int | None:
             value = segment.get(field)
             return int(value) if value is not None and int(value) in seg_by_id else None
@@ -515,6 +530,7 @@ class Line9DataService:
                 "row": row,
                 "col": col,
                 "platformIds": platform_by_seg.get(sid, []),
+                "rawPlatformIds": raw_platform_by_seg.get(sid, []),
                 "startForward": seg_ref(segment, "startForwardSegId"),
                 "startDiverging": seg_ref(segment, "startDivergingSegId"),
                 "endForward": seg_ref(segment, "endForwardSegId"),
@@ -971,24 +987,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         assert snap is not None
         interlocking = snap.interlocking
         sections = interlocking.get("sections", [])
-        section_by_id = {str(item.get("sectionId")): item for item in sections}
-        occupied_segments: set[int] = set()
-        for raw in self.service.line_map.get("axleSections", []):
-            section_id = str(raw.get("id"))
-            if section_by_id.get(section_id, {}).get("occupied"):
-                occupied_segments.update(int(seg_id) for seg_id in raw.get("segmentIds", []) if seg_id is not None)
         signal_aspects = {
             str(item.get("signalId")): item.get("aspect", "RED")
             for item in interlocking.get("signals", [])
         }
         colors = ("#58a6ff", "#f0c040", "#f778ba", "#39d0c8", "#8fc31f")
         trains = []
-        seg_train_colors = {segment_id: "#f85149" for segment_id in occupied_segments}
+        # One occupied detector section can contain a turnout common segment
+        # and both branches. The map must paint the physical train footprint,
+        # not every Seg that shares its detector state.
+        seg_train_colors: dict[int, str] = {}
         for index, train in enumerate(snap.trains):
             segment_id = train.get("currentSegmentId")
             color = colors[index % len(colors)]
-            if segment_id is not None:
-                seg_train_colors[int(segment_id)] = color
+            for covered_segment_id in self.engine.section_occupation.covered_segments_for(train.get("trainId", "")):
+                seg_train_colors[covered_segment_id] = color
             trains.append({
                 "id": train.get("trainId"), "segId": segment_id,
                 "offsetM": train.get("currentSegmentOffsetM", 0.0),
@@ -997,7 +1010,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "direction": "FORWARD" if train.get("direction") == "UP" else "BACKWARD",
                 "lengthM": 120.0, "phase": train.get("phase", "IDLE"),
                 "routeFailureReason": train.get("routeFailureReason"),
-                "movementAuthorityReason": train.get("movementAuthorityReason"), "color": color,
+                "movementAuthorityReason": train.get("movementAuthorityReason"), "dwellRemainingSec": train.get("dwellRemainingSec", 0.0),
+                "routeRetryAtMs": train.get("routeRetryAtMs"), "color": color,
             })
         signals = [
             {"id": item.get("id"), "segId": item.get("segId"), "name": item.get("name", ""),

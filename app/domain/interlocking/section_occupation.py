@@ -76,8 +76,16 @@ class SectionOccupationService:
             sid: SectionOccupation(section_id=sid, section_type="AXLE")
             for sid in self._axle_defs
         }
-        for sid in self._logical_defs:
-            self._occupancy[sid] = SectionOccupation(section_id=sid, section_type="LOGICAL")
+        # Detector occupancy and the physical train footprint differ at a
+        # turnout common segment. Keep the latter for topology rendering.
+        self._covered_segments_by_train: dict[str, set[int]] = {}
+        # Logical-section IDs share the same numeric namespace as axle IDs in
+        # the source workbook (for example both have ID 85).  They must never
+        # overwrite the axle detector cache used by route release and signals.
+        self._logical_occupancy: dict[str, SectionOccupation] = {
+            sid: SectionOccupation(section_id=sid, section_type="LOGICAL")
+            for sid in self._logical_defs
+        }
 
     # ==================================================================
     # 主循环接口 —— 成员 A 的 SimulationRunner 每 tick 调用
@@ -95,11 +103,19 @@ class SectionOccupationService:
         for occ in self._occupancy.values():
             occ.occupied = False
             occ.train_ids.clear()
+        for occ in self._logical_occupancy.values():
+            occ.occupied = False
+            occ.train_ids.clear()
+        self._covered_segments_by_train.clear()
 
         # 第二步：遍历所有列车，找出每辆车覆盖的 Seg 集合
         for train in train_states:
             # 调用内部的拓扑回溯方法，找出车体覆盖的所有 Seg
-            covered_segs = self._segments_covered_by_train(train, track_query)
+            # Engine states carry a PathTrackQuery for the route actually
+            # approved for that train. Legacy callers use global topology.
+            train_track_query = getattr(train, "path_track", None) or track_query
+            covered_segs = self._segments_covered_by_train(train, train_track_query)
+            self._covered_segments_by_train[train.train_id] = set(covered_segs)
 
             # 第三步：对每个计轴区段，判断是否与列车覆盖的 Seg 有交集
             for section_id, axle_def in self._axle_defs.items():
@@ -113,6 +129,20 @@ class SectionOccupationService:
     # 查询接口 —— 供 InterlockingRuleEngine / RouteService / 前端使用
     # ==================================================================
 
+    def is_axle_occupied(self, section_id: str | int) -> bool:
+        """Return occupancy of one axle-counter detector section.
+
+        Runtime interlocking decisions must use this explicit API. The
+        workbook reuses numeric IDs across several section tables, so a bare
+        ID lookup is unsafe once more section types are introduced.
+        """
+        occ = self._occupancy.get(str(section_id))
+        return occ.occupied if occ else False
+
+    def axle_occupied_by(self, section_id: str | int) -> list[str]:
+        """Return trains occupying one axle-counter detector section."""
+        occ = self._occupancy.get(str(section_id))
+        return list(occ.train_ids) if occ else []
     def is_occupied(self, section_id: str | int) -> bool:
         """查询某个区段当前是否被占用。
 
@@ -137,7 +167,32 @@ class SectionOccupationService:
 
     def snapshot(self) -> list[dict]:
         """返回所有区段的完整快照（前端 API 用）。"""
-        return [occ.to_dict() for occ in self._occupancy.values()]
+        axle_snapshot = [occ.to_dict() for occ in self._occupancy.values()]
+        # Logical occupancy is not yet derived in Phase 2. Prefixing its ID in
+        # the diagnostic snapshot preserves the source record without making a
+        # front end mistake it for an identically numbered axle detector.
+        logical_snapshot = []
+        for section_id, occ in self._logical_occupancy.items():
+            item = occ.to_dict()
+            item["sectionId"] = f"LOGICAL:{section_id}"
+            logical_snapshot.append(item)
+        return [*axle_snapshot, *logical_snapshot]
+
+    def covered_segments_for(self, train_id: str) -> set[int]:
+        """Return the latest physical Seg footprint of one train.
+
+        This differs from axle-section occupancy: a detector can span a
+        turnout common segment and both branches, but a train uses one branch.
+        """
+        return set(self._covered_segments_by_train.get(train_id, set()))
+
+    def physical_footprint(self, train: Any, track_query: Any) -> set[int]:
+        """Project one train body without changing the live occupancy cache.
+
+        The engine uses this while validating a candidate train placement, so a
+        new train cannot enter the simulation already overlapping another one.
+        """
+        return self._segments_covered_by_train(train, track_query)
 
     @property
     def axle_section_ids(self) -> list[str]:

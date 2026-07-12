@@ -123,11 +123,13 @@ class InterlockingRuleEngine:
 
         # 检查 2：进路包含的计轴区段是否全部空闲
         for section_id in route_def.axle_section_ids:
-            if not self._section_occ.is_occupied(section_id):
+            if not self._section_occ.is_axle_occupied(section_id):
                 continue
             # The requesting train may occupy its own start/approach section.
-            # Foreign, shared, and unidentified occupations still block the route.
-            occupants = set(self._section_occ.occupied_by(section_id))
+            # This is not a general occupancy bypass: exact set equality is
+            # essential.  Foreign, shared, and unidentified occupations still
+            # block the route, as do all protection-section occupations below.
+            occupants = set(self._section_occ.axle_occupied_by(section_id))
             if occupants == {train_id}:
                 continue
             return RouteCheckResult(
@@ -135,13 +137,21 @@ class InterlockingRuleEngine:
                 failure_reason="SECTION_OCCUPIED",
                 failed_section_id=section_id,
             )
-        for section_id in route_def.protection_section_ids:
-            if self._section_occ.is_occupied(section_id):
+        for protection_id in route_def.protection_section_ids:
+            protection_axles = self._catalog.protection_axle_section_ids(protection_id)
+            if not protection_axles:
                 return RouteCheckResult(
                     ok=False, route_id=route_id,
-                    failure_reason="SECTION_OCCUPIED",
-                    failed_section_id=section_id,
+                    failure_reason="PROTECTION_SECTION_UNRESOLVED",
+                    failed_section_id=protection_id,
                 )
+            for axle_section_id in protection_axles:
+                if self._section_occ.is_axle_occupied(axle_section_id):
+                    return RouteCheckResult(
+                        ok=False, route_id=route_id,
+                        failure_reason="SECTION_OCCUPIED",
+                        failed_section_id=axle_section_id,
+                    )
 
         # 检查 4：是否有敌对进路已锁闭
         for conflict_id in self._catalog.conflicts_with(route_id):

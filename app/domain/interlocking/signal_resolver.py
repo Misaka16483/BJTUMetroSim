@@ -181,16 +181,29 @@ class SignalAspectResolver:
         if rdef is None:
             return RED
 
+        # The route remains locked for tail clearance, but once its owner has
+        # entered it the departure signal is physically behind the train.
+        if self._route_svc.has_entered(locked_route_id):
+            return RED
+
         # 规则 3：道岔故障
         for sw_id, pos in rdef.required_switches.items():
             if not self._switch_lock.is_available_for(sw_id, pos):
                 return RED
 
         # 规则 4：区段被占
+        owner_train_id = self._route_svc.locked_by(locked_route_id)
         for section_id in rdef.axle_section_ids:
-            if self._section_occ.is_occupied(section_id):
-                return RED
-
+            if not self._section_occ.is_axle_occupied(section_id):
+                continue
+            occupants = set(self._section_occ.axle_occupied_by(section_id))
+            # The route owner may occupy its departure/entry section.  This is
+            # the signal-side counterpart of InterlockingRuleEngine's self-entry
+            # exception, so signal and MA share the same safety semantics.  A
+            # foreign, shared, or unidentified occupation keeps the signal red.
+            if occupants == {owner_train_id}:
+                continue
+            return RED
         # 规则 5：基础灯色 = GREEN（第二遍可能改成 YELLOW）
         return GREEN
 
