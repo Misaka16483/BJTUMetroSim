@@ -61,12 +61,12 @@ class EngineStateContractTests(unittest.TestCase):
         up_terminal = engine.add_train({
             "trainId": "BAD-UP-END", "initialStationCode": "GTG", "direction": "UP",
         })
-        self.assertEqual(up_terminal["error"], "INITIAL_STATION_MUST_MATCH_DIRECTION_ORIGIN")
+        self.assertEqual(up_terminal["error"], "INITIAL_STATION_HAS_NO_FORWARD_ROUTE")
 
         down_terminal = engine.add_train({
             "trainId": "BAD-DOWN-END", "initialStationCode": "GGZ", "direction": "DOWN",
         })
-        self.assertEqual(down_terminal["error"], "INITIAL_STATION_MUST_MATCH_DIRECTION_ORIGIN")
+        self.assertEqual(down_terminal["error"], "INITIAL_STATION_HAS_NO_FORWARD_ROUTE")
 
         valid = engine.add_train({
             "trainId": "T-VALID", "initialStationCode": "GGZ", "direction": "UP",
@@ -74,6 +74,17 @@ class EngineStateContractTests(unittest.TestCase):
         self.assertTrue(valid["ok"])
         self.assertEqual(valid["train"]["currentStationCode"], "GGZ")
         self.assertEqual(valid["train"]["nextStationCode"], "FSP")
+
+        middle_up = engine.add_train({
+            "trainId": "T-MIDDLE-UP", "initialStationCode": "KYL", "direction": "UP",
+        })
+        middle_down = engine.add_train({
+            "trainId": "T-MIDDLE-DOWN", "initialStationCode": "KYL", "direction": "DOWN",
+        })
+        self.assertTrue(middle_up["ok"])
+        self.assertEqual(middle_up["train"]["nextStationCode"], "FTN")
+        self.assertTrue(middle_down["ok"])
+        self.assertEqual(middle_down["train"]["nextStationCode"], "FSP")
 
         engine.trains[0].station_index = len(engine._station_list) - 1
         engine.trains[0].direction = "UP"

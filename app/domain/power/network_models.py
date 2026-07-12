@@ -28,6 +28,30 @@ class TractionSubstation:
 
 
 @dataclass(frozen=True)
+class SupercapacitorStorage:
+    storage_id: str
+    substation_id: str
+    rated_energy_kwh: float
+    max_charge_power_kw: float
+    max_discharge_power_kw: float
+    discharge_trigger_power_kw: float = 1000.0
+    initial_soc: float = 0.50
+    min_soc: float = 0.20
+    max_soc: float = 0.90
+    charge_efficiency: float = 0.95
+    discharge_efficiency: float = 0.95
+    standby_power_kw: float = 3.0
+    status: str = "IN_SERVICE"
+    source_id: str = "UNSPECIFIED"
+    quality: str = "ENGINEERING_ESTIMATE"
+    parameter_sources: JsonDict = field(default_factory=dict)
+
+    @property
+    def in_service(self) -> bool:
+        return self.status == "IN_SERVICE"
+
+
+@dataclass(frozen=True)
 class FeederArm:
     feeder_id: str
     substation_id: str
@@ -222,6 +246,23 @@ class ContactRailPowerFlow:
 
 
 @dataclass(frozen=True)
+class SupercapacitorPowerFlow:
+    storage_id: str
+    substation_id: str
+    soc: float
+    stored_energy_kwh: float
+    available_charge_energy_kwh: float
+    available_discharge_energy_kwh: float
+    charge_power_kw: float
+    discharge_power_kw: float
+    conversion_losses_kw: float
+    cumulative_charged_kwh: float
+    cumulative_discharged_kwh: float
+    state: str
+    status: str
+
+
+@dataclass(frozen=True)
 class RegenPathFlow:
     source_train_id: str
     sink_type: str
@@ -243,6 +284,7 @@ class PowerFlowSnapshot:
     substations: list[SubstationPowerFlow] = field(default_factory=list)
     feeders: list[FeederPowerFlow] = field(default_factory=list)
     contact_rail_flows: list[ContactRailPowerFlow] = field(default_factory=list)
+    supercapacitor_flows: list[SupercapacitorPowerFlow] = field(default_factory=list)
     generated_regen_kw: float = 0.0
     self_consumed_regen_kw: float = 0.0
     absorbed_regen_kw: float = 0.0
@@ -303,6 +345,24 @@ class PowerFlowSnapshot:
                 }
                 for item in self.contact_rail_flows
             ],
+            "supercapacitorStorageSystems": [
+                {
+                    "storageId": item.storage_id,
+                    "substationId": item.substation_id,
+                    "soc": round(item.soc, 5),
+                    "storedEnergyKwh": round(item.stored_energy_kwh, 5),
+                    "availableChargeEnergyKwh": round(item.available_charge_energy_kwh, 5),
+                    "availableDischargeEnergyKwh": round(item.available_discharge_energy_kwh, 5),
+                    "chargePowerKw": round(item.charge_power_kw, 3),
+                    "dischargePowerKw": round(item.discharge_power_kw, 3),
+                    "conversionLossesKw": round(item.conversion_losses_kw, 3),
+                    "cumulativeChargedKwh": round(item.cumulative_charged_kwh, 5),
+                    "cumulativeDischargedKwh": round(item.cumulative_discharged_kwh, 5),
+                    "state": item.state,
+                    "status": item.status,
+                }
+                for item in self.supercapacitor_flows
+            ],
             "trainVoltages": [
                 {
                     "trainId": item.train_id,
@@ -336,6 +396,8 @@ class PowerFlowSnapshot:
                 "selfConsumedKw": round(self.self_consumed_regen_kw, 3),
                 "absorbedKw": round(self.absorbed_regen_kw, 3),
                 "feedbackKw": round(self.feedback_regen_kw, 3),
+                "storageChargedKw": round(sum(item.charge_power_kw for item in self.supercapacitor_flows), 3),
+                "storageDischargedKw": round(sum(item.discharge_power_kw for item in self.supercapacitor_flows), 3),
                 "wastedKw": round(self.wasted_regen_kw, 3),
                 "transferLossesKw": round(self.regen_transfer_losses_kw, 3),
                 "paths": [

@@ -47,21 +47,23 @@ export default function TrainManagementPanel() {
   while (trains.some((train) => train.trainId === `T09${String(trainIdSeq).padStart(2, '0')}`)) {
     trainIdSeq += 1;
   }
-  // 后端权威约定：UP 按站序递增（郭公庄→国家图书馆），DOWN 按站序递减。
-  // 正线仿真按固定端点发车；到终点后由后端自动折返。
-  const fixedStart = form.direction === 'UP'
-    ? stationOptions[0]
-    : stationOptions[stationOptions.length - 1];
-  const routeLabel = stationOptions.length > 1
-    ? (form.direction === 'UP'
-      ? `${stationOptions[0].name} → ${stationOptions[stationOptions.length - 1].name}`
-      : `${stationOptions[stationOptions.length - 1].name} → ${stationOptions[0].name}`)
+  // UP按站序递增，DOWN按站序递减；可从任意仍有前方区间的车站投入运营。
+  const validStartOptions = form.direction === 'UP'
+    ? stationOptions.slice(0, -1)
+    : stationOptions.slice(1);
+  const selectedStart = validStartOptions.find((station) => station.code === form.initialStationCode)
+    ?? (form.direction === 'UP' ? validStartOptions[0] : validStartOptions[validStartOptions.length - 1]);
+  const destination = form.direction === 'UP'
+    ? stationOptions[stationOptions.length - 1]
+    : stationOptions[0];
+  const routeLabel = selectedStart && destination
+    ? `${selectedStart.name} → ${destination.name}`
     : '线路数据加载中';
 
   const handleAdd = async () => {
     setAddError(null);
     const id = form.trainId || `T09${String(trainIdSeq).padStart(2, '0')}`;
-    const station = fixedStart?.code ?? (form.direction === 'UP' ? 'GGZ' : 'GTG');
+    const station = selectedStart?.code ?? (form.direction === 'UP' ? 'GGZ' : 'GTG');
     const payload: AddTrainPayload = {
       trainId: id,
       initialStationCode: station,
@@ -165,14 +167,29 @@ export default function TrainManagementPanel() {
               />
             </Field>
             <Field label="起点站" small>
-              <div style={{ ...inputStyle, color: '#8b949e' }}>
-                {fixedStart ? `${fixedStart.name}（${fixedStart.code}）` : '线路数据加载中'}
-              </div>
+              <select
+                value={selectedStart?.code ?? ''}
+                onChange={(e) => setForm({ ...form, initialStationCode: e.target.value })}
+                style={inputStyle}
+                disabled={validStartOptions.length === 0}
+              >
+                {validStartOptions.map((station) => (
+                  <option key={station.code} value={station.code}>
+                    {station.name}（{station.code}）
+                  </option>
+                ))}
+              </select>
             </Field>
             <Field label="方向" small>
               <select
                 value={form.direction}
-                onChange={(e) => setForm({ ...form, direction: e.target.value as 'UP' | 'DOWN', initialStationCode: '' })}
+                onChange={(e) => {
+                  const direction = e.target.value as 'UP' | 'DOWN';
+                  const initialStationCode = direction === 'UP'
+                    ? stationOptions[0]?.code ?? ''
+                    : stationOptions[stationOptions.length - 1]?.code ?? '';
+                  setForm({ ...form, direction, initialStationCode });
+                }}
                 style={inputStyle}
               >
                 <option value="UP">上行 (UP)</option>

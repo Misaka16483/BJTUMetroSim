@@ -237,6 +237,41 @@ export interface PowerTopologySubstation {
   parameterSources: Record<string, string>;
 }
 
+export interface PowerTopologySupercapacitorStorage {
+  storageId: string;
+  substationId: string;
+  ratedEnergyKwh: number;
+  maxChargePowerKw: number;
+  maxDischargePowerKw: number;
+  dischargeTriggerPowerKw: number;
+  initialSoc: number;
+  minSoc: number;
+  maxSoc: number;
+  chargeEfficiency: number;
+  dischargeEfficiency: number;
+  standbyPowerKw: number;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
+}
+
+export interface SupercapacitorStorageState {
+  storageId: string;
+  substationId: string;
+  soc: number;
+  storedEnergyKwh: number;
+  availableChargeEnergyKwh: number;
+  availableDischargeEnergyKwh: number;
+  chargePowerKw: number;
+  dischargePowerKw: number;
+  conversionLossesKw: number;
+  cumulativeChargedKwh: number;
+  cumulativeDischargedKwh: number;
+  state: 'CHARGING' | 'DISCHARGING' | 'STANDBY' | 'FULL' | 'EMPTY' | 'OUT_OF_SERVICE';
+  status: string;
+}
+
 export interface PowerTopology {
   lineId: string;
   nominalVoltageV: number;
@@ -252,6 +287,7 @@ export interface PowerTopology {
     limitations: string[];
   };
   substations: PowerTopologySubstation[];
+  supercapacitorStorageSystems?: PowerTopologySupercapacitorStorage[];
   feeders: PowerTopologyFeeder[];
   contactRailSections: PowerTopologyContactRailSection[];
   returnRailSections?: unknown[];
@@ -331,17 +367,20 @@ export interface PowerNetworkState {
   substations: PowerSubstationState[];
   feeders: PowerFeederState[];
   contactRailFlows?: ContactRailPowerFlowState[];
+  supercapacitorStorageSystems?: SupercapacitorStorageState[];
   trainVoltages: TrainVoltageState[];
   regen: {
     generatedKw: number;
     selfConsumedKw: number;
     absorbedKw: number;
     feedbackKw: number;
+    storageChargedKw: number;
+    storageDischargedKw: number;
     wastedKw: number;
     transferLossesKw: number;
     paths: Array<{
       sourceTrainId: string;
-      sinkType: 'TRAIN' | 'TRAIN_AUXILIARY' | 'SUBSTATION_FEEDBACK' | 'WASTE';
+      sinkType: 'TRAIN' | 'TRAIN_AUXILIARY' | 'SUPERCAPACITOR' | 'SUBSTATION_FEEDBACK' | 'WASTE';
       sinkId: string;
       viaSubstationId: string | null;
       sourceFeederId: string | null;

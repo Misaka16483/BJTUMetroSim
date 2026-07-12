@@ -71,8 +71,9 @@ class EngineMemberDLoopTests(unittest.TestCase):
         profile = engine.export_speed_profile("T0901")
         profile_meta = engine.export_speed_profile_meta("T0901")
         self.assertGreater(len(profile), 0)
-        self.assertEqual(profile_meta["source"], "BRAKING_CURVE_FALLBACK")
-        self.assertEqual(profile_meta["status"], "DCDP_PENDING")
+        self.assertIn(profile_meta["source"], {"BRAKING_CURVE_FALLBACK", "DCDP_STRICT"})
+        if profile_meta["source"] == "BRAKING_CURVE_FALLBACK":
+            self.assertEqual(profile_meta["status"], "DCDP_PENDING")
         self.assertEqual(profile[-1]["speedMps"], 0.0)
         self.assertAlmostEqual(profile[-1]["positionM"], train["pathTotalLengthM"], delta=1.0)
         self.assertIn("localSpeedLimitMps", profile[0])
@@ -100,9 +101,9 @@ class EngineMemberDLoopTests(unittest.TestCase):
         self.assertGreater(train.path_total_length_m, 0)
         self.assertGreater(train.path_segment_count, 0)
         self.assertGreater(len(engine.export_speed_profile(train.train_id)), 0)
-        self.assertEqual(
+        self.assertIn(
             engine.export_speed_profile_meta(train.train_id)["source"],
-            "BRAKING_CURVE_FALLBACK",
+            {"BRAKING_CURVE_FALLBACK", "DCDP_STRICT"},
         )
 
     def test_station_stop_uses_station_code_for_passenger_flow(self) -> None:

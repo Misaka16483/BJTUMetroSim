@@ -502,13 +502,13 @@ class SimulationEngine:
             return {"ok": False, "error": "INVALID_DIRECTION"}
         station_codes = [str(item.get("code", "")) for item in self._station_list]
         station_index = station_codes.index(initial_station_code)
-        required_start_index = 0 if direction == "UP" else len(station_codes) - 1
-        if station_index != required_start_index:
+        destination_index = len(station_codes) - 1 if direction == "UP" else 0
+        if station_index == destination_index:
             return {
                 "ok": False,
-                "error": "INITIAL_STATION_MUST_MATCH_DIRECTION_ORIGIN",
+                "error": "INITIAL_STATION_HAS_NO_FORWARD_ROUTE",
                 "stationCode": initial_station_code,
-                "requiredStationCode": station_codes[required_start_index],
+                "destinationStationCode": station_codes[destination_index],
                 "direction": direction,
             }
         operation_mode = str(payload.get("operationMode", "ATO")).upper()
@@ -1077,6 +1077,22 @@ class SimulationEngine:
                         energy_kwh=substation_flow.energy_kwh,
                         load_ratio=substation_flow.load_ratio,
                         status=substation_flow.status,
+                        detail={"tick": tick},
+                    )
+                for storage_flow in network_snapshot.supercapacitor_flows:
+                    self.recorder.record_supercapacitor_power(
+                        self._run_id,
+                        sim_time_ms=sim_time_ms,
+                        storage_id=storage_flow.storage_id,
+                        soc=storage_flow.soc,
+                        stored_energy_kwh=storage_flow.stored_energy_kwh,
+                        charge_power_kw=storage_flow.charge_power_kw,
+                        discharge_power_kw=storage_flow.discharge_power_kw,
+                        conversion_losses_kw=storage_flow.conversion_losses_kw,
+                        cumulative_charged_kwh=storage_flow.cumulative_charged_kwh,
+                        cumulative_discharged_kwh=storage_flow.cumulative_discharged_kwh,
+                        state=storage_flow.state,
+                        status=storage_flow.status,
                         detail={"tick": tick},
                     )
                 self.recorder.record_regen_energy(

@@ -80,6 +80,25 @@ class EngineMultiTrainManagementTests(unittest.TestCase):
         self.assertEqual(engine.trains[0].current_station_code, "GGZ")
         self.assertEqual(engine.trains[1].current_station_code, "GTG")
 
+    def test_add_train_from_intermediate_station_enters_directional_interval(self) -> None:
+        engine = load_engine("line9_single.json")
+        result = engine.add_train({
+            "trainId": "T-MIDDLE",
+            "initialStationCode": "QLZ",
+            "direction": "UP",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["train"]["currentStationCode"], "QLZ")
+        self.assertEqual(result["train"]["nextStationCode"], "LLQ")
+        engine.clock.start()
+        for _ in range(8):
+            engine._tick()
+        train = engine.snapshot().trains[0]
+        self.assertEqual(train["currentStationCode"], "QLZ")
+        self.assertEqual(train["nextStationCode"], "LLQ")
+        self.assertGreater(train["pathTotalLengthM"], 0.0)
+
     def test_manual_commands_and_vehicle_parameters_are_isolated_per_train(self) -> None:
         engine = load_engine("line9_single.json")
         for train_id, load in (("T-DYN-01", 100), ("T-DYN-02", 200)):

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from app.core.clock import ClockState
 from app.core.engine import SimulationEngine
+from app.domain.power.network_models import TrainElectricalLoad
 from app.infra.recorder import RunRecorder
 
 
@@ -52,11 +53,31 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
         )
         engine.load()
 
+        assert engine.power_service.solver is not None
+        charged = engine.power_service.solver.solve(
+            [TrainElectricalLoad(
+                "BRAKING",
+                "UP",
+                7000.0,
+                15.0,
+                aux_power_kw=100.0,
+                regen_power_available_kw=2200.0,
+            )],
+            dt_sec=10.0,
+        ).supercapacitor_flows[0]
+        self.assertGreater(charged.soc, 0.50)
+
         engine.apply_power_substation_outage("TS-0901")
         self.assertEqual(engine.power_service.network.substations["TS-0901"].status, "OUTAGE")
 
         engine.reset_power_network()
         self.assertEqual(engine.power_service.network.substations["TS-0901"].status, "IN_SERVICE")
+        assert engine.power_service.solver is not None
+        reset_storage = engine.power_service.solver.solve([], dt_sec=0.0).supercapacitor_flows[0]
+        self.assertAlmostEqual(reset_storage.soc, 0.50, places=9)
+        self.assertEqual(reset_storage.state, "STANDBY")
+        self.assertEqual(reset_storage.cumulative_charged_kwh, 0.0)
+        self.assertEqual(reset_storage.cumulative_discharged_kwh, 0.0)
 
     def test_engine_snapshot_and_recorder_include_power_network(self) -> None:
         test_dir = ROOT / "outputs" / "test-runtime"
@@ -93,11 +114,16 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
             self.assertIn("substations", snapshot.power_network)
             self.assertGreaterEqual(len(snapshot.power_network["substations"]), 10)
             self.assertIn("trainVoltages", snapshot.power_network)
+            self.assertIn("supercapacitorStorageSystems", snapshot.power_network)
+            self.assertEqual(len(snapshot.power_network["supercapacitorStorageSystems"]), 1)
+            self.assertIn("storageChargedKw", snapshot.power_network["regen"])
+            self.assertIn("storageDischargedKw", snapshot.power_network["regen"])
             self.assertIn("minTrainVoltageV", snapshot.kpi)
 
             with closing(sqlite3.connect(db_path)) as conn:
                 train_voltage_count = conn.execute("SELECT COUNT(*) FROM train_voltage_records").fetchone()[0]
                 substation_count = conn.execute("SELECT COUNT(*) FROM substation_power_records").fetchone()[0]
+                storage_record_count = conn.execute("SELECT COUNT(*) FROM supercapacitor_power_records").fetchone()[0]
                 regen_count = conn.execute("SELECT COUNT(*) FROM regen_energy_records").fetchone()[0]
                 regen_path_count = conn.execute("SELECT COUNT(*) FROM regen_path_records").fetchone()[0]
                 static_substation_count = conn.execute("SELECT COUNT(*) FROM traction_substations").fetchone()[0]
@@ -105,6 +131,7 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
                 static_contact_count = conn.execute("SELECT COUNT(*) FROM contact_rail_sections").fetchone()[0]
                 static_return_count = conn.execute("SELECT COUNT(*) FROM return_rail_sections").fetchone()[0]
                 static_switch_count = conn.execute("SELECT COUNT(*) FROM power_switches").fetchone()[0]
+                static_storage_count = conn.execute("SELECT COUNT(*) FROM supercapacitor_storage_systems").fetchone()[0]
                 solver_count = conn.execute("SELECT COUNT(*) FROM power_solver_records").fetchone()[0]
                 command_count = conn.execute("SELECT COUNT(*) FROM power_command_records").fetchone()[0]
                 run_metadata = conn.execute("SELECT metadata_json FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0]
@@ -114,6 +141,7 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
 
             self.assertGreater(train_voltage_count, 0)
             self.assertGreater(substation_count, 0)
+            self.assertGreater(storage_record_count, 0)
             self.assertGreater(regen_count, 0)
             self.assertGreater(regen_path_count, 0)
             self.assertGreaterEqual(static_substation_count, 10)
@@ -121,6 +149,7 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
             self.assertGreater(static_contact_count, 0)
             self.assertGreater(static_return_count, 0)
             self.assertGreater(static_switch_count, 0)
+            self.assertEqual(static_storage_count, 1)
             self.assertGreater(solver_count, 0)
             self.assertEqual(command_count, 1)
             self.assertEqual(json.loads(run_metadata)["powerModelVersion"], "LINE9-DC750-V1.0")
@@ -128,6 +157,7 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
             export = engine.export_current_run()
             self.assertGreater(len(export["tables"]["train_voltage_records"]), 0)
             self.assertGreater(len(export["tables"]["power_solver_records"]), 0)
+            self.assertGreater(len(export["tables"]["supercapacitor_power_records"]), 0)
             self.assertGreater(len(export["tables"]["regen_path_records"]), 0)
             replay_commands = recorder.replay_power_commands(engine._run_id)
             self.assertEqual(replay_commands[0]["commandType"], "OPERATE_SWITCH")

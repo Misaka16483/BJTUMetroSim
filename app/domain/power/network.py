@@ -9,6 +9,7 @@ from app.domain.power.network_models import (
     PowerSupplySection,
     PowerSwitch,
     ReturnRailSection,
+    SupercapacitorStorage,
     TractionSubstation,
 )
 
@@ -29,6 +30,7 @@ class TractionPowerNetwork:
         contact_sections: Iterable[ContactRailSection],
         return_sections: Iterable[ReturnRailSection],
         switches: Iterable[PowerSwitch],
+        supercapacitor_storages: Iterable[SupercapacitorStorage] = (),
     ) -> None:
         self.line_id = line_id
         self.nominal_voltage_v = nominal_voltage_v
@@ -43,6 +45,9 @@ class TractionPowerNetwork:
         self.contact_sections = {item.section_id: item for item in contact_sections}
         self.return_sections = {item.section_id: item for item in return_sections}
         self.switches = {item.switch_id: item for item in switches}
+        self.supercapacitor_storages = {
+            item.storage_id: item for item in supercapacitor_storages
+        }
         self.sections = self._build_supply_sections()
 
     @property
@@ -174,6 +179,27 @@ class TractionPowerNetwork:
                     "parameterSources": item.parameter_sources,
                 }
                 for item in self.ordered_substations
+            ],
+            "supercapacitorStorageSystems": [
+                {
+                    "storageId": item.storage_id,
+                    "substationId": item.substation_id,
+                    "ratedEnergyKwh": item.rated_energy_kwh,
+                    "maxChargePowerKw": item.max_charge_power_kw,
+                    "maxDischargePowerKw": item.max_discharge_power_kw,
+                    "dischargeTriggerPowerKw": item.discharge_trigger_power_kw,
+                    "initialSoc": item.initial_soc,
+                    "minSoc": item.min_soc,
+                    "maxSoc": item.max_soc,
+                    "chargeEfficiency": item.charge_efficiency,
+                    "dischargeEfficiency": item.discharge_efficiency,
+                    "standbyPowerKw": item.standby_power_kw,
+                    "status": item.status,
+                    "sourceId": item.source_id,
+                    "quality": item.quality,
+                    "parameterSources": item.parameter_sources,
+                }
+                for item in self.supercapacitor_storages.values()
             ],
             "feeders": [
                 {

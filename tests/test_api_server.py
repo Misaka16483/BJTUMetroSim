@@ -39,6 +39,11 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(topology["modelVersion"], "LINE9-DC750-V1.0")
         self.assertTrue(topology["provenance"]["sources"])
         self.assertTrue(topology["substations"][0]["parameterSources"])
+        self.assertEqual(len(topology["supercapacitorStorageSystems"]), 1)
+        storage = topology["supercapacitorStorageSystems"][0]
+        self.assertEqual(storage["storageId"], "SCESS-0905")
+        self.assertEqual(storage["dischargeTriggerPowerKw"], 1000.0)
+        self.assertEqual(storage["quality"], "ENGINEERING_ESTIMATE")
 
     def test_member_d_demo_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
