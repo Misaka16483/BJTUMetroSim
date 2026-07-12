@@ -185,22 +185,18 @@ class DriverCabHardwareController:
         # —— 首次连入: 武装人工模式 (只执行一次) ——
         if not self._ever_armed:
             self._ever_armed = True
-            mode_result = self.engine.set_manual_mode(self.train_id, True)
-            if not mode_result.get("ok"):
-                self._ever_armed = False
-                with self._lock:
-                    self._control_state = "WAITING_FOR_TRAIN"
-                    self._last_error = "T0901_NOT_FOUND"
-                    self._record_input_locked(input_state)
-                return mode_result
-            self._manual_mode_armed = True
-            # 武装后立刻下发一次零位指令避免残留牵引/制动
-            self.engine.set_manual_command(self.train_id, 0.0, 0.0)
-            with self._lock:
-                self._record_input_locked(input_state)
-                self._control_state = "ACTIVE"
-                self._last_error = None
-            return {"ok": True}
+            if not self._manual_mode_armed:
+                mode_result = self.engine.set_manual_mode(self.train_id, True)
+                if not mode_result.get("ok"):
+                    self._ever_armed = False
+                    with self._lock:
+                        self._control_state = "WAITING_FOR_TRAIN"
+                        self._last_error = "T0901_NOT_FOUND"
+                        self._record_input_locked(input_state)
+                    return mode_result
+                self._manual_mode_armed = True
+            # Apply the first valid PLC frame below instead of replacing it
+            # with a synthetic neutral command.
 
         # —— 人工模式下发司机操纵指令 ——
         driver_input = input_state.to_driver_input()
