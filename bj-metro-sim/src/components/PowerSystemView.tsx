@@ -75,6 +75,7 @@ export default function PowerSystemView() {
   const simPowerNetwork = useSimStore((s) => s.simPowerNetwork);
   const engineClockState = useSimStore((s) => s.engineClockState);
   const simTime = useSimStore((s) => s.simTime);
+  const trains = useSimStore((s) => s.trains);
   const [selectedSubstationId, setSelectedSubstationId] = useState<string>('');
   const [selectedSwitchId, setSelectedSwitchId] = useState<string>('');
   const [history, setHistory] = useState<HistoryPoint[]>([]);
@@ -265,6 +266,9 @@ export default function PowerSystemView() {
             )}
           </section>
 
+          <div className="flex items-center justify-end text-[9px]" style={{ color: 'var(--text-muted)' }}>
+            指标卡为当前瞬时值；趋势图保留最近 {history.length} 个仿真采样点
+          </div>
           <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <Metric label="最低列车电压" value={fmt(minVoltageTrain?.voltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? 750) < 650 ? 'var(--amber)' : 'var(--green)'} />
             <Metric label="最大牵引所负载" value={fmt((busiestSubstation?.loadRatio ?? 0) * 100, 1)} unit="%" color={(busiestSubstation?.loadRatio ?? 0) >= 0.85 ? 'var(--amber)' : 'var(--cyan)'} />
@@ -277,7 +281,7 @@ export default function PowerSystemView() {
           </section>
 
           <section className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <TrendPanel title="电压与负载" subtitle="最低列车电压 / 最大牵引所负载">
+            <TrendPanel title="电压与负载" subtitle="历史窗口：最低列车电压 / 最大牵引所负载">
               <TrendChart
                 points={history}
                 events={events}
@@ -287,7 +291,7 @@ export default function PowerSystemView() {
                 ]}
               />
             </TrendPanel>
-            <TrendPanel title="功率与能量" subtitle="正值为整流供电，负值为回馈上网（kW）">
+            <TrendPanel title="功率与能量" subtitle="历史窗口：正值整流供电，负值回馈上网（kW）">
               <TrendChart
                 points={history}
                 events={events}
@@ -320,16 +324,30 @@ export default function PowerSystemView() {
             />
             <DataTable
               title="列车受电状态"
-              columns={['列车', '公里标', '电压/V', '电流/A', '限牵系数', '电压等级']}
-              rows={trainVoltages.map((item) => [
-                item.trainId,
-                fmt((item.mileageM ?? 0) / 1000, 3),
-                fmt(item.voltageV, 0),
-                fmt(item.currentA, 0),
-                `${fmt(item.tractionLimitRatio * 100, 0)}%`,
-                item.voltageLevel,
-              ])}
-              statusColumn={5}
+              columns={['列车', '阶段', '控制指令', '牵引/kW', '再生/kW', '电压/V', '电流/A', '限牵', '等级']}
+              rows={trainVoltages.map((item) => {
+                const train = trains.find((candidate) => candidate.trainId === item.trainId);
+                const traction = train?.tractionPercent ?? 0;
+                const brake = train?.brakePercent ?? 0;
+                const command = brake > 0
+                  ? `制动 ${fmt(brake, 0)}%`
+                  : traction > 0
+                    ? `牵引 ${fmt(traction, 0)}%`
+                    : '惰行/停站';
+                return [
+                  item.trainId,
+                  train?.phase ?? '-',
+                  command,
+                  fmt(train?.tractionPowerDeliveredKw, 0),
+                  fmt(train?.regenPowerAvailableKw, 0),
+                  fmt(item.voltageV, 0),
+                  fmt(item.currentA, 0),
+                  `${fmt(item.tractionLimitRatio * 100, 0)}%`,
+                  item.voltageLevel,
+                ];
+              })}
+              statusColumn={8}
+              minWidthPx={760}
             />
           </section>
           <section className="grid grid-cols-1 lg:grid-cols-[1fr_1.25fr] gap-3">
@@ -692,12 +710,14 @@ function DataTable({
   columns,
   rows,
   statusColumn,
+  minWidthPx,
 }: {
   title: string;
   toolbar?: ReactNode;
   columns: string[];
   rows: string[][];
   statusColumn?: number;
+  minWidthPx?: number;
 }) {
   return (
     <section className="glass p-4 min-w-0">
@@ -709,7 +729,7 @@ function DataTable({
         </div>
       </div>
       <div className="overflow-auto max-h-[280px]">
-        <table className="w-full text-[11px]">
+        <table className="w-full text-[11px]" style={minWidthPx ? { minWidth: minWidthPx } : undefined}>
           <thead>
             <tr className="text-left" style={{ color: 'var(--text-muted)' }}>
               {columns.map((column) => <th key={column} className="py-1.5 pr-2 font-medium">{column}</th>)}

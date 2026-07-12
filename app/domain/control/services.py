@@ -34,6 +34,9 @@ class ATOController:
         self.last_speed_error_mps: float = 0.0
         self.last_pid_output_percent: float = 0.0
         self.last_profile_mode: str = "NONE"
+        self._last_command: ControlCommand | None = None
+        self._last_command_sim_time_s: float | None = None
+        self._terminal_braking_latched = False
 
     def decide(self, state: TrainState, target: AtoTarget) -> ControlCommand:
         if target.emergency_brake_required:
@@ -48,16 +51,19 @@ class ATOController:
             self.last_speed_error_mps = -state.speed_mps
             self.last_pid_output_percent = 0.0
             if state.speed_mps <= self.config.stop_speed_threshold_mps:
-                return ControlCommand(
+                command = ControlCommand(
                     state.train_id,
                     brake_percent=self.config.hold_brake_percent,
                     source=CommandSource.ATO,
                 )
-            return ControlCommand(
+                self._last_command = command
+                self._last_command_sim_time_s = state.sim_time_s
+                return command
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 brake_percent=self.config.max_brake_percent,
                 source=CommandSource.ATO,
-            )
+            ))
 
         if (
             distance_to_target_m <= self.config.creep_distance_m
@@ -67,11 +73,14 @@ class ATOController:
             self.last_speed_error_mps = self.config.creep_speed_threshold_mps - state.speed_mps
             self.last_pid_output_percent = self.config.creep_traction_percent
             self.last_profile_mode = "CREEP"
-            return ControlCommand(
+            command = ControlCommand(
                 state.train_id,
                 traction_percent=self.config.creep_traction_percent,
                 source=CommandSource.ATO,
             )
+            self._last_command = command
+            self._last_command_sim_time_s = state.sim_time_s
+            return command
 
         target_speed_mps = self.target_speed_mps(state, target)
         brake_distance_m = state.speed_mps * state.speed_mps / (2.0 * self.config.expected_deceleration_mps2)
@@ -85,27 +94,31 @@ class ATOController:
             self.last_target_speed_mps = target_speed_mps
             self.last_speed_error_mps = target_speed_mps - state.speed_mps
             self.last_pid_output_percent = -brake_percent
-            return ControlCommand(
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 brake_percent=brake_percent,
                 source=CommandSource.ATO,
-            )
+            ))
 
         pid_output_percent = self._pid_output_percent(state, target_speed_mps)
         pid_output_percent = self._apply_profile_feedforward(state, target, target_speed_mps, pid_output_percent)
         if pid_output_percent > 0:
-            return ControlCommand(
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 traction_percent=pid_output_percent,
                 source=CommandSource.ATO,
-            )
+            ))
         if pid_output_percent < 0:
-            return ControlCommand(
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 brake_percent=abs(pid_output_percent),
                 source=CommandSource.ATO,
-            )
-        return ControlCommand.coast(state.train_id, source=CommandSource.ATO)
+            ))
+        return self._stabilize_command(
+            state,
+            target,
+            ControlCommand.coast(state.train_id, source=CommandSource.ATO),
+        )
 
     def reset(self) -> None:
         self._last_train_id = None
@@ -116,6 +129,9 @@ class ATOController:
         self._profile_cache_key = None
         self._profile_cache = None
         self.last_profile_mode = "NONE"
+        self._last_command = None
+        self._last_command_sim_time_s = None
+        self._terminal_braking_latched = False
 
     @property
     def current_profile(self) -> OptimizedSpeedProfile | None:
@@ -314,6 +330,77 @@ class ATOController:
         self.last_speed_error_mps = speed_error_mps
         self.last_pid_output_percent = pid_output_percent
         return pid_output_percent
+
+    def _stabilize_command(
+        self,
+        state: TrainState,
+        target: AtoTarget,
+        requested: ControlCommand,
+    ) -> ControlCommand:
+        """Apply terminal-brake hysteresis and actuator-realistic slew limits."""
+        if self._last_command_sim_time_s is None:
+            dt_s = self.config.control_period_s
+        else:
+            dt_s = max(state.sim_time_s - self._last_command_sim_time_s, 1e-6)
+        target_position_m = self._target_position_m(target)
+        remaining_distance_m = max(0.0, target_position_m - state.position_m)
+        braking_distance_m = state.speed_mps * state.speed_mps / (
+            2.0 * self.config.expected_deceleration_mps2
+        )
+        in_terminal_braking_zone = (
+            remaining_distance_m
+            <= braking_distance_m + self.config.brake_margin_m + self.config.terminal_brake_guard_margin_m
+        )
+        if requested.brake_percent > 0 and in_terminal_braking_zone:
+            self._terminal_braking_latched = True
+
+        creep_allowed = (
+            remaining_distance_m <= self.config.creep_distance_m
+            and state.speed_mps <= self.config.creep_speed_threshold_mps
+        )
+        desired_traction = requested.traction_percent
+        desired_brake = requested.brake_percent
+        if self._terminal_braking_latched and desired_traction > 0 and not creep_allowed:
+            desired_traction = 0.0
+            desired_brake = 0.0
+
+        previous_traction = self._last_command.traction_percent if self._last_command is not None else 0.0
+        previous_brake = self._last_command.brake_percent if self._last_command is not None else 0.0
+        traction_step = self.config.traction_slew_rate_percent_per_s * dt_s
+        brake_apply_step = self.config.brake_apply_slew_rate_percent_per_s * dt_s
+        brake_release_step = self.config.brake_release_slew_rate_percent_per_s * dt_s
+
+        if desired_brake > 0:
+            traction = 0.0
+            if desired_brake >= previous_brake:
+                brake = min(desired_brake, previous_brake + brake_apply_step)
+            else:
+                brake = max(desired_brake, previous_brake - brake_release_step)
+        elif desired_traction > 0 and previous_brake > 0:
+            traction = 0.0
+            brake = max(0.0, previous_brake - brake_release_step)
+        elif desired_traction > 0:
+            brake = 0.0
+            if desired_traction >= previous_traction:
+                traction = min(desired_traction, previous_traction + traction_step)
+            else:
+                traction = max(desired_traction, previous_traction - traction_step)
+        elif previous_brake > 0:
+            traction = 0.0
+            brake = max(0.0, previous_brake - brake_release_step)
+        else:
+            brake = 0.0
+            traction = max(0.0, previous_traction - traction_step)
+
+        stabilized = ControlCommand(
+            state.train_id,
+            traction_percent=traction,
+            brake_percent=brake,
+            source=requested.source,
+        )
+        self._last_command = stabilized
+        self._last_command_sim_time_s = state.sim_time_s
+        return stabilized
 
     def _control_period_s(self, state: TrainState) -> float:
         if self._last_train_id != state.train_id or self._last_sim_time_s is None:

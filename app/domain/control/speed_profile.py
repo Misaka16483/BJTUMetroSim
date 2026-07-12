@@ -62,6 +62,10 @@ class _SearchNode:
     state: TrainState
     cost_kwh: float
     path: tuple[SpeedProfilePoint, ...]
+    control_penalty: float = 0.0
+    mode_group: str = "NEUTRAL"
+    mode_hold_steps: int = 0
+    terminal_braking_started: bool = False
 
 
 def stopping_target_speed_mps(
@@ -137,7 +141,7 @@ def optimize_speed_profile_dcdp(
     overshoot_tolerance_m = min(0.05, terminal_tolerance_m * 0.1)
     initial = TrainState(config.train_id, position_m=0.0, speed_mps=0.0, acceleration_mps2=0.0, sim_time_s=0.0)
     initial_point = SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0)
-    states: dict[tuple[int, int], _SearchNode] = {
+    states: dict[tuple[object, ...], _SearchNode] = {
         (0, 0): _SearchNode(state=initial, cost_kwh=0.0, path=(initial_point,))
     }
     terminal_candidates: list[_SearchNode] = []
@@ -149,10 +153,13 @@ def optimize_speed_profile_dcdp(
     )
 
     for stage in range(stages):
-        next_states: dict[tuple[int, int], _SearchNode] = {}
+        next_states: dict[tuple[object, ...], _SearchNode] = {}
         remaining_stages = stages - stage
         for node in states.values():
             for mode, command in _candidate_commands(config.train_id, node.state.speed_mps, config):
+                mode_group = _command_group(command)
+                if not _transition_allowed(node, mode_group):
+                    continue
                 gradient_force_n = _gradient_force_n(node.state.position_m, path_plan, config)
                 next_state = vehicle.step(node.state, command, dt_s=dt_s, gradient_force_n=gradient_force_n)
                 local_speed_limit_mps = _speed_limit_at_position(next_state.position_m, permitted_speed_mps, path_plan)
@@ -185,7 +192,21 @@ def optimize_speed_profile_dcdp(
                 ):
                     continue
 
-                key = _discrete_key(next_state.position_m, next_state.speed_mps, position_step_m, speed_step_mps)
+                terminal_braking_started = node.terminal_braking_started or (
+                    mode_group == "BRAKE"
+                    and _inside_terminal_braking_zone(
+                        node.state,
+                        effective_target_position_m,
+                        dp_deceleration_mps2,
+                        position_step_m * 2.0,
+                    )
+                )
+                mode_hold_steps = node.mode_hold_steps + 1 if mode_group == node.mode_group else 1
+                key = _discrete_key(next_state.position_m, next_state.speed_mps, position_step_m, speed_step_mps) + (
+                    mode_group,
+                    min(mode_hold_steps, 3),
+                    terminal_braking_started,
+                )
                 point = SpeedProfilePoint(
                     sim_time_s=round(next_state.sim_time_s, 6),
                     position_m=round(next_state.position_m, 6),
@@ -199,6 +220,10 @@ def optimize_speed_profile_dcdp(
                     state=next_state,
                     cost_kwh=next_state.net_energy_kwh,
                     path=node.path + (point,),
+                    control_penalty=node.control_penalty + _transition_penalty(node, next_state, mode_group),
+                    mode_group=mode_group,
+                    mode_hold_steps=mode_hold_steps,
+                    terminal_braking_started=terminal_braking_started,
                 )
                 if _is_terminal_candidate(
                     candidate,
@@ -333,6 +358,46 @@ def _discrete_key(position_m: float, speed_mps: float, position_step_m: float, s
     return (int(round(position_m / position_step_m)), int(round(speed_mps / speed_step_mps)))
 
 
+def _command_group(command: ControlCommand) -> str:
+    if command.brake_percent > 0 or command.emergency_brake:
+        return "BRAKE"
+    if command.traction_percent > 0:
+        return "TRACTION"
+    return "NEUTRAL"
+
+
+def _transition_allowed(node: _SearchNode, next_group: str) -> bool:
+    if node.terminal_braking_started and next_group == "TRACTION":
+        return False
+    if {node.mode_group, next_group} == {"TRACTION", "BRAKE"}:
+        return False
+    if (
+        node.mode_group not in {"NEUTRAL", next_group}
+        and next_group != "BRAKE"
+        and node.mode_hold_steps < 2
+    ):
+        return False
+    return True
+
+
+def _inside_terminal_braking_zone(
+    state: TrainState,
+    target_position_m: float,
+    deceleration_mps2: float,
+    guard_margin_m: float,
+) -> bool:
+    remaining_distance_m = max(0.0, target_position_m - state.position_m)
+    stopping_distance_m = state.speed_mps * state.speed_mps / (2.0 * max(deceleration_mps2, 0.1))
+    return remaining_distance_m <= stopping_distance_m + guard_margin_m
+
+
+def _transition_penalty(node: _SearchNode, next_state: TrainState, next_group: str) -> float:
+    group_switch_penalty = 0.0 if next_group == node.mode_group else 12.0
+    acceleration_change = abs(next_state.acceleration_mps2 - node.state.acceleration_mps2)
+    short_hold_penalty = 8.0 if next_group != node.mode_group and node.mode_hold_steps < 2 else 0.0
+    return group_switch_penalty + short_hold_penalty + acceleration_change * 6.0
+
+
 def _state_score(
     node: _SearchNode,
     target_position_m: float,
@@ -351,7 +416,14 @@ def _state_score(
     overshoot_penalty = overshoot_risk_m * 120.0
     terminal_speed_penalty = max(0.0, progress - 0.75) * node.state.speed_mps * 10.0
     energy_tiebreaker = node.cost_kwh * 0.0001
-    return position_penalty + speed_penalty + overshoot_penalty + terminal_speed_penalty + energy_tiebreaker
+    return (
+        position_penalty
+        + speed_penalty
+        + overshoot_penalty
+        + terminal_speed_penalty
+        + node.control_penalty
+        + energy_tiebreaker
+    )
 
 
 def _terminal_score(
@@ -369,6 +441,7 @@ def _terminal_score(
         + position_error_m * 5_000.0
         + speed_error_mps * 5_000.0
         + time_error_s * 2.0
+        + node.control_penalty
         + node.cost_kwh * 0.001
     )
 
@@ -383,7 +456,13 @@ def _incomplete_terminal_score(
     speed_error_mps = max(0.0, node.state.speed_mps - stop_speed_threshold_mps)
     overshoot_m = max(0.0, node.state.position_m - target_position_m)
     time_error_s = abs(node.state.sim_time_s - scheduled_run_time_s)
-    return overshoot_m * 50_000.0 + position_error_m * 5_000.0 + speed_error_mps * 5_000.0 + time_error_s
+    return (
+        overshoot_m * 50_000.0
+        + position_error_m * 5_000.0
+        + speed_error_mps * 5_000.0
+        + time_error_s
+        + node.control_penalty
+    )
 
 
 def _is_terminal_candidate(
@@ -443,13 +522,13 @@ def _can_still_reach_target(
 
 
 def _prune_states(
-    states: dict[tuple[int, int], _SearchNode],
+    states: dict[tuple[object, ...], _SearchNode],
     target_position_m: float,
     stages: int,
     stage: int,
     max_states: int,
     reference_profile: OptimizedSpeedProfile,
-) -> dict[tuple[int, int], _SearchNode]:
+) -> dict[tuple[object, ...], _SearchNode]:
     if len(states) <= max_states:
         return states
     ordered = sorted(

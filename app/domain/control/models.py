@@ -74,6 +74,10 @@ class AtoConfig:
     pid_derivative_filter_ratio: float = 0.65
     pid_deadband_mps: float = 0.08
     service_brake_trigger_margin_mps: float = 0.35
+    traction_slew_rate_percent_per_s: float = 30.0
+    brake_apply_slew_rate_percent_per_s: float = 50.0
+    brake_release_slew_rate_percent_per_s: float = 35.0
+    terminal_brake_guard_margin_m: float = 35.0
     creep_distance_m: float = 5.0
     creep_speed_threshold_mps: float = 0.15
     creep_traction_percent: float = 3.0
@@ -118,6 +122,14 @@ class AtoConfig:
             raise ValueError("pid_deadband_mps must be non-negative")
         if self.service_brake_trigger_margin_mps < 0:
             raise ValueError("service_brake_trigger_margin_mps must be non-negative")
+        if self.traction_slew_rate_percent_per_s <= 0:
+            raise ValueError("traction_slew_rate_percent_per_s must be positive")
+        if self.brake_apply_slew_rate_percent_per_s <= 0:
+            raise ValueError("brake_apply_slew_rate_percent_per_s must be positive")
+        if self.brake_release_slew_rate_percent_per_s <= 0:
+            raise ValueError("brake_release_slew_rate_percent_per_s must be positive")
+        if self.terminal_brake_guard_margin_m < 0:
+            raise ValueError("terminal_brake_guard_margin_m must be non-negative")
         if self.creep_distance_m < self.stop_tolerance_m:
             raise ValueError("creep_distance_m must be at least stop_tolerance_m")
         if self.creep_speed_threshold_mps <= self.stop_speed_threshold_mps:

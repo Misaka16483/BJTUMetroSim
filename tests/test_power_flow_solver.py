@@ -104,6 +104,47 @@ class DCTractionPowerFlowSolverTests(unittest.TestCase):
             delta=traction.requested_power_kw * 0.01,
         )
 
+    def test_regen_supplies_nearby_stopped_train_auxiliary_load(self) -> None:
+        solver = DCTractionPowerFlowSolver(_network())
+
+        snapshot = solver.solve(
+            [
+                TrainElectricalLoad(
+                    "STOPPED",
+                    "UP",
+                    2200.0,
+                    0.0,
+                    aux_power_kw=150.0,
+                ),
+                TrainElectricalLoad(
+                    "BRAKING",
+                    "UP",
+                    2450.0,
+                    18.0,
+                    aux_power_kw=150.0,
+                    regen_power_available_kw=1200.0,
+                ),
+            ],
+            dt_sec=1.0,
+        )
+
+        transfer = next(
+            item
+            for item in snapshot.regen_paths
+            if item.sink_type == "TRAIN" and item.sink_id == "STOPPED"
+        )
+        self.assertGreater(transfer.delivered_kw, 0.0)
+        self.assertLessEqual(transfer.delivered_kw, 150.0)
+        self.assertAlmostEqual(
+            snapshot.generated_regen_kw,
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
+            + snapshot.feedback_regen_kw
+            + snapshot.regen_transfer_losses_kw
+            + snapshot.wasted_regen_kw,
+            places=6,
+        )
+
     def test_regen_is_not_absorbed_across_disconnected_supply_paths(self) -> None:
         network = _network()
         solver = DCTractionPowerFlowSolver(network)
