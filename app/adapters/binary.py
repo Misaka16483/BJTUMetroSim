@@ -141,6 +141,47 @@ class TcpFrameClient:
         self._socket.sendall(frame)
 
 
+@dataclass
+class UdpFrameClient:
+    host: str
+    port: int
+    timeout_s: float = 3.0
+
+    def __post_init__(self) -> None:
+        if not self.host:
+            raise ValueError("host must not be empty")
+        if self.port <= 0 or self.port > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        if self.timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        self._socket: socket.socket | None = None
+
+    def connect(self) -> None:
+        if self._socket is not None:
+            return
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.settimeout(self.timeout_s)
+        self._socket.connect((self.host, self.port))
+
+    def close(self) -> None:
+        if self._socket is None:
+            return
+        self._socket.close()
+        self._socket = None
+
+    def __enter__(self) -> UdpFrameClient:
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def send_frame(self, frame: bytes) -> None:
+        if self._socket is None:
+            raise RuntimeError("UDP client is not connected")
+        self._socket.sendall(frame)
+
+
 def _padded(values: list[T], count: int, default: T) -> list[T]:
     if len(values) > count:
         raise ValueError(f"expected at most {count} values")

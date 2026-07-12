@@ -725,8 +725,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     hmi_parser = subparsers.add_parser("hmi-send-demo", help="Send one 572-byte network screen HMI frame")
     hmi_parser.add_argument("--host", default="192.168.100.122", help="HMI server IP address")
-    hmi_parser.add_argument("--port", type=int, default=8888, help="HMI server TCP port")
-    hmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
+    hmi_parser.add_argument("--port", type=int, default=8888, help="HMI server UDP port")
+    hmi_parser.add_argument("--timeout", type=float, default=3.0, help="UDP socket timeout in seconds")
     hmi_parser.add_argument("--curr-station", type=int, default=0, help="Current station id")
     hmi_parser.add_argument("--next-station", type=int, default=0, help="Next station id")
     hmi_parser.add_argument("--end-station", type=int, default=0, help="End station id")
@@ -741,8 +741,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     mmi_parser = subparsers.add_parser("mmi-send-demo", help="Send one 66-byte signal screen MMI frame")
     mmi_parser.add_argument("--host", default="192.168.100.121", help="MMI server IP address")
-    mmi_parser.add_argument("--port", type=int, default=9999, help="MMI server TCP port")
-    mmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
+    mmi_parser.add_argument("--port", type=int, default=9999, help="MMI server UDP port")
+    mmi_parser.add_argument("--timeout", type=float, default=3.0, help="UDP socket timeout in seconds")
     mmi_parser.add_argument("--curr-station", type=int, default=0, help="Current station id")
     mmi_parser.add_argument("--next-station", type=int, default=0, help="Next station id")
     mmi_parser.add_argument("--end-station", type=int, default=0, help="End station id")

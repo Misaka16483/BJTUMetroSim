@@ -144,7 +144,7 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["manualMode"])
         status = controller.status()["status"]
-        self.assertEqual(status["controlState"], "ACTIVE")
+        self.assertEqual(status["controlState"], "ATO_ACTIVE")
         self.assertTrue(status["lastInput"]["atoStart"])
         train = next(train for train in self.engine.trains if train.train_id == "T0901")
         self.assertEqual(train.operation_mode, "ATO")
@@ -157,7 +157,7 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertEqual(released["message"], "ATO_ACTIVE")
         self.assertFalse(released["manualMode"])
         status = controller.status()["status"]
-        self.assertEqual(status["controlState"], "ACTIVE")
+        self.assertEqual(status["controlState"], "ATO_ACTIVE")
         self.assertIsNone(status["lastError"])
         self.assertIsNone(status["lastCommand"])
         self.assertEqual(train.operation_mode, "ATO")
