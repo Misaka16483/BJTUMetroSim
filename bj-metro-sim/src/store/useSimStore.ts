@@ -14,8 +14,9 @@ import type {
   VehicleConfigPayload,
   VehicleConfigResponse,
   AddTrainPayload,
+  DriverCabHardwareStatus,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow';
 
@@ -166,6 +167,10 @@ interface SimState {
   setManualMode: (enabled: boolean, trainId?: string) => Promise<void>;
   sendManualCommand: (traction: number, brake: number) => void;
   _lastManualSend: number;
+
+  // 司机台硬件状态 (PLC)
+  cabStatus: DriverCabHardwareStatus | null;
+  fetchCabStatus: () => Promise<void>;
 
   // 线路管理
   setMetroLines: (lines: MetroLineData[]) => void;
@@ -499,6 +504,14 @@ export const useSimStore = create<SimState>((set, get) => ({
   manualTraction: 0,
   manualBrake: 0,
   _lastManualSend: 0,
+
+  cabStatus: null as DriverCabHardwareStatus | null,
+  fetchCabStatus: async () => {
+    try {
+      const response = await fetchDriverCabStatus();
+      if (response.ok) set({ cabStatus: response.status });
+    } catch { /* 静默失败, 硬件未连接时保持 null */ }
+  },
 
   toggleRunning: () => {
     const state = get();

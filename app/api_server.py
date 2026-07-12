@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from app.adapters.cab import DriverCabHardwareController
 from app.core.engine import SimulationEngine
 from app.domain.line.services import LineMapRepository, LineScope, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
@@ -424,6 +425,8 @@ class ApiHandler(BaseHTTPRequestHandler):
     engine: SimulationEngine | None = None
     ws_broadcaster: WebSocketBroadcaster | None = None
     experiment_registry: PowerExperimentRegistry | None = None
+    cab_hardware_controller: DriverCabHardwareController | None = None
+    cab_hardware_lock = threading.RLock()
 
     def do_GET(self) -> None:
         try:
@@ -451,6 +454,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(snap.dispatch_runtime if snap else {
                     "registeredTrainCount": 0, "departureCount": 0, "recentDepartures": []
                 })
+            elif path == "/api/hardware/driver-cab/status":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(controller.status())
             elif path == "/api/passenger-sim/state":
                 self._send_json(self.service.passenger_sim.snapshot())
             elif path == "/api/sim/power/state":
@@ -585,6 +594,26 @@ class ApiHandler(BaseHTTPRequestHandler):
                     float(payload.get("tractionPercent", 0)),
                     float(payload.get("brakePercent", 0)),
                 ))
+            elif path == "/api/hardware/driver-cab/connect":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    payload = self._read_json_body()
+                    try:
+                        result = controller.connect(
+                            host=str(payload["host"]) if payload.get("host") is not None else None,
+                            port=int(payload["port"]) if payload.get("port") is not None else None,
+                        )
+                        self._send_json(result, HTTPStatus.ACCEPTED)
+                    except (TypeError, ValueError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/hardware/driver-cab/disconnect":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(controller.disconnect())
             elif path == "/api/sim/power/faults":
                 payload = self._read_json_body()
                 self._send_json(self._apply_power_fault(payload))
@@ -780,6 +809,18 @@ class ApiHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
 
+    def _driver_cab_controller(self) -> DriverCabHardwareController | None:
+        if self.engine is None:
+            return None
+        with ApiHandler.cab_hardware_lock:
+            controller = ApiHandler.cab_hardware_controller
+            if controller is None or controller.engine is not self.engine:
+                if controller is not None:
+                    controller.disconnect()
+                controller = DriverCabHardwareController(self.engine)
+                ApiHandler.cab_hardware_controller = controller
+            return controller
+
     @classmethod
     def _power_experiment_registry(cls) -> PowerExperimentRegistry:
         if cls.experiment_registry is None:
@@ -936,6 +977,8 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        if ApiHandler.cab_hardware_controller:
+            ApiHandler.cab_hardware_controller.disconnect()
         if ApiHandler.engine:
             ApiHandler.engine.stop()
 

@@ -670,3 +670,64 @@ export function simSendTrainManualCommand(trainId: string, tractionPercent: numb
     return resp.json();
   });
 }
+
+export type DriverCabConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+
+export interface DriverCabHardwareStatus {
+  state: DriverCabConnectionState;
+  host: string;
+  port: number;
+  trainId: string;
+  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'FAIL_SAFE_BRAKE';
+  framesReceived: number;
+  connectedAt: string | null;
+  lastFrameAt: string | null;
+  lastError: string | null;
+  lastInput: {
+    speedMps: number;
+    direction: string;
+    handleCode: number;
+    tractionPercent: number;
+    brakePercent: number;
+    emergencyBrake: boolean;
+    keyActive: boolean;
+    atoStart: boolean;
+  } | null;
+  lastCommand: {
+    tractionPercent: number;
+    brakePercent: number;
+    emergencyBrake: boolean;
+    handleMode: string;
+  } | null;
+}
+
+export interface DriverCabHardwareResponse {
+  ok: boolean;
+  status: DriverCabHardwareStatus;
+  error?: string;
+}
+
+export function fetchDriverCabStatus(): Promise<DriverCabHardwareResponse> {
+  return getJson<DriverCabHardwareResponse>('/api/hardware/driver-cab/status');
+}
+
+export function connectDriverCab(host?: string, port?: number): Promise<DriverCabHardwareResponse> {
+  const body: Record<string, unknown> = {};
+  if (host) body.host = host;
+  if (port) body.port = port;
+  return fetch('/api/hardware/driver-cab/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export function disconnectDriverCab(): Promise<DriverCabHardwareResponse> {
+  return fetch('/api/hardware/driver-cab/disconnect', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
