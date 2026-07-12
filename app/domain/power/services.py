@@ -28,6 +28,11 @@ class TrainPowerRequest:
     position_m: float | None = None
     direction: str = "UP"
     aux_power_kw: float = 150.0
+    head_mileage_m: float | None = None
+    tail_mileage_m: float | None = None
+    pantograph_mileages_m: tuple[float, ...] = ()
+    traction_power_request_kw: float | None = None
+    regen_power_available_kw: float | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,8 @@ class PowerState:
     regen_energy_kwh: float
     absorbed_regen_kw: float
     wasted_regen_kw: float
+    generated_regen_kw: float = 0.0
+    self_consumed_regen_kw: float = 0.0
     source: str = "SELF_SIM"
     quality: str = "ENGINEERING_ESTIMATE"
     min_train_voltage_v: float = 750.0
@@ -72,6 +79,10 @@ class PowerService:
         self.network = network
         self.solver = DCTractionPowerFlowSolver(network) if network is not None else None
         self.last_network_snapshot: PowerFlowSnapshot | None = None
+        self.last_valid_network_snapshot: PowerFlowSnapshot | None = None
+        self.last_failed_network_snapshot: PowerFlowSnapshot | None = None
+        self.last_solver_failure: dict | None = None
+        self.max_balance_error_ratio = 0.01
         self._energy_kwh_by_section: dict[str, float] = {section.power_section_id: 0.0 for section in sections}
         self._regen_kwh_by_section: dict[str, float] = {section.power_section_id: 0.0 for section in sections}
         self._overload_duration_sec: dict[str, float] = {}
@@ -98,9 +109,14 @@ class PowerService:
         for section_id, section in self.sections.items():
             section_requests = requests_by_section.get(section_id, [])
             gross_traction_kw = sum(self._traction_power_kw(item) for item in section_requests)
-            generated_regen_kw = sum(self._regen_power_kw(item) for item in section_requests)
-            absorbed_regen_kw = min(generated_regen_kw, gross_traction_kw, section.regen_absorb_limit_kw)
-            wasted_regen_kw = max(generated_regen_kw - absorbed_regen_kw, 0.0)
+            generated_regen_kw = sum(self._raw_regen_power_kw(item) for item in section_requests)
+            self_consumed_regen_kw = sum(
+                min(self._raw_regen_power_kw(item), item.aux_power_kw)
+                for item in section_requests
+            )
+            exported_regen_kw = max(generated_regen_kw - self_consumed_regen_kw, 0.0)
+            absorbed_regen_kw = min(exported_regen_kw, gross_traction_kw, section.regen_absorb_limit_kw)
+            wasted_regen_kw = max(exported_regen_kw - absorbed_regen_kw, 0.0)
             net_requested_kw = max(gross_traction_kw - absorbed_regen_kw, 0.0)
 
             self._energy_kwh_by_section[section_id] += net_requested_kw * dt_sec / 3600.0
@@ -117,6 +133,8 @@ class PowerService:
                 regen_energy_kwh=self._regen_kwh_by_section[section_id],
                 absorbed_regen_kw=absorbed_regen_kw,
                 wasted_regen_kw=wasted_regen_kw,
+                generated_regen_kw=generated_regen_kw,
+                self_consumed_regen_kw=self_consumed_regen_kw,
             )
         return states
 
@@ -137,23 +155,56 @@ class PowerService:
                 aux_power_kw=request.aux_power_kw,
                 traction_efficiency=self.traction_efficiency,
                 regen_efficiency=self.regen_efficiency,
+                traction_power_request_kw=request.traction_power_request_kw,
+                regen_power_available_kw=request.regen_power_available_kw,
+                head_mileage_m=request.head_mileage_m,
+                tail_mileage_m=request.tail_mileage_m,
+                pantograph_mileages_m=request.pantograph_mileages_m,
             )
             for request in requests
         ]
         snapshot = self.solver.solve(loads, dt_sec=dt_sec, sim_time_ms=sim_time_ms) if self.solver else None
-        self.last_network_snapshot = snapshot
         if snapshot is None:
             return self._update_legacy(requests, dt_sec)
-        self._apply_protection(snapshot, dt_sec)
+        protection_events = self._apply_protection(snapshot, dt_sec)
+        if protection_events and self.solver is not None:
+            snapshot = self.solver.solve(loads, dt_sec=0.0, sim_time_ms=sim_time_ms)
+            snapshot.alerts.extend(protection_events)
+
+        failure_reasons: list[str] = []
+        if not snapshot.converged:
+            failure_reasons.append("NOT_CONVERGED")
+        if snapshot.power_balance_error_ratio > self.max_balance_error_ratio:
+            failure_reasons.append("POWER_BALANCE_EXCEEDED")
+        accounting_dt_sec = dt_sec
+        if failure_reasons:
+            self.last_failed_network_snapshot = snapshot
+            self.last_solver_failure = {
+                "type": "POWER_SOLVER_FAILURE",
+                "reasons": failure_reasons,
+                "simTimeMs": sim_time_ms,
+                "iterations": snapshot.iterations,
+                "powerBalanceErrorRatio": snapshot.power_balance_error_ratio,
+            }
+            if self.last_valid_network_snapshot is not None:
+                snapshot = self.last_valid_network_snapshot
+                accounting_dt_sec = 0.0
+            else:
+                self.last_network_snapshot = None
+                return self._update_legacy(requests, 0.0)
+        else:
+            self.last_solver_failure = None
+            self.last_valid_network_snapshot = snapshot
+        self.last_network_snapshot = snapshot
 
         request_section_by_train = {request.train_id: request.power_section_id for request in requests}
+        requests_by_train = {request.train_id: request for request in requests}
         flows_by_section: dict[str, list] = {section_id: [] for section_id in self.sections}
         for flow in snapshot.trains:
             legacy_section_id = request_section_by_train.get(flow.train_id, flow.power_section_id)
             flows_by_section.setdefault(legacy_section_id, []).append(flow)
 
         states: dict[str, PowerState] = {}
-        total_substation_power_kw = sum(max(item.power_kw, 0.0) for item in snapshot.substations)
         substation_count = len(snapshot.substations)
         overloaded_substations = len([item for item in snapshot.substations if item.status == "OVERLOAD"])
         overloaded_feeders = len([item for item in snapshot.feeders if item.status == "OVERLOAD"])
@@ -161,12 +212,31 @@ class PowerService:
         for section_id, section in self.sections.items():
             flows = flows_by_section.get(section_id, [])
             requested_power_kw = sum(max(flow.requested_power_kw, 0.0) for flow in flows)
-            generated_regen_kw = sum(max(-flow.requested_power_kw, 0.0) for flow in flows)
-            absorbed_regen_kw = snapshot.absorbed_regen_kw * self._section_share(requested_power_kw, total_substation_power_kw)
-            wasted_regen_kw = snapshot.wasted_regen_kw * self._section_share(generated_regen_kw, snapshot.generated_regen_kw)
+            generated_regen_kw = sum(
+                self._raw_regen_power_kw(requests_by_train[flow.train_id])
+                for flow in flows
+            )
+            self_consumed_regen_kw = sum(flow.regen_power_self_consumed_kw for flow in flows)
+            absorbed_regen_kw = sum(
+                path.delivered_kw
+                for path in snapshot.regen_paths
+                if path.sink_type == "TRAIN" and request_section_by_train.get(path.sink_id) == section_id
+            )
+            feedback_regen_kw = sum(
+                path.delivered_kw
+                for path in snapshot.regen_paths
+                if path.sink_type == "SUBSTATION_FEEDBACK"
+                and request_section_by_train.get(path.source_train_id) == section_id
+            )
+            wasted_regen_kw = sum(
+                path.generated_kw
+                for path in snapshot.regen_paths
+                if path.sink_type == "WASTE"
+                and request_section_by_train.get(path.source_train_id) == section_id
+            )
             net_requested_kw = max(requested_power_kw - absorbed_regen_kw, 0.0)
-            self._energy_kwh_by_section[section_id] += net_requested_kw * max(dt_sec, 0.0) / 3600.0
-            self._regen_kwh_by_section[section_id] += generated_regen_kw * max(dt_sec, 0.0) / 3600.0
+            self._energy_kwh_by_section[section_id] += net_requested_kw * max(accounting_dt_sec, 0.0) / 3600.0
+            self._regen_kwh_by_section[section_id] += generated_regen_kw * max(accounting_dt_sec, 0.0) / 3600.0
 
             min_voltage = min((flow.voltage_v for flow in flows), default=self.network.nominal_voltage_v if self.network else 750.0)
             max_current = max((abs(flow.current_a) for flow in flows), default=0.0)
@@ -182,20 +252,23 @@ class PowerService:
                 regen_energy_kwh=self._regen_kwh_by_section[section_id],
                 absorbed_regen_kw=absorbed_regen_kw,
                 wasted_regen_kw=wasted_regen_kw,
+                generated_regen_kw=generated_regen_kw,
+                self_consumed_regen_kw=self_consumed_regen_kw,
                 min_train_voltage_v=min_voltage,
                 max_train_current_a=max_current,
                 substation_count=substation_count,
                 overloaded_substations=overloaded_substations,
                 overloaded_feeders=overloaded_feeders,
                 losses_kw=snapshot.losses_kw,
-                feedback_regen_kw=snapshot.feedback_regen_kw,
+                feedback_regen_kw=feedback_regen_kw,
                 alerts=tuple(snapshot.alerts),
             )
         return states
 
-    def _apply_protection(self, snapshot: PowerFlowSnapshot, dt_sec: float) -> None:
+    def _apply_protection(self, snapshot: PowerFlowSnapshot, dt_sec: float) -> list[dict]:
         if self.network is None:
-            return
+            return []
+        events: list[dict] = []
         active_overloads: set[str] = set()
         for feeder in snapshot.feeders:
             if feeder.status != "OVERLOAD":
@@ -205,7 +278,7 @@ class PowerService:
             self._overload_duration_sec[feeder.feeder_id] = duration
             if duration >= self.protection_trip_delay_sec:
                 self.network.set_feeder_status(feeder.feeder_id, "OPEN")
-                snapshot.alerts.append({
+                events.append({
                     "type": "FEEDER_PROTECTION_TRIP",
                     "targetId": feeder.feeder_id,
                     "durationSec": round(duration, 3),
@@ -218,21 +291,46 @@ class PowerService:
             self._overload_duration_sec[substation.substation_id] = duration
             if duration >= self.protection_trip_delay_sec and self.network.substations[substation.substation_id].in_service:
                 self.network.apply_substation_outage(substation.substation_id, big_bilateral=True)
-                snapshot.alerts.append({
+                events.append({
                     "type": "SUBSTATION_PROTECTION_TRIP",
                     "targetId": substation.substation_id,
+                    "durationSec": round(duration, 3),
+                })
+        for section in snapshot.contact_rail_flows:
+            if section.status != "OVERLOAD":
+                continue
+            active_overloads.add(section.section_id)
+            duration = self._overload_duration_sec.get(section.section_id, 0.0) + max(dt_sec, 0.0)
+            self._overload_duration_sec[section.section_id] = duration
+            network_section = self.network.contact_sections[section.section_id]
+            if duration >= self.protection_trip_delay_sec and network_section.status == "ENERGIZED":
+                self.network.set_contact_section_status(section.section_id, "DEENERGIZED")
+                events.append({
+                    "type": "CONTACT_RAIL_PROTECTION_TRIP",
+                    "targetId": section.section_id,
                     "durationSec": round(duration, 3),
                 })
         for target_id in list(self._overload_duration_sec):
             if target_id not in active_overloads:
                 self._overload_duration_sec.pop(target_id, None)
+        return events
 
     def _traction_power_kw(self, request: TrainPowerRequest) -> float:
+        if request.traction_power_request_kw is not None:
+            return max(request.traction_power_request_kw, 0.0) + max(
+                request.aux_power_kw - self._raw_regen_power_kw(request),
+                0.0,
+            )
         if request.traction_force_n <= 0 or request.speed_mps <= 0:
-            return 0.0
-        return request.traction_force_n * request.speed_mps / 1000.0 / self.traction_efficiency
+            return request.aux_power_kw
+        return request.traction_force_n * request.speed_mps / 1000.0 / self.traction_efficiency + request.aux_power_kw
 
     def _regen_power_kw(self, request: TrainPowerRequest) -> float:
+        return max(self._raw_regen_power_kw(request) - request.aux_power_kw, 0.0)
+
+    def _raw_regen_power_kw(self, request: TrainPowerRequest) -> float:
+        if request.regen_power_available_kw is not None:
+            return max(request.regen_power_available_kw, 0.0)
         if request.brake_force_n <= 0 or request.speed_mps <= 0:
             return 0.0
         return request.brake_force_n * request.speed_mps / 1000.0 * self.regen_efficiency

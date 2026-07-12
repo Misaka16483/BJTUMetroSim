@@ -38,6 +38,10 @@ python -m app.api_server --host 127.0.0.1 --port 8000
 python -m app.api_server --scenario data/scenarios/line9_5train_power.json --host 127.0.0.1 --port 8000
 ```
 
+The default interactive scenario starts with no trains so the frontend train-management
+panel can add them dynamically. Scenarios used for unattended simulation can set
+`"autoSpawnTrains": true`; `line9_5train_power.json` uses this mode.
+
 ### 供电模块量化验收
 
 ```bash

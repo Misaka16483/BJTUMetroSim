@@ -66,3 +66,13 @@
 2. 修改进路/占压判断时，至少保留“自车独占可通过”和“外来车占压必须拒绝”两类测试。
 3. 修改拓扑刷新或日志时，手工验证顶栏启动、拓扑页加车、切换页面回拓扑三种入口。
 4. 修改 Tick 控件时，确认它不改变 `SimulationClock.tick_seconds`。
+
+## 本次 main 合并增补记录
+
+| 编号 | 用户可见现象 | 已确认根因 | 当前修复与不可破坏的约束 | 关键位置 | 验证方式 |
+|---|---|---|---|---|---|
+| F24 | FSP -> GGZ、KYL -> FSP 等下行相邻站运行到站后不再发车，拓扑上停在非站台 Seg 或一直等待 `NO_MAINLINE_ROUTE_MAPPING` | `line9-mainline-v1` 的 77 Seg 白名单来自旧最短路径，不覆盖完整上下行进路表链；联锁 Runtime 曾用该白名单筛掉合法进路和计轴区段 | 77 Seg 只作为普通演示/显示范围，不能作为 CI/MA 的规则过滤。`InterlockingRuntimeCoordinator` 的 eligible routes 和 `_sections_for_path()` 必须基于完整 319 Seg 线路数据 | `app/domain/interlocking/runtime.py`、`tests/test_mainline_scope.py` | `test_terminal_turnback_reverses_on_same_platform`、`test_mainline_scope.py` |
+| F25 | 列车到站或终点折返后 `currentSegmentId` 变成 `None`，或锚到上一段路径的非站台 Seg，导致拓扑车消失/下一段 MA 从错误位置计算 | 到站清理 PathPlan 时清空了车头 Seg；下一段 PathPlan 建立前没有按当前运行方向重新锚定站台段 | 到站、终点折返后必须调用方向敏感的站台锚定：UP 使用平台表 `0x55` 对应 Seg，DOWN 使用 `0xaa` 对应 Seg。折返后先切方向，再锚定反向站台 | `SimulationEngine._anchor_train_at_current_platform()`、`_complete_path_arrival()`、`_turn_train_at_terminal()` | S55 下行到 GGZ 后折返为 UP 且停在 S13 |
+| F26 | 折返实际发生，但拓扑/调度日志看不到 `TURNBACK` | 折返函数只改车辆方向，没有把生命周期事件合并到当前 tick 的调度决策快照 | 折返时生成 `DispatchDecision(action="TURNBACK")`，通过 `_pending_dispatch_decisions` 合并进本 tick `dispatch_decisions`，不能被常规调度覆盖 | `SimulationEngine._pending_dispatch_decisions`、`_turn_train_at_terminal()` | `test_terminal_turnback_reverses_on_same_platform` |
+| F27 | 拓扑页只能看到车的 Seg，缺少当前站、下一站、进路链和中文调度事件，日志上下文不足 | 主引擎拓扑投影只返回旧 demo 的最小字段，并把 `events` 固定为空 | `/api/sim/topology-state` 必须继续保持成员 C shape，同时补充 `routeIds/currentStation/nextStation/directionCode`，并把 `TURNBACK/HOLD` 等调度决策投成中文 events | `ApiHandler._main_engine_topology_state()` | `tests/test_api_server.py`、前端 `npm run build` |
+| F28 | `MemberCDemoRunner` 预锁进路测试误报 route 9 未锁闭 | route 9 已被列车接近推进到 `APPROACH_LOCKED`，它仍是锁闭状态的一种，不应只按 `LOCKED` 判断 | 所有“锁闭进路”统计和测试应同时包含 `LOCKED` 与 `APPROACH_LOCKED` | `tests/test_api_server.py`、拓扑锁闭计数 | `test_member_c_demo_prelocks_routes_for_signal_progression` |

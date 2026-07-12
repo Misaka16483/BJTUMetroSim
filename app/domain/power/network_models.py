@@ -18,6 +18,9 @@ class TractionSubstation:
     overload_current_a: float = 8000.0
     efs_capacity_kw: float = 0.0
     status: str = "IN_SERVICE"
+    source_id: str = "UNSPECIFIED"
+    quality: str = "ENGINEERING_ESTIMATE"
+    parameter_sources: JsonDict = field(default_factory=dict)
 
     @property
     def in_service(self) -> bool:
@@ -36,6 +39,9 @@ class FeederArm:
     continuous_current_a: float = 4000.0
     short_time_current_a: float = 6000.0
     status: str = "CLOSED"
+    source_id: str = "UNSPECIFIED"
+    quality: str = "ENGINEERING_ESTIMATE"
+    parameter_sources: JsonDict = field(default_factory=dict)
 
     @property
     def closed(self) -> bool:
@@ -51,6 +57,9 @@ class ContactRailSection:
     resistance_ohm_per_km: float = 0.0083
     current_limit_a: float = 6000.0
     status: str = "ENERGIZED"
+    source_id: str = "UNSPECIFIED"
+    quality: str = "ENGINEERING_ESTIMATE"
+    parameter_sources: JsonDict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -61,6 +70,9 @@ class ReturnRailSection:
     to_mileage_m: float
     resistance_ohm_per_km: float = 0.0083
     cross_bonding_group: str = "V0"
+    source_id: str = "UNSPECIFIED"
+    quality: str = "ENGINEERING_ESTIMATE"
+    parameter_sources: JsonDict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,9 @@ class PowerSwitch:
     normal_state: str
     current_state: str
     remote_controllable: bool = True
+    source_id: str = "UNSPECIFIED"
+    quality: str = "ENGINEERING_ESTIMATE"
+    parameter_sources: JsonDict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -99,15 +114,28 @@ class TrainElectricalLoad:
     aux_power_kw: float = 150.0
     traction_efficiency: float = 0.88
     regen_efficiency: float = 0.80
+    head_mileage_m: float | None = None
+    tail_mileage_m: float | None = None
+    pantograph_mileages_m: tuple[float, ...] = ()
+    traction_power_request_kw: float | None = None
+    regen_power_available_kw: float | None = None
+
+    @property
+    def electrical_contact_mileages_m(self) -> tuple[float, ...]:
+        return self.pantograph_mileages_m or (self.mileage_m,)
 
     @property
     def traction_power_kw(self) -> float:
+        if self.traction_power_request_kw is not None:
+            return max(self.traction_power_request_kw, 0.0)
         if self.traction_force_n <= 0 or self.speed_mps <= 0:
             return 0.0
         return self.traction_force_n * self.speed_mps / 1000.0 / self.traction_efficiency
 
     @property
     def raw_regen_power_kw(self) -> float:
+        if self.regen_power_available_kw is not None:
+            return max(self.regen_power_available_kw, 0.0)
         if self.brake_force_n <= 0 or self.speed_mps <= 0:
             return 0.0
         return self.brake_force_n * self.speed_mps / 1000.0 * self.regen_efficiency
@@ -117,8 +145,16 @@ class TrainElectricalLoad:
         return max(self.raw_regen_power_kw - self.aux_power_kw, 0.0)
 
     @property
+    def self_consumed_regen_kw(self) -> float:
+        return min(self.raw_regen_power_kw, self.aux_power_kw)
+
+    @property
+    def traction_demand_kw(self) -> float:
+        return self.traction_power_kw + max(self.aux_power_kw - self.raw_regen_power_kw, 0.0)
+
+    @property
     def requested_power_kw(self) -> float:
-        return self.traction_power_kw + self.aux_power_kw - self.regen_power_kw
+        return self.traction_demand_kw - self.regen_power_kw
 
 
 @dataclass(frozen=True)
@@ -132,8 +168,20 @@ class TrainPowerFlow:
     traction_limit_ratio: float
     regen_limit_ratio: float
     voltage_level: str
+    traction_power_request_kw: float = 0.0
+    traction_power_delivered_kw: float = 0.0
+    auxiliary_power_kw: float = 0.0
+    regen_power_available_kw: float = 0.0
+    regen_power_self_consumed_kw: float = 0.0
+    regen_power_exported_kw: float = 0.0
+    regen_power_accepted_kw: float = 0.0
+    regen_power_wasted_kw: float = 0.0
     left_substation_id: str | None = None
     right_substation_id: str | None = None
+    head_mileage_m: float | None = None
+    tail_mileage_m: float | None = None
+    pantograph_mileages_m: tuple[float, ...] = ()
+    spanned_power_section_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -147,6 +195,8 @@ class SubstationPowerFlow:
     energy_kwh: float
     load_ratio: float
     status: str
+    rectifier_power_kw: float = 0.0
+    feedback_power_kw: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -162,15 +212,44 @@ class FeederPowerFlow:
 
 
 @dataclass(frozen=True)
+class ContactRailPowerFlow:
+    section_id: str
+    direction: str
+    current_a: float
+    power_kw: float
+    load_ratio: float
+    status: str
+
+
+@dataclass(frozen=True)
+class RegenPathFlow:
+    source_train_id: str
+    sink_type: str
+    sink_id: str
+    via_substation_id: str | None
+    source_feeder_id: str | None
+    sink_feeder_id: str | None
+    generated_kw: float
+    delivered_kw: float
+    losses_kw: float
+    current_a: float
+    path_resistance_ohm: float
+
+
+@dataclass(frozen=True)
 class PowerFlowSnapshot:
     sim_time_ms: int
     trains: list[TrainPowerFlow] = field(default_factory=list)
     substations: list[SubstationPowerFlow] = field(default_factory=list)
     feeders: list[FeederPowerFlow] = field(default_factory=list)
+    contact_rail_flows: list[ContactRailPowerFlow] = field(default_factory=list)
     generated_regen_kw: float = 0.0
+    self_consumed_regen_kw: float = 0.0
     absorbed_regen_kw: float = 0.0
     feedback_regen_kw: float = 0.0
     wasted_regen_kw: float = 0.0
+    regen_transfer_losses_kw: float = 0.0
+    regen_paths: list[RegenPathFlow] = field(default_factory=list)
     losses_kw: float = 0.0
     converged: bool = True
     iterations: int = 0
@@ -195,6 +274,8 @@ class PowerFlowSnapshot:
                     "energyKwh": round(item.energy_kwh, 4),
                     "loadRatio": round(item.load_ratio, 4),
                     "status": item.status,
+                    "rectifierPowerKw": round(item.rectifier_power_kw, 3),
+                    "feedbackPowerKw": round(item.feedback_power_kw, 3),
                 }
                 for item in self.substations
             ],
@@ -211,6 +292,17 @@ class PowerFlowSnapshot:
                 }
                 for item in self.feeders
             ],
+            "contactRailFlows": [
+                {
+                    "sectionId": item.section_id,
+                    "direction": item.direction,
+                    "currentA": round(item.current_a, 2),
+                    "powerKw": round(item.power_kw, 3),
+                    "loadRatio": round(item.load_ratio, 4),
+                    "status": item.status,
+                }
+                for item in self.contact_rail_flows
+            ],
             "trainVoltages": [
                 {
                     "trainId": item.train_id,
@@ -219,19 +311,49 @@ class PowerFlowSnapshot:
                     "voltageV": round(item.voltage_v, 2),
                     "currentA": round(item.current_a, 2),
                     "requestedPowerKw": round(item.requested_power_kw, 3),
+                    "tractionPowerRequestKw": round(item.traction_power_request_kw, 3),
+                    "tractionPowerDeliveredKw": round(item.traction_power_delivered_kw, 3),
+                    "auxiliaryPowerKw": round(item.auxiliary_power_kw, 3),
+                    "regenPowerAvailableKw": round(item.regen_power_available_kw, 3),
+                    "regenPowerSelfConsumedKw": round(item.regen_power_self_consumed_kw, 3),
+                    "regenPowerExportedKw": round(item.regen_power_exported_kw, 3),
+                    "regenPowerAcceptedKw": round(item.regen_power_accepted_kw, 3),
+                    "regenPowerWastedKw": round(item.regen_power_wasted_kw, 3),
                     "tractionLimitRatio": round(item.traction_limit_ratio, 4),
                     "regenLimitRatio": round(item.regen_limit_ratio, 4),
                     "voltageLevel": item.voltage_level,
                     "leftSubstationId": item.left_substation_id,
                     "rightSubstationId": item.right_substation_id,
+                    "headMileageM": round(item.head_mileage_m, 3) if item.head_mileage_m is not None else None,
+                    "tailMileageM": round(item.tail_mileage_m, 3) if item.tail_mileage_m is not None else None,
+                    "pantographMileagesM": [round(value, 3) for value in item.pantograph_mileages_m],
+                    "spannedPowerSectionIds": list(item.spanned_power_section_ids),
                 }
                 for item in self.trains
             ],
             "regen": {
                 "generatedKw": round(self.generated_regen_kw, 3),
+                "selfConsumedKw": round(self.self_consumed_regen_kw, 3),
                 "absorbedKw": round(self.absorbed_regen_kw, 3),
                 "feedbackKw": round(self.feedback_regen_kw, 3),
                 "wastedKw": round(self.wasted_regen_kw, 3),
+                "transferLossesKw": round(self.regen_transfer_losses_kw, 3),
+                "paths": [
+                    {
+                        "sourceTrainId": item.source_train_id,
+                        "sinkType": item.sink_type,
+                        "sinkId": item.sink_id,
+                        "viaSubstationId": item.via_substation_id,
+                        "sourceFeederId": item.source_feeder_id,
+                        "sinkFeederId": item.sink_feeder_id,
+                        "generatedKw": round(item.generated_kw, 3),
+                        "deliveredKw": round(item.delivered_kw, 3),
+                        "lossesKw": round(item.losses_kw, 3),
+                        "currentA": round(item.current_a, 3),
+                        "pathResistanceOhm": round(item.path_resistance_ohm, 6),
+                    }
+                    for item in self.regen_paths
+                ],
             },
             "lossesKw": round(self.losses_kw, 3),
             "solver": {

@@ -4,8 +4,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.api_server import Line9DataService
+from app.api_server import ApiHandler, Line9DataService
 from app.domain.operations.member_c_demo import MemberCDemoRunner
+
+
+class _ModeEngine:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    def set_manual_mode(self, train_id: str, enabled: bool) -> dict:
+        self.calls.append((train_id, enabled))
+        return {"ok": True, "trainId": train_id, "manualMode": enabled}
+
+
+class _CabController:
+    def __init__(self, state: str, train_id: str = "T0901") -> None:
+        self.state = state
+        self.train_id = train_id
+
+    def status(self) -> dict:
+        return {"ok": True, "status": {"state": self.state, "trainId": self.train_id}}
 
 
 class ApiServerTests(unittest.TestCase):
@@ -26,6 +44,9 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(track_map["counts"]["signals"], 157)
         self.assertEqual(track_map["counts"]["platforms"], 56)
         self.assertEqual(track_map["counts"]["routes"], 249)
+        self.assertEqual(track_map["scope"]["activeForSimulation"], "line9-mainline-v1")
+        self.assertEqual(track_map["scope"]["mainlineSegmentCount"], 77)
+        self.assertTrue(track_map["scope"]["fullMapRetained"])
 
     def test_power_topology_shape(self) -> None:
         topology = self.service.power_topology()
@@ -34,6 +55,9 @@ class ApiServerTests(unittest.TestCase):
         self.assertGreaterEqual(len(topology["substations"]), 10)
         self.assertGreaterEqual(len(topology["contactRailSections"]), 18)
         self.assertEqual(topology["quality"], "ENGINEERING_ESTIMATE")
+        self.assertEqual(topology["modelVersion"], "LINE9-DC750-V1.0")
+        self.assertTrue(topology["provenance"]["sources"])
+        self.assertTrue(topology["substations"][0]["parameterSources"])
 
     def test_member_c_static_topology_contains_full_line(self) -> None:
         topology = self.service.member_c_static_routes()
@@ -91,7 +115,7 @@ class ApiServerTests(unittest.TestCase):
 
         locked = {
             route["routeId"] for route in snapshot["routes"]
-            if route["state"] == "LOCKED"
+            if route["state"] in {"LOCKED", "APPROACH_LOCKED"}
         }
         aspects = {signal["id"]: signal["aspect"] for signal in snapshot["signals"]}
 
@@ -126,6 +150,40 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(result["error"], "CONFLICT_ROUTE_LOCKED")
         self.assertTrue(runner.route_svc.is_locked("25"))
         self.assertFalse(runner.route_svc.is_locked("24"))
+
+    def test_frontend_mode_switch_is_rejected_while_driver_cab_connected(self) -> None:
+        handler = object.__new__(ApiHandler)
+        engine = _ModeEngine()
+        handler.engine = engine
+        handler._driver_cab_controller = lambda: _CabController("CONNECTED")
+
+        result = handler._set_manual_mode_from_frontend("T0901", False)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "DRIVER_CAB_MODE_CONTROL_EXCLUSIVE")
+        self.assertEqual(engine.calls, [])
+
+    def test_frontend_mode_switch_is_allowed_after_driver_cab_disconnects(self) -> None:
+        handler = object.__new__(ApiHandler)
+        engine = _ModeEngine()
+        handler.engine = engine
+        handler._driver_cab_controller = lambda: _CabController("DISCONNECTED")
+
+        result = handler._set_manual_mode_from_frontend("T0901", True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(engine.calls, [("T0901", True)])
+
+    def test_connected_driver_cab_does_not_lock_other_trains(self) -> None:
+        handler = object.__new__(ApiHandler)
+        engine = _ModeEngine()
+        handler.engine = engine
+        handler._driver_cab_controller = lambda: _CabController("CONNECTED", "T0901")
+
+        result = handler._set_manual_mode_from_frontend("T0902", True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(engine.calls, [("T0902", True)])
 
     def test_member_d_demo_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

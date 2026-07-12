@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,12 @@ except ModuleNotFoundError:
     termios = None
     tty = None
 
-from app.adapters.cab import MitsubishiPlcCabOutputFrameBuilder, MitsubishiPlcCabOutputState, MitsubishiPlcTcpClient
+from app.adapters.cab import (
+    MitsubishiPlcCabInputState,
+    MitsubishiPlcCabOutputFrameBuilder,
+    MitsubishiPlcCabOutputState,
+    MitsubishiPlcTcpClient,
+)
 from app.adapters.hmi import NetworkScreenClient, NetworkScreenFrameBuilder, NetworkScreenState
 from app.adapters.mmi import SignalScreenClient, SignalScreenFrameBuilder, SignalScreenState
 from app.core.clock import SimulationClock
@@ -168,12 +174,13 @@ def plc_cab_monitor(args: argparse.Namespace) -> None:
         with client:
             if not args.json_lines:
                 print(f"plc cab monitor: {args.host}:{args.port}, max_frames={max_frames or 'forever'}")
-            for sequence, driver_input in enumerate(
-                client.iter_driver_inputs(train_id=args.train_id, max_frames=max_frames),
+            for sequence, input_state in enumerate(
+                client.iter_input_states(train_id=args.train_id, max_frames=max_frames),
                 start=1,
             ):
+                driver_input = input_state.to_driver_input()
                 command = control_service.command_from_driver_input(driver_input)
-                payload = _plc_cab_payload(sequence, driver_input, command)
+                payload = _plc_cab_payload(sequence, input_state, driver_input, command)
                 if args.json_lines:
                     print(json.dumps(payload, ensure_ascii=False))
                 else:
@@ -437,7 +444,18 @@ def _format_commands(commands: list[str]) -> str:
     return "\n".join(rows)
 
 
-def _plc_cab_payload(sequence: int, driver_input: DriverInput, command: ControlCommand) -> dict[str, Any]:
+def _plc_cab_payload(
+    sequence: int,
+    input_state: MitsubishiPlcCabInputState,
+    driver_input: DriverInput,
+    command: ControlCommand,
+) -> dict[str, Any]:
+    raw_input = asdict(input_state)
+    raw_input["identify_bytes"] = input_state.identify_bytes.hex(" ")
+    raw_input["vehicle_speed_mps"] = input_state.vehicle_speed_mps
+    raw_input["direction"] = input_state.direction
+    raw_input["external_lighting"] = input_state.external_lighting
+    raw_input["door_operation_mode"] = input_state.door_operation_mode
     return {
         "sequence": sequence,
         "trainId": driver_input.train_id,
@@ -447,6 +465,7 @@ def _plc_cab_payload(sequence: int, driver_input: DriverInput, command: ControlC
         "brakePercent": driver_input.brake_percent,
         "emergencyBrake": driver_input.emergency_brake,
         "reportedSpeedMps": driver_input.reported_speed_mps,
+        "cabInput": raw_input,
         "command": {
             "tractionPercent": command.traction_percent,
             "brakePercent": command.brake_percent,
@@ -467,6 +486,9 @@ def _format_plc_cab_line(payload: dict[str, Any]) -> str:
         f"tr={payload['tractionPercent']:.0f}% "
         f"br={payload['brakePercent']:.0f}% "
         f"speed={speed_text} "
+        f"dir={payload['cabInput']['direction']} "
+        f"key={payload['cabInput']['key_switch_locked']} "
+        f"atoStart={payload['cabInput']['ato_start_triggered']} "
         f"cmd=T{command['tractionPercent']:.0f}% B{command['brakePercent']:.0f}% EB={command['emergencyBrake']}"
     )
 

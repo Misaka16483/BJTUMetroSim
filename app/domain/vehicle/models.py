@@ -61,6 +61,7 @@ class VehicleConfig:
     car_masses_kg: list[float] | None = None
     head_car_length_m: float = 20.2
     middle_car_length_m: float = 19.4
+    pantograph_offsets_from_head_m: tuple[float, ...] = (29.5, 88.5)
 
     def __post_init__(self) -> None:
         _require_non_empty(self.train_id, "train_id")
@@ -99,6 +100,12 @@ class VehicleConfig:
         _require_positive(total_length, "train_length_m (computed from car lengths)")
         object.__setattr__(self, "mass_kg", total_mass)
         object.__setattr__(self, "train_length_m", total_length)
+        pantograph_offsets = tuple(float(value) for value in self.pantograph_offsets_from_head_m)
+        if not pantograph_offsets:
+            raise ValueError("pantograph_offsets_from_head_m must not be empty")
+        if any(value < 0 or value > total_length for value in pantograph_offsets):
+            raise ValueError("pantograph offset must be within train length")
+        object.__setattr__(self, "pantograph_offsets_from_head_m", pantograph_offsets)
 
     @property
     def empty_mass_kg(self) -> float:
@@ -130,6 +137,15 @@ class VehicleConfig:
         max_traction_force_n = float(data.get("maxTractionForceN", 300_000.0))
         max_service_brake_force_n = float(data.get("maxServiceBrakeForceN", 300_000.0))
         emergency_brake_force_n = float(data.get("emergencyBrakeForceN", 337_500.0))
+        head_count = sum(1 for car in formation.split("-") if car == "Tc")
+        car_count = len(formation.split("-"))
+        total_length_m = head_count * head_car_length_m + (car_count - head_count) * middle_car_length_m
+        raw_offsets = data.get("pantographOffsetsFromHeadM")
+        pantograph_offsets = (
+            tuple(float(value) for value in raw_offsets)
+            if isinstance(raw_offsets, list) and raw_offsets
+            else (total_length_m * 0.25, total_length_m * 0.75)
+        )
         return cls(
             train_id=train_id,
             formation=formation,
@@ -141,6 +157,7 @@ class VehicleConfig:
             max_traction_force_n=max_traction_force_n,
             max_service_brake_force_n=max_service_brake_force_n,
             emergency_brake_force_n=emergency_brake_force_n,
+            pantograph_offsets_from_head_m=pantograph_offsets,
         )
 
     def to_dict(self) -> JsonDict:
@@ -164,6 +181,7 @@ class VehicleConfig:
             "regenEfficiency": self.regen_efficiency,
             "auxiliaryPowerKw": self.auxiliary_power_kw,
             "nominalLineVoltageV": self.nominal_line_voltage_v,
+            "pantographOffsetsFromHeadM": list(self.pantograph_offsets_from_head_m),
         }
 
 

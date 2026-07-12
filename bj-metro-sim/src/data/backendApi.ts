@@ -79,8 +79,12 @@ async function getJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { method: 'POST' });
+async function postJson(url: string, payload?: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: payload === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -132,6 +136,16 @@ export interface SimTrainState {
   onboardPax: number;
   capacityPax: number;
   loadFactor: number;
+  doorState?: string;
+  doorSide?: string;
+  doorNotice?: string;
+  doorPermission?: string;
+  doorTransitionRemainingSec?: number;
+  lastBoarding?: number;
+  lastAlighting?: number;
+  currentBoardingRatePaxPerSec?: number;
+  currentAlightingRatePaxPerSec?: number;
+  lastPassengerEventMs?: number | null;
   currentStation: string;
   nextStation: string;
   segmentProgress: number;
@@ -140,21 +154,37 @@ export interface SimTrainState {
   tractionPercent?: number;
   brakePercent?: number;
   energyKwh?: number;
+  tractionEnergyKwh?: number;
+  auxiliaryEnergyKwh?: number;
+  regenGeneratedKwh?: number;
+  regenSelfConsumedKwh?: number;
+  regenAcceptedKwh?: number;
+  regenWastedKwh?: number;
+  tractionPowerRequestKw?: number;
+  tractionPowerDeliveredKw?: number;
+  auxiliaryPowerKw?: number;
+  regenPowerAvailableKw?: number;
+  regenPowerSelfConsumedKw?: number;
+  regenPowerAcceptedKw?: number;
+  regenPowerWastedKw?: number;
   targetSpeedMps?: number;
   estimatedRunTimeS?: number;
   pathPositionM?: number;
   pathTotalLengthM?: number;
   currentSegmentId?: number | null;
-  currentSegmentOffsetM?: number;
-  movementAuthorityEndM?: number;
-  movementAuthorityReason?: string;
-  movementAuthoritySpeedMps?: number;
-  routeChainIds?: string[];
   localSpeedLimitMps?: number;
   gradeRatio?: number;
   pathSegmentCount?: number;
   pathConstraintCount?: number;
   operationMode?: string;
+  trainLengthM: number;
+  headMileageM: number;
+  tailMileageM: number;
+  pantographMileagesM: number[];
+  spannedPowerSectionIds: string[];
+  departureAuthorized?: boolean;
+  interlockingHoldReason?: string | null;
+  activeRouteIds?: string[];
 }
 
 export interface SimStationInfo {
@@ -178,6 +208,8 @@ export interface SimPowerState {
   regenEnergyKwh: number;
   absorbedRegenKw: number;
   wastedRegenKw: number;
+  generatedRegenKw?: number;
+  selfConsumedRegenKw?: number;
   minTrainVoltageV?: number;
   maxTrainCurrentA?: number;
   substationCount?: number;
@@ -212,15 +244,30 @@ export interface PowerTopologySubstation {
   overloadCurrentA: number;
   efsCapacityKw: number;
   status: string;
+  rectifierPowerKw: number;
+  feedbackPowerKw: number;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
 }
 
 export interface PowerTopology {
   lineId: string;
   nominalVoltageV: number;
   quality: string;
+  modelVersion: string;
+  provenance: {
+    sources: Array<{
+      sourceId: string;
+      description: string;
+      evidenceLevel: string;
+    }>;
+    parameterDocument: string;
+    limitations: string[];
+  };
   substations: PowerTopologySubstation[];
-  feeders: unknown[];
-  contactRailSections: unknown[];
+  feeders: PowerTopologyFeeder[];
+  contactRailSections: PowerTopologyContactRailSection[];
   returnRailSections?: unknown[];
   switches: unknown[];
 }
@@ -236,6 +283,41 @@ export interface PowerFeederState {
   status: string;
 }
 
+export interface ContactRailPowerFlowState {
+  sectionId: string;
+  direction: string;
+  currentA: number;
+  powerKw: number;
+  loadRatio: number;
+  status: string;
+  rectifierPowerKw?: number;
+  feedbackPowerKw?: number;
+}
+
+export interface PowerTopologyFeeder {
+  feederId: string;
+  substationId: string;
+  direction: string;
+  side: string;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
+}
+
+export interface PowerTopologyContactRailSection {
+  sectionId: string;
+  direction: string;
+  fromMileageM: number;
+  toMileageM: number;
+  resistanceOhmPerKm: number;
+  currentLimitA: number;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
+}
+
 export interface TrainVoltageState {
   trainId: string;
   powerSectionId: string;
@@ -243,6 +325,14 @@ export interface TrainVoltageState {
   voltageV: number;
   currentA: number;
   requestedPowerKw: number;
+  tractionPowerRequestKw: number;
+  tractionPowerDeliveredKw: number;
+  auxiliaryPowerKw: number;
+  regenPowerAvailableKw: number;
+  regenPowerSelfConsumedKw: number;
+  regenPowerExportedKw: number;
+  regenPowerAcceptedKw: number;
+  regenPowerWastedKw: number;
   tractionLimitRatio: number;
   regenLimitRatio: number;
   voltageLevel: string;
@@ -254,12 +344,28 @@ export interface PowerNetworkState {
   simTimeMs?: number;
   substations: PowerSubstationState[];
   feeders: PowerFeederState[];
+  contactRailFlows?: ContactRailPowerFlowState[];
   trainVoltages: TrainVoltageState[];
   regen: {
     generatedKw: number;
+    selfConsumedKw: number;
     absorbedKw: number;
     feedbackKw: number;
     wastedKw: number;
+    transferLossesKw: number;
+    paths: Array<{
+      sourceTrainId: string;
+      sinkType: 'TRAIN' | 'TRAIN_AUXILIARY' | 'SUBSTATION_FEEDBACK' | 'WASTE';
+      sinkId: string;
+      viaSubstationId: string | null;
+      sourceFeederId: string | null;
+      sinkFeederId: string | null;
+      generatedKw: number;
+      deliveredKw: number;
+      lossesKw: number;
+      currentA: number;
+      pathResistanceOhm: number;
+    }>;
   };
   lossesKw: number;
   solver?: {
@@ -286,6 +392,13 @@ export interface PowerNetworkState {
     status: string;
     error?: string;
   }>;
+  solverFailure?: {
+    type: 'POWER_SOLVER_FAILURE';
+    reasons: string[];
+    simTimeMs: number;
+    iterations: number;
+    powerBalanceErrorRatio: number;
+  } | null;
   alerts: Array<Record<string, unknown>>;
   source?: string;
   quality?: string;
@@ -324,7 +437,55 @@ export interface SimClock {
   simTime: string;
   tick: number;
   simTimeMs: number;
+  speedMultiplier?: number;
   tickIntervalMs?: number;
+}
+
+export interface InterlockingRuntimeState {
+  mode: string;
+  routeCount: number;
+  occupiedSectionCount: number;
+  lockedRouteCount: number;
+  reservedIntervalCount: number;
+  routes: Array<{
+    routeId: string;
+    name: string;
+    startSignalId: number;
+    endSignalId: number;
+    axleSectionIds: string[];
+    state: string;
+    trainId?: string | null;
+    failureReason?: string | null;
+  }>;
+  sections: Array<{
+    sectionId: string;
+    sectionType: string;
+    occupied: boolean;
+    trainIds: string[];
+    segmentIds: number[];
+  }>;
+  switches: Array<Record<string, unknown>>;
+  signals: Array<{ signalId: string; aspect: string; faulted: boolean }>;
+  departureAuthorities: Array<{
+    trainId: string;
+    granted: boolean;
+    authorityMode: string;
+    routeIds: string[];
+    signalAspects: Record<string, string>;
+    failureReason?: string | null;
+  }>;
+}
+
+export interface DispatchRuntimeState {
+  registeredTrainCount: number;
+  departureCount: number;
+  recentDepartures: Array<{
+    trainId: string;
+    stationIndex: number;
+    stationId: string;
+    direction: string;
+    simTimeS: number;
+  }>;
 }
 
 export interface SimStateResponse {
@@ -334,8 +495,24 @@ export interface SimStateResponse {
   power?: SimPowerState[];
   powerNetwork?: PowerNetworkState;
   dispatchDecisions?: SimDispatchDecision[];
+  dispatchRuntime?: DispatchRuntimeState;
+  interlocking?: InterlockingRuntimeState;
   kpi: SimKpi;
   source: string;
+}
+
+export interface PassengerHistoryPoint {
+  simTimeMs: number;
+  waitingPax: number;
+  arrivals: number;
+  leftBehindPax: number;
+  platformDensity: number;
+}
+
+export interface StationPassengerHistoryResponse {
+  stationCode: string;
+  source: string;
+  history: Record<'UP' | 'DOWN', PassengerHistoryPoint[]>;
 }
 
 // ── 速度规划曲线 ──
@@ -365,6 +542,11 @@ export interface SpeedProfileMeta {
 
 export function fetchSimState(): Promise<SimStateResponse> {
   return getJson<SimStateResponse>('/api/sim/state');
+}
+
+export function fetchStationPassengerHistory(stationCode: string, sinceSimTimeMs?: number): Promise<StationPassengerHistoryResponse> {
+  const suffix = sinceSimTimeMs === undefined ? '' : `?sinceSimTimeMs=${sinceSimTimeMs}`;
+  return getJson<StationPassengerHistoryResponse>(`/api/sim/passenger-history/${encodeURIComponent(stationCode)}${suffix}`);
 }
 
 export function fetchSpeedProfile(): Promise<SpeedProfileResponse> {
@@ -398,6 +580,10 @@ export function simSetTickInterval(intervalMs: number): Promise<{ ok: boolean; t
   });
 }
 
+export function simSetSpeedMultiplier(multiplier: number): Promise<unknown> {
+  return postJson('/api/sim/speed', { multiplier });
+}
+
 export interface VehicleConfigPayload {
   formation: string;
   carMassesKg: number[];
@@ -408,6 +594,7 @@ export interface VehicleConfigPayload {
   maxTractionForceN?: number;
   maxServiceBrakeForceN?: number;
   emergencyBrakeForceN?: number;
+  pantographOffsetsFromHeadM?: number[];
 }
 
 export interface VehicleConfigResponse {
@@ -425,6 +612,7 @@ export interface VehicleConfigResponse {
     maxTractionForceN: number;
     maxServiceBrakeForceN: number;
     emergencyBrakeForceN: number;
+    pantographOffsetsFromHeadM: number[];
   };
 }
 
@@ -439,14 +627,22 @@ export function simSetVehicleConfig(payload: VehicleConfigPayload): Promise<Vehi
   });
 }
 
-export function simSetManualMode(enabled: boolean, trainId?: string): Promise<{ ok: boolean; manualMode: boolean }> {
+export interface ManualModeResponse {
+  ok: boolean;
+  manualMode?: boolean;
+  error?: string;
+  message?: string;
+  trainId?: string;
+}
+
+export function simSetManualMode(enabled: boolean, trainId?: string): Promise<ManualModeResponse> {
   return fetch('/api/sim/manual-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled, trainId }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+    return resp.json() as Promise<ManualModeResponse>;
   });
 }
 
@@ -464,7 +660,6 @@ export function simSendManualCommand(tractionPercent: number, brakePercent: numb
 export interface AddTrainPayload {
   trainId: string;
   initialStationCode: string;
-  initialSegmentId?: number;
   direction: 'UP' | 'DOWN';
   operationMode?: 'ATO' | 'MANUAL';
   capacityPax?: number;
@@ -477,7 +672,6 @@ export interface AddTrainResponse {
   ok: boolean;
   train?: SimTrainState;
   error?: string;
-  conflictingTrainIds?: string[];
 }
 
 export function simAddTrain(payload: AddTrainPayload): Promise<AddTrainResponse> {
@@ -513,14 +707,14 @@ export function simSetTrainVehicleConfig(trainId: string, payload: VehicleConfig
   });
 }
 
-export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<{ ok: boolean; manualMode: boolean }> {
+export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<ManualModeResponse> {
   return fetch('/api/sim/train/manual-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ trainId, enabled }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+    return resp.json() as Promise<ManualModeResponse>;
   });
 }
 
@@ -532,5 +726,66 @@ export function simSendTrainManualCommand(trainId: string, tractionPercent: numb
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     return resp.json();
+  });
+}
+
+export type DriverCabConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+
+export interface DriverCabHardwareStatus {
+  state: DriverCabConnectionState;
+  host: string;
+  port: number;
+  trainId: string;
+  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'FAIL_SAFE_BRAKE';
+  framesReceived: number;
+  connectedAt: string | null;
+  lastFrameAt: string | null;
+  lastError: string | null;
+  lastInput: {
+    speedMps: number;
+    direction: string;
+    handleCode: number;
+    tractionPercent: number;
+    brakePercent: number;
+    emergencyBrake: boolean;
+    keyActive: boolean;
+    atoStart: boolean;
+  } | null;
+  lastCommand: {
+    tractionPercent: number;
+    brakePercent: number;
+    emergencyBrake: boolean;
+    handleMode: string;
+  } | null;
+}
+
+export interface DriverCabHardwareResponse {
+  ok: boolean;
+  status: DriverCabHardwareStatus;
+  error?: string;
+}
+
+export function fetchDriverCabStatus(): Promise<DriverCabHardwareResponse> {
+  return getJson<DriverCabHardwareResponse>('/api/hardware/driver-cab/status');
+}
+
+export function connectDriverCab(host?: string, port?: number): Promise<DriverCabHardwareResponse> {
+  const body: Record<string, unknown> = {};
+  if (host) body.host = host;
+  if (port) body.port = port;
+  return fetch('/api/hardware/driver-cab/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export function disconnectDriverCab(): Promise<DriverCabHardwareResponse> {
+  return fetch('/api/hardware/driver-cab/disconnect', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
   });
 }

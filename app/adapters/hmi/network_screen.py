@@ -141,6 +141,12 @@ class TractionCutoffRequest:
     msg_id: int
     pull_control_mask: int
     reserve: int = 0
+    identify_bytes: bytes = b"\x55\xaa\x55\xaa"
+    total_len: int = 26
+    data_len: int = 2
+    verify_type: int = 0
+    verify_code: int = 0
+    protocol_id: int = 0
 
     @property
     def requested_car_numbers(self) -> list[int]:
@@ -293,6 +299,12 @@ class TractionCutoffRequestParser:
             msg_id=read_u16_le(frame, 22),
             pull_control_mask=read_u8(frame, 24),
             reserve=read_u8(frame, 25),
+            identify_bytes=frame[0:4],
+            total_len=read_u16_le(frame, 4),
+            data_len=read_u16_le(frame, 6),
+            verify_type=read_u16_le(frame, 16),
+            verify_code=read_u16_le(frame, 18),
+            protocol_id=read_u16_le(frame, 20),
         )
 
 

@@ -91,6 +91,55 @@ class PathPlan:
 
 
 @dataclass(frozen=True)
+class LineScope:
+    """可追溯的线路运行范围。
+
+    全量 line_map 仍保留正线、车辆段和库线数据；LineScope 只限制特定
+    运行场景允许访问的 Seg，不破坏原始电子地图。
+    """
+
+    schema_version: str
+    scope_id: str
+    line_id: str
+    segment_ids: frozenset[int]
+    source: str = ""
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, data: JsonDict) -> "LineScope":
+        segment_ids = frozenset(int(item) for item in data.get("segmentIds", []))
+        if not segment_ids:
+            raise ValueError("line scope must contain at least one segment id")
+
+        pair_segment_ids = {
+            int(segment_id)
+            for pair in data.get("stationPairPaths", [])
+            for segment_id in pair.get("segmentIds", [])
+        }
+        if pair_segment_ids and pair_segment_ids != set(segment_ids):
+            missing = sorted(pair_segment_ids - set(segment_ids))
+            unused = sorted(set(segment_ids) - pair_segment_ids)
+            raise ValueError(
+                "line scope segmentIds must equal the union of stationPairPaths: "
+                f"missing={missing}, unused={unused}"
+            )
+
+        return cls(
+            schema_version=str(data.get("schemaVersion", "line-scope.v1")),
+            scope_id=str(data["scopeId"]),
+            line_id=str(data["lineId"]),
+            segment_ids=segment_ids,
+            source=str(data.get("source", "")),
+            description=str(data.get("description", "")),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "LineScope":
+        with Path(path).open("r", encoding="utf-8") as handle:
+            return cls.from_dict(json.load(handle))
+
+
+@dataclass(frozen=True)
 class _PathPortion:
     segment_id: int
     start_offset_m: float
@@ -286,10 +335,24 @@ class PathTrackQuery:
 
 
 class PathPlanner:
-    def __init__(self, line_map: JsonDict, default_speed_limit_mps: float = DEFAULT_SPEED_LIMIT_MPS) -> None:
+    def __init__(
+        self,
+        line_map: JsonDict,
+        default_speed_limit_mps: float = DEFAULT_SPEED_LIMIT_MPS,
+        allowed_segment_ids: set[int] | frozenset[int] | None = None,
+    ) -> None:
         self.line_map = line_map
         self.default_speed_limit_mps = default_speed_limit_mps
         self.track = TrackQueryService(line_map)
+        self.allowed_segment_ids = (
+            frozenset(int(item) for item in allowed_segment_ids)
+            if allowed_segment_ids is not None
+            else None
+        )
+        if self.allowed_segment_ids is not None:
+            unknown = sorted(self.allowed_segment_ids - set(self.track.segments))
+            if unknown:
+                raise ValueError(f"line scope references unknown segment ids: {unknown}")
         self.platforms = {
             int(item["id"]): item for item in line_map.get("platforms", []) if item.get("id") is not None
         }
@@ -408,9 +471,21 @@ class PathPlanner:
             raise ValueError(f"unknown platform id {platform_id}")
         if platform.get("segmentId") is None:
             raise ValueError(f"platform {platform_id} has no segment id")
+        if (
+            self.allowed_segment_ids is not None
+            and int(platform["segmentId"]) not in self.allowed_segment_ids
+        ):
+            raise ValueError(
+                f"platform {platform_id} segment {platform['segmentId']} is outside the active line scope"
+            )
         return platform
 
     def _find_segment_path(self, start_segment_id: int, end_segment_id: int, direction: str) -> list[int]:
+        if self.allowed_segment_ids is not None:
+            if start_segment_id not in self.allowed_segment_ids:
+                raise ValueError(f"start segment {start_segment_id} is outside the active line scope")
+            if end_segment_id not in self.allowed_segment_ids:
+                raise ValueError(f"end segment {end_segment_id} is outside the active line scope")
         if start_segment_id == end_segment_id:
             return [start_segment_id]
         queue: list[tuple[float, int, tuple[int, ...]]] = [(0.0, start_segment_id, (start_segment_id,))]
@@ -423,6 +498,11 @@ class PathPlanner:
                 continue
             for next_segment in self.track.get_next_segments(segment_id, direction):
                 next_segment_id = int(next_segment["id"])
+                if (
+                    self.allowed_segment_ids is not None
+                    and next_segment_id not in self.allowed_segment_ids
+                ):
+                    continue
                 if next_segment_id in path:
                     continue
                 edge_cost = self._segment_length_m(segment_id)

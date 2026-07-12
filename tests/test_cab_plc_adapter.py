@@ -30,6 +30,111 @@ class _ChunkedSocket:
 
 
 class MitsubishiPlcCabParserTests(unittest.TestCase):
+    def test_parser_decodes_complete_plc_input_frame(self) -> None:
+        frame = bytearray(46)
+        frame[0:4] = b"\xaa\x55\xaa\x55"
+        for offset, value in (
+            (4, 46),
+            (6, 22),
+            (8, 2025),
+            (10, 7),
+            (12, 16),
+            (14, 15),
+            (16, 11),
+            (18, 3),
+            (20, 2),
+            (22, 0x1234),
+            (26, 1234),
+            (30, 4),
+            (32, 2),
+            (36, 2),
+            (38, 4),
+            (40, 150),
+            (42, 130),
+            (44, 0xBEEF),
+        ):
+            _write_word(frame, offset, value)
+        frame[24] = 0b1110_0110
+        frame[25] = 0b0000_1111
+        frame[28] = 0xFF
+        frame[29] = 0x0F
+        frame[34] = 0xFF
+        frame[35] = 0x0F
+
+        state = MitsubishiPlcCabParser().parse(bytes(frame), train_id="T009")
+
+        self.assertEqual(state.train_id, "T009")
+        self.assertEqual(state.identify_bytes, b"\xaa\x55\xaa\x55")
+        self.assertEqual((state.total_len, state.data_len), (46, 22))
+        self.assertEqual((state.year, state.month, state.day), (2025, 7, 16))
+        self.assertEqual((state.hour, state.minute, state.second), (15, 11, 3))
+        self.assertEqual((state.verify_type, state.verify_code), (2, 0x1234))
+        self.assertEqual((state.status_byte_24, state.status_byte_25), (0b1110_0110, 0x0F))
+        self.assertTrue(
+            all(
+                (
+                    state.high_breaker_closed_light,
+                    state.brake_release_fault_light,
+                    state.doors_closed_light,
+                    state.network_fault_light,
+                    state.auto_turnback_available,
+                    state.ato_available,
+                    state.wash_mode_entered,
+                    state.ato_active,
+                    state.auto_turnback_active,
+                )
+            )
+        )
+        self.assertEqual(state.vehicle_speed_cmps, 1234)
+        self.assertAlmostEqual(state.vehicle_speed_mps, 12.34)
+        self.assertEqual((state.control_byte_28, state.door_control_byte_29), (0xFF, 0x0F))
+        self.assertTrue(
+            all(
+                (
+                    state.emergency_brake_button_locked,
+                    state.bus_control_button_locked,
+                    state.forced_release_triggered,
+                    state.forced_air_pump_triggered,
+                    state.emergency_command_button_locked,
+                    state.parking_brake_apply_triggered,
+                    state.parking_brake_release_triggered,
+                    state.horn_triggered,
+                    state.open_left_door_triggered,
+                    state.open_right_door_triggered,
+                    state.close_left_door_triggered,
+                    state.close_right_door_triggered,
+                )
+            )
+        )
+        self.assertEqual((state.external_lighting_mode, state.external_lighting), (4, "HIGH_BEAM"))
+        self.assertEqual((state.door_mode, state.door_operation_mode), (2, "AUTO"))
+        self.assertEqual((state.command_byte_34, state.mode_byte_35), (0xFF, 0x0F))
+        self.assertTrue(
+            all(
+                (
+                    state.high_acceleration_button_locked,
+                    state.cab_lighting_button_locked,
+                    state.mode_upgrade_confirm_triggered,
+                    state.mode_downgrade_confirm_triggered,
+                    state.confirm_triggered,
+                    state.auto_turnback_triggered,
+                    state.traction_aux_reset_triggered,
+                    state.ato_start_triggered,
+                    state.wash_mode_switch_locked,
+                    state.key_switch_locked,
+                    state.vigilance_triggered,
+                    state.vigilance_release_allowed,
+                )
+            )
+        )
+        self.assertEqual((state.direction_handle_code, state.direction), (2, "REVERSE"))
+        self.assertEqual(state.main_handle_code, 4)
+        self.assertEqual((state.traction_percent_raw, state.brake_percent_raw), (150, 130))
+        self.assertEqual(state.reserved_word, 0xBEEF)
+        driver_input = state.to_driver_input()
+        self.assertEqual(driver_input.handle_mode, DriverHandleMode.FAST_BRAKE)
+        self.assertEqual((driver_input.traction_percent, driver_input.brake_percent), (100.0, 100.0))
+
     def test_parser_reads_traction_handle_and_percent(self) -> None:
         frame = bytearray(46)
         _write_word(frame, 26, 1234)
@@ -67,6 +172,14 @@ class MitsubishiPlcCabParserTests(unittest.TestCase):
         self.assertTrue(driver_input.emergency_brake)
         self.assertTrue(command.emergency_brake)
         self.assertEqual(command.traction_percent, 0)
+
+    def test_emergency_command_button_also_requests_emergency_brake(self) -> None:
+        frame = bytearray(46)
+        frame[28] = 0b0001_0000
+
+        driver_input = MitsubishiPlcCabParser().parse_driver_input(bytes(frame))
+
+        self.assertTrue(driver_input.emergency_brake)
 
     def test_parser_rejects_wrong_frame_length(self) -> None:
         with self.assertRaises(ValueError):

@@ -13,16 +13,19 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from app.adapters.cab import DriverCabHardwareController
 from app.core.engine import SimulationEngine
-from app.domain.line.services import LineMapRepository, TrackQueryService
+from app.domain.line.services import LineMapRepository, LineScope, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
+from app.domain.power.experiments import PowerExperimentRegistry
 from app.domain.operations.member_c_demo import MemberCDemoRunner
 from app.domain.operations.member_d_demo import Phase2MemberDDemoRunner
 from app.domain.operations.phase0_member_d_demo import Phase0MemberDDemoRunner
 from app.domain.operations.phase1_member_d_demo import Phase1MemberDDemoRunner
 from app.domain.operations.phase2_member_d_full_demo import Phase2MemberDFullDemoRunner
+from app.domain.station.independent_sim import IndependentPassengerSimulation
 from app.infra.recorder import RunRecorder
 
 
@@ -31,12 +34,13 @@ JsonDict = dict[str, Any]
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = ROOT / "data" / "cache" / "line_map.json"
 DEFAULT_RUN_DIR = ROOT / "outputs" / "runs"
-REPO_STATIONS = ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
+REPO_STATIONS = ROOT / "data" / "line9" / "stations.csv"
 WORKSPACE_STATIONS = (
     ROOT / "external" / "BJTUMetroSim" / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
 )
 DEFAULT_STATIONS = REPO_STATIONS if REPO_STATIONS.exists() else WORKSPACE_STATIONS
-DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_single.json"
+DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_interactive.json"
+DEFAULT_MAINLINE_SCOPE = ROOT / "data" / "scenarios" / "line9_mainline_scope.json"
 DEFAULT_POWER_TOPOLOGY = ROOT / "data" / "scenarios" / "line9_power_topology.json"
 
 LINE9_COLOR = "#8FC31F"
@@ -65,14 +69,24 @@ class Line9DataService:
         cache_path: Path = DEFAULT_CACHE,
         stations_path: Path = DEFAULT_STATIONS,
         run_dir: Path = DEFAULT_RUN_DIR,
+        mainline_scope_path: Path = DEFAULT_MAINLINE_SCOPE,
     ) -> None:
         self.cache_path = cache_path
         self.stations_path = stations_path
         self.run_dir = run_dir
+        self.mainline_scope_path = mainline_scope_path
         self._line_map: JsonDict | None = None
         self._stations: list[JsonDict] | None = None
+        self._mainline_scope: LineScope | None = None
         self._sim_runner: MemberCDemoRunner | None = None
         self._power_topology: JsonDict | None = None
+        self._passenger_sim: IndependentPassengerSimulation | None = None
+
+    @property
+    def passenger_sim(self) -> IndependentPassengerSimulation:
+        if self._passenger_sim is None:
+            self._passenger_sim = IndependentPassengerSimulation(self.stations)
+        return self._passenger_sim
 
     @property
     def line_map(self) -> JsonDict:
@@ -86,6 +100,12 @@ class Line9DataService:
             self._stations = self._load_station_catalog()
         return self._stations
 
+    @property
+    def mainline_scope(self) -> LineScope:
+        if self._mainline_scope is None:
+            self._mainline_scope = LineScope.load(self.mainline_scope_path)
+        return self._mainline_scope
+
     def health(self) -> JsonDict:
         validation = self.line_map.get("validation", {})
         return {
@@ -95,6 +115,8 @@ class Line9DataService:
             "cache": str(self.cache_path),
             "cacheExists": self.cache_path.exists(),
             "validationOk": validation.get("ok"),
+            "mainlineScopeId": self.mainline_scope.scope_id,
+            "mainlineSegmentCount": len(self.mainline_scope.segment_ids),
             "generatedAt": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -181,6 +203,12 @@ class Line9DataService:
         return {
             "lineId": "9",
             "name": "9号线轨道级视图",
+            "scope": {
+                "activeForSimulation": self.mainline_scope.scope_id,
+                "mainlineSegmentCount": len(self.mainline_scope.segment_ids),
+                "fullMapRetained": True,
+                "segmentIds": sorted(self.mainline_scope.segment_ids),
+            },
             "lengthM": self.stations[-1]["mileageM"] - self.stations[0]["mileageM"],
             "counts": {
                 "segments": len(self.line_map.get("segments", [])),
@@ -783,11 +811,15 @@ class ApiHandler(BaseHTTPRequestHandler):
     service: Line9DataService
     engine: SimulationEngine | None = None
     ws_broadcaster: WebSocketBroadcaster | None = None
+    experiment_registry: PowerExperimentRegistry | None = None
+    cab_hardware_controller: DriverCabHardwareController | None = None
+    cab_hardware_lock = threading.RLock()
 
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+
             if path == "/api/health":
                 self._send_json(self._health())
             elif path == "/api/lines/9/macro":
@@ -802,8 +834,44 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self._sim_state())
             elif path == "/api/sim/topology-state":
                 self._send_json(self._main_engine_topology_state())
+            elif path == "/api/sim/interlocking/state":
+                snap = self.engine.snapshot() if self.engine else None
+                self._send_json(snap.interlocking if snap else {
+                    "mode": "UNAVAILABLE", "routes": [], "sections": [], "switches": [], "signals": []
+                })
+            elif path == "/api/sim/dispatch/state":
+                snap = self.engine.snapshot() if self.engine else None
+                self._send_json(snap.dispatch_runtime if snap else {
+                    "registeredTrainCount": 0, "departureCount": 0, "recentDepartures": []
+                })
+            elif path == "/api/hardware/driver-cab/status":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(controller.status())
+            elif match := re.fullmatch(r"/api/sim/passenger-history/([^/]+)", path):
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    query = parse_qs(parsed.query)
+                    since = query.get("sinceSimTimeMs", [None])[0]
+                    self._send_json(self.engine.station_passenger_history(
+                        match.group(1),
+                        int(since) if since is not None else None,
+                    ))
+            elif path == "/api/passenger-sim/state":
+                self._send_json(self.service.passenger_sim.snapshot())
             elif path == "/api/sim/power/state":
                 self._send_json(self._sim_power_state())
+            elif path == "/api/sim/power/commands":
+                self._send_json({"ok": True, "data": self.engine.power_command_status() if self.engine else []})
+            elif match := re.fullmatch(r"/api/sim/power/commands/([^/]+)", path):
+                commands = self.engine.power_command_status(match.group(1)) if self.engine else []
+                if commands:
+                    self._send_json({"ok": True, "data": commands[0]})
+                else:
+                    self._send_json({"ok": False, "error": "POWER_COMMAND_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
             elif path == "/api/sim/speed-profile":
                 self._send_json(self._speed_profile())
             elif path == "/api/sim/run/export":
@@ -811,6 +879,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json({"ok": True, "data": self.engine.export_current_run()})
+            elif path == "/api/power/experiments":
+                self._send_json({"ok": True, "data": self._power_experiment_registry().list()})
+            elif match := re.fullmatch(r"/api/power/experiments/([^/]+)/trials", path):
+                try:
+                    result = self._power_experiment_registry().get(match.group(1), include_trials=True)
+                    self._send_json({"ok": True, "data": result["trials"]})
+                except KeyError:
+                    self._send_json({"ok": False, "error": "POWER_EXPERIMENT_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
+            elif match := re.fullmatch(r"/api/power/experiments/([^/]+)", path):
+                try:
+                    result = self._power_experiment_registry().get(match.group(1), include_trials=False)
+                    self._send_json({"ok": True, "data": result})
+                except KeyError:
+                    self._send_json({"ok": False, "error": "POWER_EXPERIMENT_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
             elif path == "/api/phase0/member-d/demo":
                 self._send_json(self.service.member_d_phase0_demo())
             elif path == "/api/phase1/member-d/demo":
@@ -823,11 +905,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/phase2/member-c/demo":
                 self._serve_html_file(ROOT / "member-c-demo.html")
             elif path == "/api/phase2/member-c/member-c-topology.js":
-                self._serve_static_file(
-                    ROOT / "member-c-topology.js", "application/javascript; charset=utf-8"
-                )
-            elif path == "/api/phase2/member-c/routes":
-                self._serve_html_file(ROOT / "member-c-routes.html")
+                self._serve_static_file(ROOT / "member-c-topology.js", "application/javascript; charset=utf-8")
             elif path == "/api/phase2/member-c/state":
                 self._send_json(self.service.member_c_state())
             elif path == "/api/phase2/member-c/step":
@@ -862,8 +940,22 @@ class ApiHandler(BaseHTTPRequestHandler):
                     str(payload["routeId"]) if payload.get("routeId") is not None else None
                 ))
                 return
+            if path.startswith("/api/passenger-sim/"):
+                payload = self._read_json_body()
+                sim = self.service.passenger_sim
+                action = path.rsplit("/", 1)[-1]
+                if action == "start": sim.start()
+                elif action == "pause": sim.pause()
+                elif action == "resume": sim.resume()
+                elif action == "stop": sim.stop()
+                elif action == "step": sim.step(int(payload.get("seconds", 1)))
+                else:
+                    self._send_json({"ok": False, "error": "UNKNOWN_PASSENGER_SIM_ACTION"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._send_json({"ok": True, "action": action, "state": sim.snapshot()})
+                return
 
-            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/step", "/api/sim/tick-interval"}:
+            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/speed", "/api/sim/step", "/api/sim/tick-interval"}:
                 if not self.engine:
                     self._send_json(
                         {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
@@ -872,11 +964,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return
 
             if path == "/api/sim/start":
-                self.engine.start()
+                start_result = self.engine.start()
                 snap = self.engine.snapshot()
                 self._send_json({
                     "ok": True,
                     "action": "start",
+                    "result": start_result,
+                    "clockState": self.engine.clock.state.value,
+                    "initializationSteps": [
+                        "LOAD_SCENARIO", "RESET_STATE", "CREATE_RECORDER_RUN",
+                        "INITIALIZE_POWER_NETWORK", "START_TICK_THREAD",
+                    ],
                     "simTimeMs": snap.sim_time_ms if snap else int(self.engine.clock.sim_time_seconds * 1000),
                 })
             elif path == "/api/sim/pause":
@@ -896,6 +994,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 interval_ms = float(payload.get("intervalMs", self.engine._tick_interval_seconds * 1000))
                 applied_seconds = self.engine.set_tick_interval_seconds(interval_ms / 1000.0)
                 self._send_json({"ok": True, "tickIntervalMs": round(applied_seconds * 1000)})
+            elif path == "/api/sim/speed":
+                payload = self._read_json_body()
+                try:
+                    multiplier = self.engine.set_speed_multiplier(int(payload.get("multiplier", 1)))
+                    self._send_json({"ok": True, "speedMultiplier": multiplier})
+                except (TypeError, ValueError) as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif path == "/api/sim/train/add":
                 self._send_json(self._add_train())
             elif path == "/api/sim/train/remove":
@@ -914,7 +1019,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_body()
                 enabled = bool(payload.get("enabled", False))
                 train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
-                self._send_json(self.engine.set_manual_mode(train_id, enabled))
+                self._send_json(self._set_manual_mode_from_frontend(train_id, enabled))
             elif path == "/api/sim/manual-command":
                 payload = self._read_json_body()
                 train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
@@ -923,11 +1028,58 @@ class ApiHandler(BaseHTTPRequestHandler):
                     float(payload.get("tractionPercent", 0)),
                     float(payload.get("brakePercent", 0)),
                 ))
+            elif path == "/api/hardware/driver-cab/connect":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    payload = self._read_json_body()
+                    try:
+                        result = controller.connect(
+                            host=str(payload["host"]) if payload.get("host") is not None else None,
+                            port=int(payload["port"]) if payload.get("port") is not None else None,
+                        )
+                        self._send_json(result, HTTPStatus.ACCEPTED)
+                    except (TypeError, ValueError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/hardware/driver-cab/disconnect":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(controller.disconnect())
             elif path == "/api/sim/power/faults":
                 payload = self._read_json_body()
                 self._send_json(self._apply_power_fault(payload))
             elif path == "/api/sim/power/reset":
                 self._send_json(self._reset_power_network())
+            elif path == "/api/sim/power/commands":
+                payload = self._read_json_body()
+                self._send_json(self._queue_power_command(payload))
+            elif path == "/api/sim/power/commands/replay":
+                payload = self._read_json_body()
+                self._send_json(self._replay_power_commands(payload))
+            elif path == "/api/power/experiments":
+                payload = self._read_json_body()
+                try:
+                    result = self._power_experiment_registry().create(payload)
+                    self._send_json({"ok": True, "data": result}, HTTPStatus.CREATED)
+                except ValueError as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/power/experiments/batch":
+                payload = self._read_json_body()
+                requests = payload.get("experiments", [])
+                if not isinstance(requests, list) or not requests:
+                    self._send_json({"ok": False, "error": "POWER_EXPERIMENT_BATCH_REQUIRED"}, HTTPStatus.BAD_REQUEST)
+                else:
+                    try:
+                        results = [self._power_experiment_registry().create(item) for item in requests]
+                        self._send_json(
+                            {"ok": True, "data": {"count": len(results), "experiments": results}},
+                            HTTPStatus.CREATED,
+                        )
+                    except ValueError as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif match := re.fullmatch(r"/api/sim/power/switches/([^/]+)/operate", path):
                 payload = self._read_json_body()
                 self._send_json(self._operate_power_switch(match.group(1), payload))
@@ -965,71 +1117,88 @@ class ApiHandler(BaseHTTPRequestHandler):
                 segment_id = platform.get("segmentId")
                 if segment_id is None:
                     continue
-                options.append({
-                    "segmentId": int(segment_id),
-                    "stationCode": station["stationCode"],
-                    "stationName": station["stationName"],
-                    "directions": list(self.engine.available_initial_directions(str(station["stationCode"]), int(segment_id))),
-                })
+                directions = self.engine.available_initial_directions(str(station["stationCode"]), int(segment_id))
+                if directions:
+                    options.append({"segmentId": int(segment_id), "stationCode": station["stationCode"], "stationName": station["stationName"], "directions": list(directions)})
         return options
     def _main_engine_topology_state(self) -> JsonDict:
-        """Adapt the main engine snapshot to the established Member C canvas contract."""
+        """Project the main engine onto the established Member C topology contract."""
         static = self.service.member_c_static_routes()
         if self.engine is None or self.engine.snapshot() is None:
             return {
-                "tick": 0, "simTimeMs": 0, "clockState": "IDLE", "segments": static.get("segments", []),
-                "trains": [], "routes": [], "signals": [], "axleSections": [],
-                "segTrainColors": {}, "events": [], "occupiedCount": 0,
-                "totalAxleSections": len(self.service.line_map.get("axleSections", [])),
+                "tick": 0, "simTimeMs": 0, "clockState": "IDLE",
+                "segments": static.get("segments", []), "trains": [], "routes": [],
+                "signals": static.get("signals", []), "axleSections": [], "switches": [],
+                "segTrainColors": {}, "events": [], "startOptions": self._topology_start_options(),
+                "occupiedCount": 0, "totalAxleSections": len(self.service.line_map.get("axleSections", [])),
                 "lockedRouteCount": 0, "requestedRoutesCount": 0,
             }
         snap = self.engine.snapshot()
         assert snap is not None
         interlocking = snap.interlocking
         sections = interlocking.get("sections", [])
-        signal_aspects = {
-            str(item.get("signalId")): item.get("aspect", "RED")
-            for item in interlocking.get("signals", [])
-        }
+        aspect_by_signal = {str(item.get("signalId")): item.get("aspect", "RED") for item in interlocking.get("signals", [])}
         colors = ("#58a6ff", "#f0c040", "#f778ba", "#39d0c8", "#8fc31f")
-        trains = []
-        # One occupied detector section can contain a turnout common segment
-        # and both branches. The map must paint the physical train footprint,
-        # not every Seg that shares its detector state.
         seg_train_colors: dict[int, str] = {}
+        trains = []
         for index, train in enumerate(snap.trains):
-            segment_id = train.get("currentSegmentId")
             color = colors[index % len(colors)]
-            for covered_segment_id in self.engine.section_occupation.covered_segments_for(train.get("trainId", "")):
+            segment_id = train.get("currentSegmentId")
+            covered_segments = sorted(
+                int(item)
+                for item in self.engine.section_occupation.covered_segments_for(str(train.get("trainId")))
+            ) if self.engine is not None else []
+            if segment_id is not None:
+                seg_train_colors[int(segment_id)] = color
+            for covered_segment_id in covered_segments:
                 seg_train_colors[covered_segment_id] = color
             trains.append({
                 "id": train.get("trainId"), "segId": segment_id,
                 "offsetM": train.get("currentSegmentOffsetM", 0.0),
+                "coveredSegmentIds": covered_segments,
                 "positionM": train.get("pathPositionM", 0.0),
                 "speedMps": train.get("speedMps", 0.0),
                 "direction": "FORWARD" if train.get("direction") == "UP" else "BACKWARD",
-                "lengthM": 120.0, "phase": train.get("phase", "IDLE"),
-                "routeFailureReason": train.get("routeFailureReason"),
-                "movementAuthorityReason": train.get("movementAuthorityReason"), "dwellRemainingSec": train.get("dwellRemainingSec", 0.0),
-                "routeRetryAtMs": train.get("routeRetryAtMs"), "color": color,
+                "directionCode": train.get("direction"),
+                "lengthM": train.get("trainLengthM", 120.0), "phase": train.get("phase", "IDLE"),
+                "color": color, "routeFailureReason": train.get("routeFailureReason"),
+                "movementAuthorityReason": train.get("movementAuthorityReason"),
+                "routeIds": train.get("routeChainIds", []),
+                "currentStation": train.get("currentStation"),
+                "currentStationCode": train.get("currentStationCode"),
+                "nextStation": train.get("nextStation"),
+                "nextStationCode": train.get("nextStationCode"),
+                "dwellRemainingSec": train.get("dwellRemainingSec", 0.0),
+                "routeRetryAtMs": train.get("routeRetryAtMs"),
             })
-        signals = [
-            {"id": item.get("id"), "segId": item.get("segId"), "name": item.get("name", ""),
-             "aspect": signal_aspects.get(str(item.get("id")), "RED")}
-            for item in static.get("signals", [])
-        ]
+        signals = [{**item, "aspect": aspect_by_signal.get(str(item.get("id")), "RED")} for item in static.get("signals", [])]
         routes = interlocking.get("routes", [])
+        events = []
+        for decision in snap.dispatch_decisions:
+            action = decision.get("action")
+            if action == "TURNBACK":
+                events.append({
+                    "category": "折返",
+                    "message": f"列车 {decision.get('trainId')} 在 {decision.get('stationId')} 完成折返",
+                    "tick": snap.tick,
+                })
+            elif action in {"HOLD", "STAGGER_DEPARTURE", "DWELL_EXTEND"}:
+                events.append({
+                    "category": "等待",
+                    "message": f"列车 {decision.get('trainId')} 暂缓发车：{decision.get('reason')}",
+                    "tick": snap.tick,
+                })
         return {
             "tick": snap.tick, "simTimeMs": snap.sim_time_ms, "clockState": snap.clock_state,
-            "segments": static.get("segments", []), "startOptions": self._topology_start_options(),
-            "trains": trains, "routes": routes,
-            "signals": signals, "axleSections": sections, "switches": interlocking.get("switches", []),
-            "segTrainColors": seg_train_colors, "events": [],
-            "occupiedCount": sum(1 for item in sections if item.get("occupied")),
+            "segments": static.get("segments", []), "startOptions": self._topology_start_options(), "trains": trains,
+            "routes": routes, "signals": signals, "axleSections": sections,
+            "switches": interlocking.get("switches", []), "segTrainColors": seg_train_colors,
+            "events": events, "occupiedCount": sum(1 for item in sections if item.get("occupied")),
             "totalAxleSections": len(sections),
             "lockedRouteCount": sum(1 for item in routes if item.get("state") in ("LOCKED", "APPROACH_LOCKED")),
             "requestedRoutesCount": len(routes),
         }
+
     def _sim_state(self) -> JsonDict:
         if self.engine is None:
             return {
@@ -1047,6 +1216,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "simTime": snap.sim_time_str,
                 "tick": snap.tick,
                 "simTimeMs": snap.sim_time_ms,
+                "speedMultiplier": snap.speed_multiplier,
                 "tickIntervalMs": round(self.engine._tick_interval_seconds * 1000),
             },
             "trains": snap.trains,
@@ -1054,6 +1224,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             "power": snap.power,
             "powerNetwork": snap.power_network,
             "dispatchDecisions": snap.dispatch_decisions,
+            "dispatchRuntime": snap.dispatch_runtime,
+            "interlocking": snap.interlocking,
             "kpi": snap.kpi,
             "source": "simulation-engine",
         }
@@ -1089,15 +1261,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "POWER_NETWORK_NOT_INITIALIZED"}
         fault_type = str(payload.get("faultType", "SUBSTATION_OUTAGE"))
         target_id = str(payload.get("targetId", ""))
-        if fault_type != "SUBSTATION_OUTAGE" or not target_id:
+        command_by_fault = {
+            "SUBSTATION_OUTAGE": ("SUBSTATION_OUTAGE", {"targetId": target_id, "bigBilateral": str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL"}),
+            "FEEDER_OPEN": ("SET_FEEDER_STATUS", {"feederId": target_id, "status": "OPEN"}),
+            "CONTACT_RAIL_DEENERGIZED": ("SET_CONTACT_SECTION_STATUS", {"sectionId": target_id, "status": "DEENERGIZED"}),
+        }
+        if fault_type not in command_by_fault or not target_id:
             return {"ok": False, "error": "UNSUPPORTED_POWER_FAULT"}
-        result = self.engine.queue_power_command(
-            "SUBSTATION_OUTAGE",
-            {
-                "targetId": target_id,
-                "bigBilateral": str(payload.get("mode", "N_MINUS_1_BIG_BILATERAL")) == "N_MINUS_1_BIG_BILATERAL",
-            },
-        )
+        command_type, command_payload = command_by_fault[fault_type]
+        result = self.engine.queue_power_command(command_type, command_payload)
         return {"ok": True, "data": {"faultId": f"PF-{target_id}", **result}}
 
     def _reset_power_network(self) -> JsonDict:
@@ -1131,12 +1303,59 @@ class ApiHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _queue_power_command(self, payload: JsonDict) -> JsonDict:
+        if self.engine is None or self.engine.power_service.network is None:
+            return {"ok": False, "error": "POWER_NETWORK_NOT_INITIALIZED"}
+        command_type = str(payload.get("commandType", ""))
+        command_payload = payload.get("payload", {})
+        if not command_type or not isinstance(command_payload, dict):
+            return {"ok": False, "error": "INVALID_POWER_COMMAND"}
+        try:
+            return {"ok": True, "data": self.engine.queue_power_command(command_type, command_payload)}
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _replay_power_commands(self, payload: JsonDict) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        records = payload.get("commands")
+        if records is None and payload.get("runId") is not None and self.engine.recorder is not None:
+            records = self.engine.recorder.replay_power_commands(int(payload["runId"]))
+        if not isinstance(records, list):
+            return {"ok": False, "error": "POWER_COMMAND_REPLAY_DATA_REQUIRED"}
+        queued = self.engine.replay_power_commands(
+            records,
+            base_sim_time_ms=int(payload["baseSimTimeMs"]) if payload.get("baseSimTimeMs") is not None else None,
+        )
+        return {"ok": True, "data": {"queuedCount": len(queued), "commands": queued}}
+
     def _read_json_body(self) -> JsonDict:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
+
+    def _driver_cab_controller(self) -> DriverCabHardwareController | None:
+        if self.engine is None:
+            return None
+        with ApiHandler.cab_hardware_lock:
+            controller = ApiHandler.cab_hardware_controller
+            if controller is None or controller.engine is not self.engine:
+                if controller is not None:
+                    controller.disconnect()
+                controller = DriverCabHardwareController(self.engine)
+                ApiHandler.cab_hardware_controller = controller
+            return controller
+
+    @classmethod
+    def _power_experiment_registry(cls) -> PowerExperimentRegistry:
+        if cls.experiment_registry is None:
+            cls.experiment_registry = PowerExperimentRegistry(
+                DEFAULT_POWER_TOPOLOGY,
+                ROOT / "outputs" / "power_experiments.sqlite",
+            )
+        return cls.experiment_registry
 
     def _add_train(self) -> JsonDict:
         if self.engine is None:
@@ -1167,7 +1386,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         train_id = str(payload.get("trainId", ""))
         if not train_id:
             return {"ok": False, "error": "MISSING_TRAIN_ID"}
-        return self.engine.set_manual_mode(train_id, bool(payload.get("enabled", False)))
+        return self._set_manual_mode_from_frontend(train_id, bool(payload.get("enabled", False)))
+
+    def _set_manual_mode_from_frontend(self, train_id: str, enabled: bool) -> JsonDict:
+        """Only the PLC driver cab may change driving mode while connected."""
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        controller = self._driver_cab_controller()
+        if controller is not None:
+            status = controller.status().get("status", {})
+            if status.get("state") == "CONNECTED" and status.get("trainId") == train_id:
+                return {
+                    "ok": False,
+                    "error": "DRIVER_CAB_MODE_CONTROL_EXCLUSIVE",
+                    "message": "司机台已连接，驾驶模式只能由司机台切换",
+                    "trainId": train_id,
+                }
+        return self.engine.set_manual_mode(train_id, enabled)
 
     def _send_train_manual_command(self) -> JsonDict:
         if self.engine is None:
@@ -1206,17 +1441,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
-    def _serve_html_file(self, file_path: Path) -> None:
-        self._serve_static_file(file_path, "text/html; charset=utf-8")
-
     def _serve_static_file(self, file_path: Path, content_type: str) -> None:
         body = file_path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Pragma", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_html_file(self, file_path: Path) -> None:
+        body = file_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self._send_cors_headers()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -1281,6 +1520,8 @@ def main() -> None:
     print("  GET  /api/lines/9/macro")
     print("  GET  /api/lines/9/track-map")
     print("  GET  /api/sim/state")
+    print("  GET  /api/sim/interlocking/state")
+    print("  GET  /api/sim/dispatch/state")
     print("  POST /api/sim/start")
     print("  POST /api/sim/pause")
     print("  POST /api/sim/resume")
@@ -1288,6 +1529,8 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        if ApiHandler.cab_hardware_controller:
+            ApiHandler.cab_hardware_controller.disconnect()
         if ApiHandler.engine:
             ApiHandler.engine.stop()
 

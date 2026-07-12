@@ -18,6 +18,7 @@ export default function TrainManagementPanel() {
   const trains = useSimStore((s) => s.trains);
   const trainColors = useSimStore((s) => s.trainColors);
   const line9Stations = useSimStore((s) => s.line9Stations);
+  const trackMap = useSimStore((s) => s.trackMap);
   const addTrain = useSimStore((s) => s.addTrain);
   const removeTrain = useSimStore((s) => s.removeTrain);
   const engineClockState = useSimStore((s) => s.engineClockState);
@@ -38,11 +39,29 @@ export default function TrainManagementPanel() {
   const [addError, setAddError] = useState<string | null>(null);
 
   const connected = backendStatus === 'connected';
-  const trainIdSeq = trains.length + 1;
+  const stationOptions = trackMap?.stations?.map((station) => ({
+    code: station.stationCode,
+    name: station.stationName,
+  })) ?? line9Stations.map((station) => ({ code: station, name: station }));
+  let trainIdSeq = 1;
+  while (trains.some((train) => train.trainId === `T09${String(trainIdSeq).padStart(2, '0')}`)) {
+    trainIdSeq += 1;
+  }
+  // 后端权威约定：UP 按站序递增（郭公庄→国家图书馆），DOWN 按站序递减。
+  // 正线仿真按固定端点发车；到终点后由后端自动折返。
+  const fixedStart = form.direction === 'UP'
+    ? stationOptions[0]
+    : stationOptions[stationOptions.length - 1];
+  const routeLabel = stationOptions.length > 1
+    ? (form.direction === 'UP'
+      ? `${stationOptions[0].name} → ${stationOptions[stationOptions.length - 1].name}`
+      : `${stationOptions[stationOptions.length - 1].name} → ${stationOptions[0].name}`)
+    : '线路数据加载中';
 
   const handleAdd = async () => {
+    setAddError(null);
     const id = form.trainId || `T09${String(trainIdSeq).padStart(2, '0')}`;
-    const station = form.initialStationCode || (line9Stations[0] ?? 'GGZ');
+    const station = fixedStart?.code ?? (form.direction === 'UP' ? 'GGZ' : 'GTG');
     const payload: AddTrainPayload = {
       trainId: id,
       initialStationCode: station,
@@ -55,19 +74,19 @@ export default function TrainManagementPanel() {
     if (showVehicleForm) {
       payload.vehicleConfig = vehicleForm;
     }
-    const result = await addTrain(payload);
-    if (result.ok) {
-      setAddError(null);
-      setShowForm(false);
-      setForm((f) => ({
-        ...f,
-        trainId: `T09${String(trainIdSeq + 1).padStart(2, '0')}`,
-      }));
-    } else if (result.error === 'INITIAL_PLACEMENT_OCCUPIED') {
-      const conflicts = result.conflictingTrainIds?.join('、');
-      setAddError(`起点站台已有列车占用${conflicts ? `：${conflicts}` : ''}，请等待其驶离后再加车。`);
-    } else {
-      setAddError(`加车失败：${result.error ?? '未知原因'}`);
+    try {
+      const result = await addTrain(payload);
+      if (result) {
+        setShowForm(false);
+        setForm((f) => ({
+          ...f,
+          trainId: '',
+        }));
+      } else {
+        setAddError('添加失败：请检查列车ID、起点站和载客参数');
+      }
+    } catch (error) {
+      setAddError(error instanceof Error ? `添加失败：${error.message}` : '添加失败：后端不可用');
     }
   };
 
@@ -136,11 +155,6 @@ export default function TrainManagementPanel() {
             borderRadius: 6,
           }}
         >
-          {addError && (
-            <div style={{ color: '#f85149', fontSize: 11, lineHeight: 1.45, marginBottom: 8 }}>
-              {addError}
-            </div>
-          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
             <Field label="列车ID" small>
               <input
@@ -151,25 +165,20 @@ export default function TrainManagementPanel() {
               />
             </Field>
             <Field label="起点站" small>
-              <select
-                value={form.initialStationCode}
-                onChange={(e) => setForm({ ...form, initialStationCode: e.target.value })}
-                style={inputStyle}
-              >
-                {line9Stations.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
+              <div style={{ ...inputStyle, color: '#8b949e' }}>
+                {fixedStart ? `${fixedStart.name}（${fixedStart.code}）` : '线路数据加载中'}
+              </div>
             </Field>
             <Field label="方向" small>
               <select
                 value={form.direction}
-                onChange={(e) => setForm({ ...form, direction: e.target.value as 'UP' | 'DOWN' })}
+                onChange={(e) => setForm({ ...form, direction: e.target.value as 'UP' | 'DOWN', initialStationCode: '' })}
                 style={inputStyle}
               >
                 <option value="UP">上行 (UP)</option>
                 <option value="DOWN">下行 (DOWN)</option>
               </select>
+              <span style={{ fontSize: 8, color: '#6e7681' }}>{routeLabel}</span>
             </Field>
             <Field label="驾驶模式" small>
               <select
@@ -249,6 +258,12 @@ export default function TrainManagementPanel() {
             </div>
           )}
 
+          {addError && (
+            <div style={{ marginTop: 8, fontSize: 10, color: '#f85149' }}>
+              {addError}
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 mt-3">
             <button
               onClick={() => { setShowForm(false); setShowVehicleForm(false); }}
@@ -321,11 +336,7 @@ export default function TrainManagementPanel() {
                   <div style={{ fontSize: 10, color: '#6b7280', marginTop: 2 }}>
                     {t.currentStation} → {t.nextStation}
                   </div>
-                  <div style={{ fontSize: 9, color: '#8b949e', marginTop: 1, fontFamily: 'monospace' }}>
-                    {t.currentSegmentId == null
-                      ? 'SEG --'
-                      : `S${t.currentSegmentId} + ${(t.currentSegmentOffsetM ?? 0).toFixed(1)} m`}
-                  </div>                  <div style={{ fontSize: 9, color: '#484f58', marginTop: 1 }}>
+                  <div style={{ fontSize: 9, color: '#484f58', marginTop: 1 }}>
                     {t.direction === 'UP' ? '上行' : '下行'} · {t.onboardPax}/{t.capacityPax} 人 · {t.phase}
                   </div>
                 </div>

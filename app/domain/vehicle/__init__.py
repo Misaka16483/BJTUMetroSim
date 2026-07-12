@@ -5,6 +5,7 @@ from app.domain.vehicle.services import (
     SimpleVehicleModel,
     TractionDriveModel,
     VehicleForceDemand,
+    VehiclePowerDemand,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "TrainState",
     "VehicleConfig",
     "VehicleForceDemand",
+    "VehiclePowerDemand",
 ]

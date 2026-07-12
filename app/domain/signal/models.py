@@ -46,7 +46,7 @@ class TrainState:
     segment_id: int | None = None
     # B 使用秒为单位的时间戳（我们的代码用 sim_time_ms）
     sim_time_s: float = 0.0
-    # B/D 累计牵引能耗（kWh）
+    # B/D signed net electrical energy (kWh): positive draw, negative feedback.
     net_energy_kwh: float = 0.0
 
     def __post_init__(self) -> None:
@@ -63,8 +63,6 @@ class TrainState:
             raise ValueError("segment_id 必须为正数")
         if self.sim_time_s < 0:
             raise ValueError("sim_time_s 不能为负数")
-        if self.net_energy_kwh < 0:
-            raise ValueError("net_energy_kwh 不能为负数")
 
 
 @dataclass(frozen=True)

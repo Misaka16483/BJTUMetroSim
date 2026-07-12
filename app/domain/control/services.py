@@ -15,8 +15,14 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 
 class ATOController:
-    def __init__(self, config: AtoConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AtoConfig | None = None,
+        *,
+        enable_synchronous_profile_optimization: bool = True,
+    ) -> None:
         self.config = config or AtoConfig()
+        self.enable_synchronous_profile_optimization = enable_synchronous_profile_optimization
         self._last_train_id: str | None = None
         self._last_sim_time_s: float | None = None
         self._last_error_mps: float | None = None
@@ -24,10 +30,18 @@ class ATOController:
         self._filtered_derivative: float = 0.0
         self._profile_cache_key: tuple[object, ...] | None = None
         self._profile_cache: OptimizedSpeedProfile | None = None
+        # Fast-forward must keep the 250 ms physics lifecycle responsive.  A
+        # fresh DCDP solve can take seconds per interval, so the engine may
+        # temporarily use the deterministic braking curve while preserving an
+        # already-computed profile.
+        self.allow_profile_compute: bool = True
         self.last_target_speed_mps: float = 0.0
         self.last_speed_error_mps: float = 0.0
         self.last_pid_output_percent: float = 0.0
         self.last_profile_mode: str = "NONE"
+        self._last_command: ControlCommand | None = None
+        self._last_command_sim_time_s: float | None = None
+        self._terminal_braking_latched = False
 
     def decide(self, state: TrainState, target: AtoTarget) -> ControlCommand:
         if target.emergency_brake_required:
@@ -42,16 +56,19 @@ class ATOController:
             self.last_speed_error_mps = -state.speed_mps
             self.last_pid_output_percent = 0.0
             if state.speed_mps <= self.config.stop_speed_threshold_mps:
-                return ControlCommand(
+                command = ControlCommand(
                     state.train_id,
                     brake_percent=self.config.hold_brake_percent,
                     source=CommandSource.ATO,
                 )
-            return ControlCommand(
+                self._last_command = command
+                self._last_command_sim_time_s = state.sim_time_s
+                return command
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 brake_percent=self.config.max_brake_percent,
                 source=CommandSource.ATO,
-            )
+            ))
 
         if (
             distance_to_target_m <= self.config.creep_distance_m
@@ -61,11 +78,14 @@ class ATOController:
             self.last_speed_error_mps = self.config.creep_speed_threshold_mps - state.speed_mps
             self.last_pid_output_percent = self.config.creep_traction_percent
             self.last_profile_mode = "CREEP"
-            return ControlCommand(
+            command = ControlCommand(
                 state.train_id,
                 traction_percent=self.config.creep_traction_percent,
                 source=CommandSource.ATO,
             )
+            self._last_command = command
+            self._last_command_sim_time_s = state.sim_time_s
+            return command
 
         target_speed_mps = self.target_speed_mps(state, target)
         brake_distance_m = state.speed_mps * state.speed_mps / (2.0 * self.config.expected_deceleration_mps2)
@@ -79,27 +99,31 @@ class ATOController:
             self.last_target_speed_mps = target_speed_mps
             self.last_speed_error_mps = target_speed_mps - state.speed_mps
             self.last_pid_output_percent = -brake_percent
-            return ControlCommand(
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 brake_percent=brake_percent,
                 source=CommandSource.ATO,
-            )
+            ))
 
         pid_output_percent = self._pid_output_percent(state, target_speed_mps)
         pid_output_percent = self._apply_profile_feedforward(state, target, target_speed_mps, pid_output_percent)
         if pid_output_percent > 0:
-            return ControlCommand(
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 traction_percent=pid_output_percent,
                 source=CommandSource.ATO,
-            )
+            ))
         if pid_output_percent < 0:
-            return ControlCommand(
+            return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 brake_percent=abs(pid_output_percent),
                 source=CommandSource.ATO,
-            )
-        return ControlCommand.coast(state.train_id, source=CommandSource.ATO)
+            ))
+        return self._stabilize_command(
+            state,
+            target,
+            ControlCommand.coast(state.train_id, source=CommandSource.ATO),
+        )
 
     def reset(self) -> None:
         self._last_train_id = None
@@ -110,10 +134,23 @@ class ATOController:
         self._profile_cache_key = None
         self._profile_cache = None
         self.last_profile_mode = "NONE"
+        self._last_command = None
+        self._last_command_sim_time_s = None
+        self._terminal_braking_latched = False
 
     @property
     def current_profile(self) -> OptimizedSpeedProfile | None:
         return self._profile_cache
+
+    def install_profile(
+        self,
+        state: TrainState,
+        target: AtoTarget,
+        profile: OptimizedSpeedProfile,
+    ) -> None:
+        """Install a profile produced outside the real-time control thread."""
+        self._profile_cache_key = self._make_profile_cache_key(state, target)
+        self._profile_cache = profile
 
     def target_speed_mps(self, state: TrainState, target: AtoTarget) -> float:
         profile = self._profile_for(state, target)
@@ -143,12 +180,24 @@ class ATOController:
             cruise_speed_mps=self.config.target_cruise_speed_mps,
             expected_deceleration_mps2=self.config.expected_deceleration_mps2,
             stop_tolerance_m=self.config.stop_tolerance_m,
-            approach_margin_m=self.config.brake_margin_m if approach_margin_m is None else approach_margin_m,
+            # The fallback curve must hand over directly to creep control. Using
+            # brake_margin_m here creates a dead zone between creep_distance_m
+            # and brake_margin_m where the target speed is already zero.
+            approach_margin_m=self.config.creep_distance_m if approach_margin_m is None else approach_margin_m,
         )
+
+    def fallback_target_speed_mps(self, state: TrainState, target: AtoTarget) -> float:
+        """Return the safe lightweight target used while optimization is pending."""
+        return self._braking_curve_target_speed_mps(state, target)
 
     def _profile_for(self, state: TrainState, target: AtoTarget) -> OptimizedSpeedProfile | None:
         if not self.config.use_dynamic_programming_profile:
             return None
+        # During fast-forward, never construct a new cache key or solve DCDP.
+        # Path changes call reset(), so an existing cache is still the profile
+        # for the active interval.
+        if not self.allow_profile_compute:
+            return self._profile_cache
         target_position_m = self._target_position_m(target)
         if target_position_m <= 0:
             return None
@@ -165,20 +214,15 @@ class ATOController:
             deceleration_mps2=self.config.expected_deceleration_mps2,
             runtime_margin_ratio=self.config.profile_runtime_margin_ratio,
         )
-        cache_key = (
-            state.train_id,
-            round(target_position_m, 3),
-            round(target.permitted_speed_mps, 3),
-            round(self.config.target_cruise_speed_mps, 3),
-            round(scheduled_run_time_s, 3),
-            round(self.config.profile_time_step_s, 3),
-            round(self.config.profile_position_step_m, 3),
-            round(self.config.profile_speed_step_mps, 3),
-            self.config.profile_max_states_per_stage,
-            target.path_plan.cache_key() if target.path_plan is not None else None,
+        cache_key = self._make_profile_cache_key(
+            state,
+            target,
+            scheduled_run_time_s=scheduled_run_time_s,
         )
         if self._profile_cache_key == cache_key and self._profile_cache is not None:
             return self._profile_cache
+        if not self.enable_synchronous_profile_optimization:
+            return None
 
         self._profile_cache = optimize_speed_profile_dcdp(
             target_position_m=target_position_m,
@@ -194,6 +238,41 @@ class ATOController:
         )
         self._profile_cache_key = cache_key
         return self._profile_cache
+
+    def _make_profile_cache_key(
+        self,
+        state: TrainState,
+        target: AtoTarget,
+        *,
+        scheduled_run_time_s: float | None = None,
+    ) -> tuple[object, ...]:
+        target_position_m = self._target_position_m(target)
+        if scheduled_run_time_s is None:
+            vehicle_config = VehicleConfig(train_id=state.train_id)
+            acceleration_mps2 = max(
+                0.05,
+                (vehicle_config.max_traction_force_n - vehicle_config.basic_resistance_n)
+                / vehicle_config.mass_kg,
+            )
+            scheduled_run_time_s = self.config.profile_run_time_s or estimate_scheduled_run_time_s(
+                target_position_m=target_position_m,
+                permitted_speed_mps=min(target.permitted_speed_mps, self.config.target_cruise_speed_mps),
+                acceleration_mps2=acceleration_mps2,
+                deceleration_mps2=self.config.expected_deceleration_mps2,
+                runtime_margin_ratio=self.config.profile_runtime_margin_ratio,
+            )
+        return (
+            state.train_id,
+            round(target_position_m, 3),
+            round(target.permitted_speed_mps, 3),
+            round(self.config.target_cruise_speed_mps, 3),
+            round(scheduled_run_time_s, 3),
+            round(self.config.profile_time_step_s, 3),
+            round(self.config.profile_position_step_m, 3),
+            round(self.config.profile_speed_step_mps, 3),
+            self.config.profile_max_states_per_stage,
+            target.path_plan.cache_key() if target.path_plan is not None else None,
+        )
 
     def _profile_lookup_position_m(self, state: TrainState, target: AtoTarget) -> float:
         target_position_m = self._target_position_m(target)
@@ -261,6 +340,77 @@ class ATOController:
         self.last_speed_error_mps = speed_error_mps
         self.last_pid_output_percent = pid_output_percent
         return pid_output_percent
+
+    def _stabilize_command(
+        self,
+        state: TrainState,
+        target: AtoTarget,
+        requested: ControlCommand,
+    ) -> ControlCommand:
+        """Apply terminal-brake hysteresis and actuator-realistic slew limits."""
+        if self._last_command_sim_time_s is None:
+            dt_s = self.config.control_period_s
+        else:
+            dt_s = max(state.sim_time_s - self._last_command_sim_time_s, 1e-6)
+        target_position_m = self._target_position_m(target)
+        remaining_distance_m = max(0.0, target_position_m - state.position_m)
+        braking_distance_m = state.speed_mps * state.speed_mps / (
+            2.0 * self.config.expected_deceleration_mps2
+        )
+        in_terminal_braking_zone = (
+            remaining_distance_m
+            <= braking_distance_m + self.config.brake_margin_m + self.config.terminal_brake_guard_margin_m
+        )
+        if requested.brake_percent > 0 and in_terminal_braking_zone:
+            self._terminal_braking_latched = True
+
+        creep_allowed = (
+            remaining_distance_m <= self.config.creep_distance_m
+            and state.speed_mps <= self.config.creep_speed_threshold_mps
+        )
+        desired_traction = requested.traction_percent
+        desired_brake = requested.brake_percent
+        if self._terminal_braking_latched and desired_traction > 0 and not creep_allowed:
+            desired_traction = 0.0
+            desired_brake = 0.0
+
+        previous_traction = self._last_command.traction_percent if self._last_command is not None else 0.0
+        previous_brake = self._last_command.brake_percent if self._last_command is not None else 0.0
+        traction_step = self.config.traction_slew_rate_percent_per_s * dt_s
+        brake_apply_step = self.config.brake_apply_slew_rate_percent_per_s * dt_s
+        brake_release_step = self.config.brake_release_slew_rate_percent_per_s * dt_s
+
+        if desired_brake > 0:
+            traction = 0.0
+            if desired_brake >= previous_brake:
+                brake = min(desired_brake, previous_brake + brake_apply_step)
+            else:
+                brake = max(desired_brake, previous_brake - brake_release_step)
+        elif desired_traction > 0 and previous_brake > 0:
+            traction = 0.0
+            brake = max(0.0, previous_brake - brake_release_step)
+        elif desired_traction > 0:
+            brake = 0.0
+            if desired_traction >= previous_traction:
+                traction = min(desired_traction, previous_traction + traction_step)
+            else:
+                traction = max(desired_traction, previous_traction - traction_step)
+        elif previous_brake > 0:
+            traction = 0.0
+            brake = max(0.0, previous_brake - brake_release_step)
+        else:
+            brake = 0.0
+            traction = max(0.0, previous_traction - traction_step)
+
+        stabilized = ControlCommand(
+            state.train_id,
+            traction_percent=traction,
+            brake_percent=brake,
+            source=requested.source,
+        )
+        self._last_command = stabilized
+        self._last_command_sim_time_s = state.sim_time_s
+        return stabilized
 
     def _control_period_s(self, state: TrainState) -> float:
         if self._last_train_id != state.train_id or self._last_sim_time_s is None:

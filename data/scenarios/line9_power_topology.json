@@ -1,18 +1,68 @@
 {
+  "schemaVersion": "1.0",
+  "modelVersion": "LINE9-DC750-V1.0",
   "lineId": "9",
   "nominalVoltageV": 750,
   "quality": "ENGINEERING_ESTIMATE",
+  "strictTopology": true,
+  "provenance": {
+    "sources": [
+      {
+        "sourceId": "SRC-L9-EIA-2006",
+        "description": "公开环评资料支持9号线工程设置10座地下牵引变电所",
+        "evidenceLevel": "PUBLIC_PROJECT_DOCUMENT"
+      },
+      {
+        "sourceId": "SRC-BJ-SUBWAY-DC750",
+        "description": "北京地铁公开资料支持DC750V接触轨、走行轨回流及单双边供电方式",
+        "evidenceLevel": "PUBLIC_OPERATOR_INFORMATION"
+      },
+      {
+        "sourceId": "SRC-LINE9-MILEAGE",
+        "description": "项目9号线站点及Link公里标，用于V1牵引所工程近似布点",
+        "evidenceLevel": "TEACHER_DATA_DERIVED"
+      },
+      {
+        "sourceId": "SRC-POWER-RESEARCH-V0",
+        "description": "供电专项调研与论文参数区间，用于空载电压、等效内阻、线路电阻和容量估算",
+        "evidenceLevel": "LITERATURE_ENGINEERING_ESTIMATE"
+      },
+      {
+        "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "description": "相邻牵引所小双边供电、中间所四馈线、边界联络开关常开规则",
+        "evidenceLevel": "ENGINEERING_TOPOLOGY_ASSUMPTION"
+      }
+    ],
+    "parameterDocument": "docs/设计文档/9号线供电拓扑V1参数与溯源.md",
+    "limitations": [
+      "除郭公庄外的牵引所精确位置未获得竣工图确认",
+      "馈线编号、接触轨绝缘分段和回流绝缘边界为教学V1拓扑",
+      "整流机组及可逆变流器使用戴维南等值和容量上限，不代表施工图设备"
+    ]
+  },
   "substations": [
     {
       "substationId": "TS-0901",
       "name": "Guogongzhuang traction mixed substation",
-      "mileageM": 313.0,
+      "mileageM": 313,
       "noLoadVoltageV": 825,
       "internalResistanceOhm": 0.015,
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 1000,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+GGZ-PUBLIC-ANCHOR",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0902",
@@ -23,7 +73,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0903",
@@ -34,7 +96,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0904",
@@ -45,7 +119,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0905",
@@ -56,7 +142,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0906",
@@ -67,7 +165,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0907",
@@ -78,7 +188,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0908",
@@ -89,7 +211,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0909",
@@ -100,7 +234,19 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 0,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     },
     {
       "substationId": "TS-0910",
@@ -111,11 +257,1764 @@
       "ratedCurrentA": 5300,
       "overloadCurrentA": 8000,
       "efsCapacityKw": 1000,
-      "status": "IN_SERVICE"
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-L9-EIA-2006+SRC-L9-V1-PLACEMENT",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "name": "SRC-L9-V1-PLACEMENT",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "noLoadVoltageV": "SRC-DC750-EQUIVALENT-V0",
+        "internalResistanceOhm": "SRC-DC750-EQUIVALENT-V0",
+        "ratedCurrentA": "SRC-DC750-CAPACITY-V0",
+        "overloadCurrentA": "SRC-DC750-CAPACITY-V0",
+        "efsCapacityKw": "ASSUMPTION-EFS-ENDS-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
     }
   ],
-  "feeders": [],
-  "contactRailSections": [],
-  "returnRailSections": [],
-  "switches": []
+  "feeders": [
+    {
+      "feederId": "FD-0901-UP-RIGHT",
+      "substationId": "TS-0901",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 313,
+      "toMileageM": 1660.52,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0901-DOWN-RIGHT",
+      "substationId": "TS-0901",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 313,
+      "toMileageM": 1660.52,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0902-UP-LEFT",
+      "substationId": "TS-0902",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 1660.52,
+      "toMileageM": 313,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0902-UP-RIGHT",
+      "substationId": "TS-0902",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 1660.52,
+      "toMileageM": 3429.32,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0902-DOWN-LEFT",
+      "substationId": "TS-0902",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 1660.52,
+      "toMileageM": 313,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0902-DOWN-RIGHT",
+      "substationId": "TS-0902",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 1660.52,
+      "toMileageM": 3429.32,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0903-UP-LEFT",
+      "substationId": "TS-0903",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 3429.32,
+      "toMileageM": 1660.52,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0903-UP-RIGHT",
+      "substationId": "TS-0903",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 3429.32,
+      "toMileageM": 5014.46,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0903-DOWN-LEFT",
+      "substationId": "TS-0903",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 3429.32,
+      "toMileageM": 1660.52,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0903-DOWN-RIGHT",
+      "substationId": "TS-0903",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 3429.32,
+      "toMileageM": 5014.46,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0904-UP-LEFT",
+      "substationId": "TS-0904",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 5014.46,
+      "toMileageM": 3429.32,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0904-UP-RIGHT",
+      "substationId": "TS-0904",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 5014.46,
+      "toMileageM": 6339.9,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0904-DOWN-LEFT",
+      "substationId": "TS-0904",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 5014.46,
+      "toMileageM": 3429.32,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0904-DOWN-RIGHT",
+      "substationId": "TS-0904",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 5014.46,
+      "toMileageM": 6339.9,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0905-UP-LEFT",
+      "substationId": "TS-0905",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 6339.9,
+      "toMileageM": 5014.46,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0905-UP-RIGHT",
+      "substationId": "TS-0905",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 6339.9,
+      "toMileageM": 8118.83,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0905-DOWN-LEFT",
+      "substationId": "TS-0905",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 6339.9,
+      "toMileageM": 5014.46,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0905-DOWN-RIGHT",
+      "substationId": "TS-0905",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 6339.9,
+      "toMileageM": 8118.83,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0906-UP-LEFT",
+      "substationId": "TS-0906",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 8118.83,
+      "toMileageM": 6339.9,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0906-UP-RIGHT",
+      "substationId": "TS-0906",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 8118.83,
+      "toMileageM": 10598.74,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0906-DOWN-LEFT",
+      "substationId": "TS-0906",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 8118.83,
+      "toMileageM": 6339.9,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0906-DOWN-RIGHT",
+      "substationId": "TS-0906",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 8118.83,
+      "toMileageM": 10598.74,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0907-UP-LEFT",
+      "substationId": "TS-0907",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 10598.74,
+      "toMileageM": 8118.83,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0907-UP-RIGHT",
+      "substationId": "TS-0907",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 10598.74,
+      "toMileageM": 11996.97,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0907-DOWN-LEFT",
+      "substationId": "TS-0907",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 10598.74,
+      "toMileageM": 8118.83,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0907-DOWN-RIGHT",
+      "substationId": "TS-0907",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 10598.74,
+      "toMileageM": 11996.97,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0908-UP-LEFT",
+      "substationId": "TS-0908",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 11996.97,
+      "toMileageM": 10598.74,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0908-UP-RIGHT",
+      "substationId": "TS-0908",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 11996.97,
+      "toMileageM": 13906.77,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0908-DOWN-LEFT",
+      "substationId": "TS-0908",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 11996.97,
+      "toMileageM": 10598.74,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0908-DOWN-RIGHT",
+      "substationId": "TS-0908",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 11996.97,
+      "toMileageM": 13906.77,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0909-UP-LEFT",
+      "substationId": "TS-0909",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 13906.77,
+      "toMileageM": 11996.97,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0909-UP-RIGHT",
+      "substationId": "TS-0909",
+      "direction": "UP",
+      "side": "RIGHT",
+      "fromMileageM": 13906.77,
+      "toMileageM": 16048.92,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0909-DOWN-LEFT",
+      "substationId": "TS-0909",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 13906.77,
+      "toMileageM": 11996.97,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0909-DOWN-RIGHT",
+      "substationId": "TS-0909",
+      "direction": "DOWN",
+      "side": "RIGHT",
+      "fromMileageM": 13906.77,
+      "toMileageM": 16048.92,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0910-UP-LEFT",
+      "substationId": "TS-0910",
+      "direction": "UP",
+      "side": "LEFT",
+      "fromMileageM": 16048.92,
+      "toMileageM": 13906.77,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "feederId": "FD-0910-DOWN-LEFT",
+      "substationId": "TS-0910",
+      "direction": "DOWN",
+      "side": "LEFT",
+      "fromMileageM": 16048.92,
+      "toMileageM": 13906.77,
+      "cableResistanceOhm": 0.0036,
+      "continuousCurrentA": 4000,
+      "shortTimeCurrentA": 6000,
+      "status": "CLOSED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "substationId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "side": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "cableResistanceOhm": "SRC-POWER-RESEARCH-V0",
+        "continuousCurrentA": "SRC-DC750-CAPACITY-V0",
+        "shortTimeCurrentA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    }
+  ],
+  "contactRailSections": [
+    {
+      "sectionId": "CR-09-01-UP",
+      "direction": "UP",
+      "fromMileageM": 313,
+      "toMileageM": 1660.52,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-01-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 313,
+      "toMileageM": 1660.52,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-02-UP",
+      "direction": "UP",
+      "fromMileageM": 1660.52,
+      "toMileageM": 3429.32,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-02-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 1660.52,
+      "toMileageM": 3429.32,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-03-UP",
+      "direction": "UP",
+      "fromMileageM": 3429.32,
+      "toMileageM": 5014.46,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-03-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 3429.32,
+      "toMileageM": 5014.46,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-04-UP",
+      "direction": "UP",
+      "fromMileageM": 5014.46,
+      "toMileageM": 6339.9,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-04-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 5014.46,
+      "toMileageM": 6339.9,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-05-UP",
+      "direction": "UP",
+      "fromMileageM": 6339.9,
+      "toMileageM": 8118.83,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-05-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 6339.9,
+      "toMileageM": 8118.83,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-06-UP",
+      "direction": "UP",
+      "fromMileageM": 8118.83,
+      "toMileageM": 10598.74,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-06-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 8118.83,
+      "toMileageM": 10598.74,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-07-UP",
+      "direction": "UP",
+      "fromMileageM": 10598.74,
+      "toMileageM": 11996.97,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-07-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 10598.74,
+      "toMileageM": 11996.97,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-08-UP",
+      "direction": "UP",
+      "fromMileageM": 11996.97,
+      "toMileageM": 13906.77,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-08-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 11996.97,
+      "toMileageM": 13906.77,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-09-UP",
+      "direction": "UP",
+      "fromMileageM": 13906.77,
+      "toMileageM": 16048.92,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    },
+    {
+      "sectionId": "CR-09-09-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 13906.77,
+      "toMileageM": 16048.92,
+      "resistanceOhmPerKm": 0.0083,
+      "currentLimitA": 6000,
+      "status": "ENERGIZED",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "currentLimitA": "SRC-DC750-CAPACITY-V0",
+        "status": "SCENARIO-NORMAL-STATE"
+      }
+    }
+  ],
+  "returnRailSections": [
+    {
+      "sectionId": "RR-09-01-UP",
+      "direction": "UP",
+      "fromMileageM": 313,
+      "toMileageM": 1660.52,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-01-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 313,
+      "toMileageM": 1660.52,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-02-UP",
+      "direction": "UP",
+      "fromMileageM": 1660.52,
+      "toMileageM": 3429.32,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-02-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 1660.52,
+      "toMileageM": 3429.32,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-03-UP",
+      "direction": "UP",
+      "fromMileageM": 3429.32,
+      "toMileageM": 5014.46,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-03-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 3429.32,
+      "toMileageM": 5014.46,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-04-UP",
+      "direction": "UP",
+      "fromMileageM": 5014.46,
+      "toMileageM": 6339.9,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-04-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 5014.46,
+      "toMileageM": 6339.9,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-05-UP",
+      "direction": "UP",
+      "fromMileageM": 6339.9,
+      "toMileageM": 8118.83,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-05-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 6339.9,
+      "toMileageM": 8118.83,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-06-UP",
+      "direction": "UP",
+      "fromMileageM": 8118.83,
+      "toMileageM": 10598.74,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-06-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 8118.83,
+      "toMileageM": 10598.74,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-07-UP",
+      "direction": "UP",
+      "fromMileageM": 10598.74,
+      "toMileageM": 11996.97,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-07-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 10598.74,
+      "toMileageM": 11996.97,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-08-UP",
+      "direction": "UP",
+      "fromMileageM": 11996.97,
+      "toMileageM": 13906.77,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-08-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 11996.97,
+      "toMileageM": 13906.77,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-09-UP",
+      "direction": "UP",
+      "fromMileageM": 13906.77,
+      "toMileageM": 16048.92,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    },
+    {
+      "sectionId": "RR-09-09-DOWN",
+      "direction": "DOWN",
+      "fromMileageM": 13906.77,
+      "toMileageM": 16048.92,
+      "resistanceOhmPerKm": 0.0083,
+      "crossBondingGroup": "V0",
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "direction": "SRC-L9-V1-TOPOLOGY-RULE",
+        "fromMileageM": "SRC-LINE9-MILEAGE",
+        "toMileageM": "SRC-LINE9-MILEAGE",
+        "resistanceOhmPerKm": "SRC-POWER-RESEARCH-V0",
+        "crossBondingGroup": "ASSUMPTION-CROSS-BOND-V1"
+      }
+    }
+  ],
+  "switches": [
+    {
+      "switchId": "SW-TIE-0902",
+      "switchType": "TIE",
+      "mileageM": 1660.52,
+      "fromNodeId": "TS-0902",
+      "toNodeId": "TS-0901",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0903",
+      "switchType": "TIE",
+      "mileageM": 3429.32,
+      "fromNodeId": "TS-0903",
+      "toNodeId": "TS-0902",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0904",
+      "switchType": "TIE",
+      "mileageM": 5014.46,
+      "fromNodeId": "TS-0904",
+      "toNodeId": "TS-0903",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0905",
+      "switchType": "TIE",
+      "mileageM": 6339.9,
+      "fromNodeId": "TS-0905",
+      "toNodeId": "TS-0904",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0906",
+      "switchType": "TIE",
+      "mileageM": 8118.83,
+      "fromNodeId": "TS-0906",
+      "toNodeId": "TS-0905",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0907",
+      "switchType": "TIE",
+      "mileageM": 10598.74,
+      "fromNodeId": "TS-0907",
+      "toNodeId": "TS-0906",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0908",
+      "switchType": "TIE",
+      "mileageM": 11996.97,
+      "fromNodeId": "TS-0908",
+      "toNodeId": "TS-0907",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0909",
+      "switchType": "TIE",
+      "mileageM": 13906.77,
+      "fromNodeId": "TS-0909",
+      "toNodeId": "TS-0908",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    },
+    {
+      "switchId": "SW-TIE-0910",
+      "switchType": "TIE",
+      "mileageM": 16048.92,
+      "fromNodeId": "TS-0910",
+      "toNodeId": "TS-0909",
+      "normalState": "OPEN",
+      "currentState": "OPEN",
+      "remoteControllable": true,
+      "sourceId": "SRC-L9-V1-TOPOLOGY-RULE",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "switchType": "SRC-L9-V1-TOPOLOGY-RULE",
+        "mileageM": "SRC-LINE9-MILEAGE",
+        "fromNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "toNodeId": "SRC-L9-V1-TOPOLOGY-RULE",
+        "normalState": "SRC-L9-V1-TOPOLOGY-RULE",
+        "currentState": "SCENARIO-NORMAL-STATE",
+        "remoteControllable": "ASSUMPTION-PSCADA-V1"
+      }
+    }
+  ]
 }

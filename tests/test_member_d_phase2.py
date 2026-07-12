@@ -7,9 +7,11 @@ from pathlib import Path
 from app.domain.dispatch.services import DispatchContext, RuleBasedDispatchService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.services import (
+    DayType,
     DwellTimeConfig,
-    PassengerDemandProfile,
-    PassengerFlowGenerator,
+    FlowScenario,
+    PoissonPassengerFlowGenerator,
+    StationFlowConfig,
     StationService,
     TrainLoadState,
 )
@@ -19,22 +21,22 @@ from app.infra.recorder import RunRecorder
 class MemberDPhase2Tests(unittest.TestCase):
     def test_passenger_flow_boarding_load_and_dwell(self) -> None:
         station_service = StationService(
-            PassengerFlowGenerator(
+            PoissonPassengerFlowGenerator(
                 [
-                    PassengerDemandProfile(
+                    StationFlowConfig(
                         station_id="S-GGZ",
-                        direction="UP",
-                        start_sec=0,
-                        end_sec=1800,
-                        arrival_rate_pax_per_min=120.0,
+                        base_arrival_rate_pax_per_min=82.8,
                         alighting_ratio=0.10,
+                        direction="UP",
                     )
-                ]
+                ],
+                scenario=FlowScenario(day_type=DayType.MON_THU, line_scale=1.0, random_seed=42),
+                use_poisson=False,
             ),
             DwellTimeConfig(base_dwell_sec=30.0, door_capacity_pax_per_sec=4.0),
         )
 
-        arrivals = station_service.update_arrivals(sim_time_ms=0, dt_sec=60.0)
+        arrivals = station_service.update_arrivals(sim_time_ms=8 * 3600 * 1000, dt_sec=60.0)
         self.assertEqual(arrivals[("S-GGZ", "UP")], 120)
 
         load = TrainLoadState(train_id="T0901", onboard_pax=500, capacity_pax=600)
@@ -70,7 +72,7 @@ class MemberDPhase2Tests(unittest.TestCase):
             [
                 TrainPowerRequest("T1", "PWR-0901", speed_mps=10.0, traction_force_n=70_000.0),
                 TrainPowerRequest("T2", "PWR-0901", speed_mps=10.0, traction_force_n=70_000.0),
-                TrainPowerRequest("T3", "PWR-0901", speed_mps=10.0, brake_force_n=20_000.0),
+                TrainPowerRequest("T3", "PWR-0901", speed_mps=10.0, brake_force_n=50_000.0),
             ],
             dt_sec=1.0,
         )
@@ -80,6 +82,7 @@ class MemberDPhase2Tests(unittest.TestCase):
         self.assertEqual(state.voltage_level, "UNDERVOLTAGE")
         self.assertLess(state.traction_limit_ratio, 1.0)
         self.assertGreater(state.absorbed_regen_kw, 0.0)
+        self.assertGreater(state.self_consumed_regen_kw, 0.0)
         self.assertGreater(state.energy_kwh, 0.0)
         self.assertGreater(state.regen_energy_kwh, 0.0)
 
@@ -223,4 +226,3 @@ class MemberDPhase2Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

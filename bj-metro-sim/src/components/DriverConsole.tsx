@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { useSimStore } from '../store/useSimStore';
+import { useState, useMemo, useEffect, useRef } from 'react';
+import { useSimStore, type SpeedRunRecord } from '../store/useSimStore';
 import { lineColor } from './LineSelector';
 import MasterController from './MasterController';
 import type { MetroLineData } from '../data/amapMetroApi';
@@ -28,7 +28,7 @@ function FullDriverView() {
         fontFamily: "'PingFang SC','Microsoft YaHei','Noto Sans SC',system-ui,sans-serif",
       }}>
       <TopBar lines={metroLines} activeLineId={activeLineId} onSelect={setActiveLineId} color={color} />
-      {hasEngine ? <ActiveCab line9={line!} isBackend={true} /> : <PendingCab line={line} color={color} />}
+      {hasEngine ? <ActiveCab line9={line!} /> : <PendingCab line={line} color={color} />}
     </div>
   );
 }
@@ -90,18 +90,57 @@ function TopBar({ lines, activeLineId, onSelect, color }: {
 }
 
 /* ═══ 活跃驾驶舱 ═══ */
-function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: boolean }) {
+function ActiveCab({ line9 }: { line9: MetroLineData }) {
   const {
-    nextStation, distanceToNextStationM, stationIndex, line9Stations,
+    currentStation, nextStation, distanceToNextStationM, stationIndex, line9Stations,
     runDirection, currentSpeedMps, simTime, avgLoadRate, totalPassengers,
     engineClockState, tractionPercent, brakePercent,
-    energyKwh, targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
+    energyKwh, tractionEnergyKwh, regenGeneratedKwh, regenAcceptedKwh, regenWastedKwh,
+    targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
     speedTimeHistory, estimatedRunTimeS, pathPositionM, pathTotalLengthM,
     currentSegmentId, localSpeedLimitMps, gradeRatio,
-    manualMode, manualTraction, manualBrake, setManualMode,
+    manualMode, setManualMode,
     selectedTrainId, trains, selectTrain, trainColors,
+    speedRunsByTrain, activeSpeedRunIdByTrain, viewedSpeedRunIdByTrain, selectSpeedRun,
+    cabStatus, fetchCabStatus,
   } = useSimStore();
   const color = lineColor(line9.id);
+
+  // 轮询司机台硬件状态
+  const pollRef = useRef<number | null>(null);
+  useEffect(() => {
+    const poll = () => {
+      fetchCabStatus();
+      pollRef.current = window.setTimeout(poll, 1000);
+    };
+    void fetchCabStatus();
+    pollRef.current = window.setTimeout(poll, 1000);
+    return () => {
+      if (pollRef.current !== null) window.clearTimeout(pollRef.current);
+    };
+  }, [fetchCabStatus]);
+
+  const plcConnected = cabStatus?.state === 'CONNECTED';
+  const plcControlsSelectedTrain = plcConnected && cabStatus?.trainId === selectedTrainId;
+  const plcInput = plcControlsSelectedTrain ? cabStatus?.lastInput : null;
+  const plcCommand = plcControlsSelectedTrain ? cabStatus?.lastCommand : null;
+
+  // 人工/紧制时显示司机台实际下发命令；ATO 时 lastCommand 为 null，
+  // 改用仿真引擎回传的 ATO 牵引/制动输出。
+  const displayTraction = plcCommand ? plcCommand.tractionPercent : tractionPercent;
+  const displayBrake = plcCommand ? plcCommand.brakePercent : brakePercent;
+
+  const trainRuns = selectedTrainId ? (speedRunsByTrain[selectedTrainId] ?? []) : [];
+  const activeRunId = selectedTrainId ? activeSpeedRunIdByTrain[selectedTrainId] : undefined;
+  const viewedRunId = selectedTrainId ? viewedSpeedRunIdByTrain[selectedTrainId] : null;
+  const activeRun = activeRunId ? trainRuns.find((run) => run.id === activeRunId) : trainRuns[trainRuns.length - 1];
+  const chartRun = (viewedRunId ? trainRuns.find((run) => run.id === viewedRunId) : activeRun) ?? activeRun;
+  const chartPositionHistory = chartRun?.positionHistory ?? speedHistory;
+  const chartTimeHistory = chartRun?.timeHistory ?? speedTimeHistory;
+  const chartProfile = chartRun?.profile ?? speedProfile;
+  const chartLastPosition = chartPositionHistory[chartPositionHistory.length - 1];
+  const chartLastTime = chartTimeHistory[chartTimeHistory.length - 1];
+  const chartIsLive = !viewedRunId || chartRun?.id === activeRunId;
 
   const speedKmh = currentSpeedMps * 3.6;
   const eta = distanceToNextStationM > 0 && currentSpeedMps > 0
@@ -142,7 +181,7 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
       {/* ── 中部顶部：站台信息 ── */}
       <div className="shrink-0 px-8 pt-6 pb-4">
         <StationRouteCard
-          current={line9Stations[stationIndex] || '--'}
+          current={currentStation || '--'}
           next={nextStation || '--'}
           distanceKm={distanceToNextStationM / 1000}
           eta={eta}
@@ -164,31 +203,36 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
             <MetricBadge label="LOAD" value={`${avgLoadRate}%`} unit="" accent="#8FC31F" />
             <MetricBadge label="PAX" value={String(totalPassengers)} unit="" accent="#94a3b8" />
             <MetricBadge label="ENE" value={energyKwh.toFixed(1)} unit="kWh" accent="#f59e0b" />
+            <MetricBadge label="TRAC" value={tractionEnergyKwh.toFixed(1)} unit="kWh" accent="#58a6ff" />
+            <MetricBadge label="REG" value={`${regenAcceptedKwh.toFixed(1)}/${regenGeneratedKwh.toFixed(1)}`} unit="kWh" accent="#22c55e" />
+            <MetricBadge label="WASTE" value={regenWastedKwh.toFixed(1)} unit="kWh" accent="#ef4444" />
             <MetricBadge label="ETIME" value={estimatedRunTimeS > 0 ? `${estimatedRunTimeS|0}` : '--'} unit="s" accent="#6366f1" />
             <MetricBadge label="MODE" value="AM-CBTC" unit="" accent="#8FC31F" />
           </div>
           {/* ── 速度-位点曲线 ── */}
+          {selectedTrainId && trainRuns.length > 0 && (
+            <SpeedRunSelector
+              runs={trainRuns}
+              activeRunId={activeRunId}
+              viewedRunId={viewedRunId ?? null}
+              onSelect={(runId) => selectSpeedRun(selectedTrainId, runId)}
+            />
+          )}
           <SpeedCurveChart
-            profile={speedProfile}
-            history={speedHistory}
-            currentSpeedMps={currentSpeedMps}
-            currentPositionM={
-              speedHistory.length > 0 ? speedHistory[speedHistory.length - 1].positionM : 0
-            }
-            pathTotalLengthM={pathTotalLengthM}
-            profileSource={speedProfileMeta?.source ?? ''}
-            startStation={line9Stations[stationIndex] || '--'}
-            endStation={nextStation || '--'}
+            profile={chartProfile}
+            history={chartPositionHistory}
+            currentSpeedMps={chartIsLive ? currentSpeedMps : (chartLastPosition?.speedMps ?? 0)}
+            currentPositionM={chartLastPosition?.positionM ?? 0}
+            pathTotalLengthM={chartRun?.pathTotalLengthM ?? pathTotalLengthM}
+            profileSource={chartRun?.profileMeta?.source ?? speedProfileMeta?.source ?? ''}
+            startStation={chartRun?.startStation ?? currentStation ?? '--'}
+            endStation={chartRun?.endStation ?? nextStation ?? '--'}
           />
           {/* ── 速度-时间曲线 ── */}
           <SpeedTimeCurveChart
-            history={speedTimeHistory}
-            currentSpeedMps={currentSpeedMps}
-            elapsedS={
-              speedTimeHistory.length > 0
-                ? speedTimeHistory[speedTimeHistory.length - 1].elapsedS
-                : 0
-            }
+            history={chartTimeHistory}
+            currentSpeedMps={chartIsLive ? currentSpeedMps : (chartLastTime?.speedMps ?? 0)}
+            elapsedS={chartLastTime?.elapsedS ?? 0}
           />
         </div>
 
@@ -211,10 +255,17 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
 
 
           {/* ── ATO / 手动 切换 ── */}
+          {plcControlsSelectedTrain && (
+            <div className="flex items-center justify-center gap-2 py-1.5 rounded select-none"
+              style={{ border: '1px solid rgba(100,210,255,0.15)', background: 'rgba(100,210,255,0.04)' }}>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: '#64d2ff', boxShadow: '0 0 5px rgba(100,210,255,0.5)' }} />
+              <span className="text-[8px] font-semibold uppercase tracking-[0.1em]" style={{ color: '#64d2ff' }}>PLC 模式控制</span>
+            </div>
+          )}
           <div
-            className="flex items-center rounded cursor-pointer"
+            className={`flex items-center rounded ${plcControlsSelectedTrain ? 'opacity-40 pointer-events-none' : 'cursor-pointer'}`}
             style={{ border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)' }}
-            onClick={() => setManualMode(!manualMode, selectedTrainId ?? undefined)}
+            onClick={() => { if (!plcControlsSelectedTrain) setManualMode(!manualMode, selectedTrainId ?? undefined); }}
           >
             <div
               className="flex-1 text-center py-1.5 rounded text-[9px] font-bold uppercase tracking-[0.1em] transition-colors duration-150"
@@ -236,19 +287,33 @@ function ActiveCab({ line9, isBackend }: { line9: MetroLineData; isBackend: bool
             </div>
           </div>
 
-          {/* ── 手动驾驶：操纵杆 ── */}
-          {manualMode ? (
+          {/* ── 牵引/制动条 (统一使用 display 值) ── */}
+          <div className="flex flex-col" style={{ gap: 8 }}>
+            <DriveBar label="TRACTION" value={displayTraction} color="#22c55e" />
+            <DriveBar label="BRAKE" value={displayBrake} color="#ef4444" />
+          </div>
+
+          {/* ── PLC 连接后显示司机台输入，包括 ATO 启动指令 ── */}
+          {plcControlsSelectedTrain && plcInput && (
+            <div className="flex flex-col rounded py-2 px-3" style={{ gap: 4, border: '1px solid rgba(100,210,255,0.08)', background: 'rgba(100,210,255,0.02)' }}>
+              <span className="text-[7px] font-semibold uppercase tracking-[0.12em] text-[#64748b] mb-1">司机台输入</span>
+              <InfoRow label="DIR" value={plcInput.direction} color="#e2e8f0" />
+              <InfoRow label="HANDLE" value={String(plcInput.handleCode)} color="#e2e8f0" />
+              <InfoRow label="TRACTION" value={`${plcInput.tractionPercent.toFixed(0)}%`} color="#22c55e" />
+              <InfoRow label="BRAKE" value={`${plcInput.brakePercent.toFixed(0)}%`} color="#ef4444" />
+              <InfoRow label="SPEED" value={`${(plcInput.speedMps * 3.6).toFixed(1)} km/h`} color="#00a8ff" />
+              <InfoRow label="KEY" value={plcInput.keyActive ? 'ON' : 'OFF'} color={plcInput.keyActive ? '#22c55e' : '#6b7280'} />
+              <InfoRow label="ATO START" value={plcInput.atoStart ? '●' : '○'} color={plcInput.atoStart ? '#64d2ff' : '#6b7280'} />
+              <InfoRow label="EB" value={plcInput.emergencyBrake ? '●' : '○'} color={plcInput.emergencyBrake ? '#ef4444' : '#6b7280'} />
+            </div>
+          )}
+
+          {/* ── 手动驾驶：操纵杆 (PLC 控制时隐藏) ── */}
+          {manualMode && !plcControlsSelectedTrain && (
             <div className="flex justify-center py-2"
               style={{ border: '1px solid rgba(251,191,36,0.08)', borderRadius: 8, background: 'rgba(251,191,36,0.02)' }}>
               <MasterController />
             </div>
-          ) : (
-            <>
-              <div className="flex flex-col" style={{ gap: 8 }}>
-                <DriveBar label="TRACTION" value={tractionPercent} color="#22c55e" />
-                <DriveBar label="BRAKE" value={brakePercent} color="#ef4444" />
-              </div>
-            </>
           )}
 
           {/* ── 运行信息 ── */}
@@ -394,13 +459,13 @@ function CabPIS({ stations, currentIdx, direction, color }: {
         {stations.map((_, i) => {
           if (i === stations.length - 1) return null;
           const x1 = 32 + i * SP + ACTIVE_R, x2 = 32 + (i + 1) * SP - ACTIVE_R;
-          const past = direction === 'UP' ? i > currentIdx : i < currentIdx;
+          const past = direction === 'UP' ? i < currentIdx : i > currentIdx;
           return <line key={`l-${i}`} x1={x1} y1="20" x2={x2} y2="20"
             stroke={past ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.12)'} strokeWidth="1.5" />;
         })}
         {stations.map((name, i) => {
           const cx = 32 + i * SP, cur = i === currentIdx;
-          const past = direction === 'UP' ? i > currentIdx : i < currentIdx;
+          const past = direction === 'UP' ? i < currentIdx : i > currentIdx;
           return (
             <g key={`d-${i}`}>
               {cur && <circle cx={cx} cy="20" r={ACTIVE_R + 4} fill="none" stroke={color} strokeWidth="1.2" opacity="0.12" />}
@@ -507,6 +572,37 @@ function hexToRgb(hex: string): string {
   if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
   const n = parseInt(hex, 16);
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
+
+function SpeedRunSelector({ runs, activeRunId, viewedRunId, onSelect }: {
+  runs: SpeedRunRecord[];
+  activeRunId?: string;
+  viewedRunId: string | null;
+  onSelect: (runId: string | null) => void;
+}) {
+  const completedRuns = runs.filter((run) => run.completed).reverse();
+  return (
+    <div className="flex items-center gap-2 px-8 py-1 rounded" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <span className="text-[7px] font-semibold uppercase tracking-[0.12em] text-[#6b7280] shrink-0">区间记录</span>
+      <select
+        aria-label="选择速度曲线区间"
+        value={viewedRunId ?? '__live__'}
+        onChange={(event) => onSelect(event.target.value === '__live__' ? null : event.target.value)}
+        className="min-w-0 flex-1 text-[8px] font-mono rounded px-1.5 py-1 cursor-pointer"
+        style={{ color: '#cbd5e1', background: '#172033', border: '1px solid rgba(255,255,255,0.08)' }}
+      >
+        <option value="__live__">
+          实时 · {runs.find((run) => run.id === activeRunId)?.startStation ?? '--'} → {runs.find((run) => run.id === activeRunId)?.endStation ?? '--'}
+        </option>
+        {completedRuns.map((run) => (
+          <option key={run.id} value={run.id}>
+            {run.startedAtSimTime} · {run.startStation} → {run.endStation}
+          </option>
+        ))}
+      </select>
+      <span className="text-[7px] text-[#475569] shrink-0">{completedRuns.length} 历史</span>
+    </div>
+  );
 }
 
 /* ═══ 速度曲线对比图 ═══ */

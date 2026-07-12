@@ -24,11 +24,31 @@ def five_train_loads() -> list[TrainElectricalLoad]:
 
 
 class PowerAcceptanceTests(unittest.TestCase):
+    def _advance_until_any_train_moves(
+        self,
+        engine: SimulationEngine,
+        *,
+        min_speed_mps: float = 1.0,
+        max_ticks: int = 300,
+    ) -> int:
+        """Wait through the real dwell/interlocking startup before power checks.
+
+        The Member C integration makes initial trains obey platform dwell,
+        route locking, MA, and ATP before they draw meaningful traction power.
+        Power acceptance tests should therefore start voltage/delay assertions
+        from the first actual movement, not from the scenario clock zero.
+        """
+        for tick in range(1, max_ticks + 1):
+            engine._tick()
+            if any(item.speed_mps >= min_speed_mps for item in engine.trains):
+                return tick
+        self.fail("No train reached motion state before power acceptance timeout")
+
     def test_five_train_engine_runs_within_realtime_budget_after_warmup(self) -> None:
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
         engine.clock.start()
@@ -76,7 +96,7 @@ class PowerAcceptanceTests(unittest.TestCase):
             engine = SimulationEngine.load_from_files(
                 scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
                 line_map_path=ROOT / "data" / "cache" / "line_map.json",
-                stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
             )
             engine.load()
             engine.clock.start()
@@ -111,14 +131,14 @@ class PowerAcceptanceTests(unittest.TestCase):
                 engine = SimulationEngine.load_from_files(
                     scenario_path=scenario_path,
                     line_map_path=ROOT / "data" / "cache" / "line_map.json",
-                    stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                    stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
                 )
                 engine.load()
                 engine.clock.start()
                 peak_power_kw = 0.0
                 min_voltage_v = 1000.0
                 reach_tick = None
-                for tick in range(360):
+                for tick in range(900):
                     engine._tick()
                     snapshot = engine.snapshot()
                     assert snapshot is not None
@@ -143,7 +163,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                 stressed = SimulationEngine.load_from_files(
                     scenario_path=scenario_path,
                     line_map_path=ROOT / "data" / "cache" / "line_map.json",
-                    stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+                    stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
                 )
                 stressed.load()
                 network = stressed.power_service.network
@@ -153,6 +173,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                     for key, value in network.substations.items()
                 }
                 stressed.clock.start()
+                self._advance_until_any_train_moves(stressed)
                 min_limit = 1.0
                 for _tick in range(200):
                     stressed._tick()
@@ -182,12 +203,20 @@ class PowerAcceptanceTests(unittest.TestCase):
             ],
             dt_sec=0.25,
         )
-        split = snapshot.absorbed_regen_kw + snapshot.feedback_regen_kw + snapshot.wasted_regen_kw
+        split = (
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
+            + snapshot.feedback_regen_kw
+            + snapshot.wasted_regen_kw
+            + snapshot.regen_transfer_losses_kw
+        )
         self.assertAlmostEqual(snapshot.generated_regen_kw, split, places=9)
         self.assertGreater(snapshot.absorbed_regen_kw, 0.0)
 
     def test_regen_absorption_feedback_and_waste_all_conserve_energy(self) -> None:
-        solver = DCTractionPowerFlowSolver(load_line9_power_network(TOPOLOGY))
+        network = load_line9_power_network(TOPOLOGY)
+        network.operate_switch("SW-TIE-0902", "CLOSED")
+        solver = DCTractionPowerFlowSolver(network)
         snapshot = solver.solve(
             [
                 TrainElectricalLoad("TRACTION", "UP", 2200.0, 18.0, traction_force_n=95_000.0, aux_power_kw=60.0),
@@ -197,7 +226,13 @@ class PowerAcceptanceTests(unittest.TestCase):
             ],
             dt_sec=0.25,
         )
-        split = snapshot.absorbed_regen_kw + snapshot.feedback_regen_kw + snapshot.wasted_regen_kw
+        split = (
+            snapshot.self_consumed_regen_kw
+            + snapshot.absorbed_regen_kw
+            + snapshot.feedback_regen_kw
+            + snapshot.wasted_regen_kw
+            + snapshot.regen_transfer_losses_kw
+        )
         self.assertAlmostEqual(snapshot.generated_regen_kw, split, places=9)
         self.assertGreater(snapshot.absorbed_regen_kw, 0.0)
         self.assertGreater(snapshot.feedback_regen_kw, 0.0)
@@ -246,7 +281,7 @@ class PowerAcceptanceTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
         network = engine.power_service.network
@@ -268,7 +303,7 @@ class PowerAcceptanceTests(unittest.TestCase):
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
-            stations_csv_path=ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv",
+            stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
         engine.load()
         network = engine.power_service.network
@@ -278,12 +313,11 @@ class PowerAcceptanceTests(unittest.TestCase):
             for key, value in network.substations.items()
         }
         engine.clock.start()
-        for _tick in range(40):
-            engine._tick()
+        self._advance_until_any_train_moves(engine)
         delay_before = sum(item.power_constraint_delay_sec for item in engine.trains)
 
         engine.queue_power_command("SUBSTATION_OUTAGE", {"targetId": "TS-0905", "bigBilateral": True})
-        for _tick in range(40):
+        for _tick in range(80):
             engine._tick()
         outage_snapshot = engine.snapshot()
         assert outage_snapshot is not None
