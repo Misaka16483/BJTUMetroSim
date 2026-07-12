@@ -92,13 +92,18 @@ class MitsubishiPlcCabInputState:
     def door_operation_mode(self) -> str:
         return {0: "SEMI_AUTO", 1: "MANUAL", 2: "AUTO"}.get(self.door_mode, "UNKNOWN")
 
+    @property
+    def emergency_brake_requested(self) -> bool:
+        """Both documented emergency buttons request an immediate emergency brake."""
+        return self.emergency_brake_button_locked or self.emergency_command_button_locked
+
     def to_driver_input(self) -> DriverInput:
         return DriverInput(
             train_id=self.train_id,
             handle_mode=MitsubishiPlcCabParser.parse_handle_mode(self.main_handle_code),
             traction_percent=MitsubishiPlcCabParser.clamp_percent(self.traction_percent_raw),
             brake_percent=MitsubishiPlcCabParser.clamp_percent(self.brake_percent_raw),
-            emergency_brake=self.emergency_brake_button_locked,
+            emergency_brake=self.emergency_brake_requested,
             reported_speed_mps=self.vehicle_speed_mps,
             source="MITSUBISHI_PLC",
         )

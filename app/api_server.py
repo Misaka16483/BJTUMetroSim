@@ -13,7 +13,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from app.adapters.cab import DriverCabHardwareController
 from app.core.engine import SimulationEngine
@@ -460,6 +460,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json(controller.status())
+            elif match := re.fullmatch(r"/api/sim/passenger-history/([^/]+)", path):
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    query = parse_qs(parsed.query)
+                    since = query.get("sinceSimTimeMs", [None])[0]
+                    self._send_json(self.engine.station_passenger_history(
+                        match.group(1),
+                        int(since) if since is not None else None,
+                    ))
             elif path == "/api/passenger-sim/state":
                 self._send_json(self.service.passenger_sim.snapshot())
             elif path == "/api/sim/power/state":
@@ -536,7 +546,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "action": action, "state": sim.snapshot()})
                 return
 
-            if path == "/api/sim/start" or path == "/api/sim/pause" or path == "/api/sim/resume" or path == "/api/sim/stop":
+            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/speed"}:
                 if not self.engine:
                     self._send_json(
                         {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
@@ -567,6 +577,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/speed":
+                payload = self._read_json_body()
+                try:
+                    multiplier = self.engine.set_speed_multiplier(int(payload.get("multiplier", 1)))
+                    self._send_json({"ok": True, "speedMultiplier": multiplier})
+                except (TypeError, ValueError) as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif path == "/api/sim/train/add":
                 self._send_json(self._add_train())
             elif path == "/api/sim/train/remove":
@@ -585,7 +602,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_body()
                 enabled = bool(payload.get("enabled", False))
                 train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
-                self._send_json(self.engine.set_manual_mode(train_id, enabled))
+                self._send_json(self._set_manual_mode_from_frontend(train_id, enabled))
             elif path == "/api/sim/manual-command":
                 payload = self._read_json_body()
                 train_id = str(payload.get("trainId", self.engine.trains[0].train_id if self.engine.trains else "T0901"))
@@ -691,6 +708,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "simTime": snap.sim_time_str,
                 "tick": snap.tick,
                 "simTimeMs": snap.sim_time_ms,
+                "speedMultiplier": snap.speed_multiplier,
             },
             "trains": snap.trains,
             "stations": snap.stations,
@@ -859,7 +877,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         train_id = str(payload.get("trainId", ""))
         if not train_id:
             return {"ok": False, "error": "MISSING_TRAIN_ID"}
-        return self.engine.set_manual_mode(train_id, bool(payload.get("enabled", False)))
+        return self._set_manual_mode_from_frontend(train_id, bool(payload.get("enabled", False)))
+
+    def _set_manual_mode_from_frontend(self, train_id: str, enabled: bool) -> JsonDict:
+        """Only the PLC driver cab may change driving mode while connected."""
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        controller = self._driver_cab_controller()
+        if controller is not None:
+            status = controller.status().get("status", {})
+            if status.get("state") == "CONNECTED" and status.get("trainId") == train_id:
+                return {
+                    "ok": False,
+                    "error": "DRIVER_CAB_MODE_CONTROL_EXCLUSIVE",
+                    "message": "司机台已连接，驾驶模式只能由司机台切换",
+                    "trainId": train_id,
+                }
+        return self.engine.set_manual_mode(train_id, enabled)
 
     def _send_train_manual_command(self) -> JsonDict:
         if self.engine is None:

@@ -16,14 +16,23 @@ import type {
   AddTrainPayload,
   DriverCabHardwareStatus,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow';
 
-/** 从 Amap 9号线数据中提取站名列表（去"站"后缀） */
+/**
+ * 从 Amap 9号线数据中提取站名列表（去"站"后缀）。
+ *
+ * 后端 stationIndex 的权威顺序是郭公庄 -> 国家图书馆，而高德返回的
+ * 9 号线站序通常恰好相反。驾驶页会用 stationIndex 索引这个数组，
+ * 因此必须先统一到后端顺序。
+ */
 export function deriveStations9(line9: MetroLineData | undefined): string[] {
   if (!line9) return [];
-  return line9.stations.map((s) => s.name.replace(/站$/, ''));
+  const stations = line9.stations.map((s) => s.name.replace(/站$/, ''));
+  const guogongzhuangIndex = stations.indexOf('郭公庄');
+  const nationalLibraryIndex = stations.indexOf('国家图书馆');
+  return guogongzhuangIndex > nationalLibraryIndex ? stations.reverse() : stations;
 }
 
 interface SimState {
@@ -31,6 +40,7 @@ interface SimState {
   isRunning: boolean;
   speed: number;
   simTime: string;
+  simTimeMs: number;
   dayType: 'weekday' | 'friday' | 'saturday' | 'sunday';
 
   // 地铁线路数据
@@ -189,7 +199,7 @@ interface SimState {
 
 let tickCount = 0;
 let simSecAccum = 7 * 3600; // 07:00:00 起点
-let currentRunDirection: 'UP' | 'DOWN' = 'DOWN';
+let currentRunDirection: 'UP' | 'DOWN' = 'UP';
 let backendStartPromise: Promise<void> | null = null;
 let awaitingRunConfirmation = false;
 
@@ -412,7 +422,8 @@ function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimSto
 export const useSimStore = create<SimState>((set, get) => ({
   isRunning: false,
   speed: 1,
-  simTime: '07:00:00',
+  simTime: '06:00:00',
+  simTimeMs: 21_600_000,
   dayType: 'weekday',
   metroLines: [],
   linesLoading: false,
@@ -476,7 +487,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   gradeRatio: 0,
   pathSegmentCount: 0,
   pathConstraintCount: 0,
-  runDirection: 'DOWN',
+  runDirection: 'UP',
   speedProfile: [],
   speedProfileMeta: null,
   speedHistory: [],
@@ -522,10 +533,17 @@ export const useSimStore = create<SimState>((set, get) => ({
     }
     // 前端独立模式
     const next = !state.isRunning;
-    if (!next) { tickCount = 0; simSecAccum = 7 * 3600; currentRunDirection = 'DOWN'; }
+    if (!next) { tickCount = 0; simSecAccum = 7 * 3600; currentRunDirection = 'UP'; }
     set({ isRunning: next, trainPositions: {} });
   },
-  setSpeed: (speed: number) => set({ speed }),
+  setSpeed: (speed: number) => {
+    const multiplier = Math.max(1, Math.min(240, Math.floor(speed)));
+    set({ speed: multiplier });
+    void simSetSpeedMultiplier(multiplier).catch(() => {
+      // Keep the UI usable when the backend is unavailable; the next backend
+      // snapshot will restore the authoritative multiplier.
+    });
+  },
   setDayType: (dayType) => set({ dayType }),
   selectTrain: (id: string | null) => {
     const state = get();
@@ -655,7 +673,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
     // ═══ 上下行方向自动循环 ═══
     const elapsedInCycle = simSecAccum % (routeTime * 2);
-    currentRunDirection = elapsedInCycle < routeTime ? 'DOWN' : 'UP';
+    currentRunDirection = elapsedInCycle < routeTime ? 'UP' : 'DOWN';
 
     // 当前半程内的位置：按距离累积找到当前区段
     const phaseTime = elapsedInCycle % routeTime;
@@ -677,12 +695,12 @@ export const useSimStore = create<SimState>((set, get) => ({
     let curStationIdx: number;
     let nextIdx: number;
 
-    if (currentRunDirection === 'DOWN') {
-      // 下行: 郭公庄(0) → 国家图书馆(N-1)
+    if (currentRunDirection === 'UP') {
+      // 上行: 郭公庄(0) → 国家图书馆(N-1)
       curStationIdx = Math.min(curSegment, totalSegments - 1);
       nextIdx = Math.min(curSegment + 1, totalSegments);
     } else {
-      // 上行: 国家图书馆(N-1) → 郭公庄(0)
+      // 下行: 国家图书馆(N-1) → 郭公庄(0)
       curStationIdx = totalSegments - Math.min(curSegment, totalSegments - 1);
       nextIdx = Math.max(curStationIdx - 1, 0);
     }
@@ -732,7 +750,7 @@ export const useSimStore = create<SimState>((set, get) => ({
       targetSpeedMps: 22.22,
       currentStation: stations[curStationIdx],
       nextStation: stations[nextIdx],
-      endStation: currentRunDirection === 'DOWN' ? stations[stations.length - 1] : stations[0],
+      endStation: currentRunDirection === 'UP' ? stations[stations.length - 1] : stations[0],
       distanceToNextStationM: Math.round(targetDist),
       targetDistanceM: segDist,
       driveMode: 'AM',
@@ -773,6 +791,9 @@ export const useSimStore = create<SimState>((set, get) => ({
     set({
       engineClockState: clock.state,
       isRunning: isEngineRunning,
+      speed: clock.speedMultiplier ?? state.speed,
+      simTime: clock.simTime,
+      simTimeMs: clock.simTimeMs,
       trains: trains,
       selectedTrainId: selId,
       simStations: stations ?? [],
@@ -805,7 +826,6 @@ export const useSimStore = create<SimState>((set, get) => ({
     if (changed) set({ trainColors: newColors });
 
     if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
-      set({ simTime: clock.simTime });
       const sel = _applyTrainDetail(selTrain, get());
       set({ ...sel, manualMode: selTrain.operationMode === 'MANUAL' });
     }
@@ -1059,7 +1079,13 @@ export const useSimStore = create<SimState>((set, get) => ({
   setManualMode: async (enabled: boolean, trainId?: string) => {
     const id = trainId ?? get().selectedTrainId;
     if (!id) return;
-    await simSetTrainManualMode(id, enabled);
+    const cabStatus = get().cabStatus;
+    if (cabStatus?.state === 'CONNECTED' && cabStatus.trainId === id) return;
+    const response = await simSetTrainManualMode(id, enabled);
+    if (!response.ok) {
+      await get().fetchCabStatus();
+      return;
+    }
     const next = new Set(get().manualTrainIds);
     if (enabled) next.add(id);
     else next.delete(id);

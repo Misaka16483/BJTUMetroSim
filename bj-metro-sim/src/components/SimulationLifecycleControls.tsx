@@ -28,6 +28,8 @@ export default function SimulationLifecycleControls() {
   const pauseBackendSim = useSimStore((s) => s.pauseBackendSim);
   const resumeBackendSim = useSimStore((s) => s.resumeBackendSim);
   const stopBackendSim = useSimStore((s) => s.stopBackendSim);
+  const speed = useSimStore((s) => s.speed);
+  const setSpeed = useSimStore((s) => s.setSpeed);
   const [operation, setOperation] = useState<Operation>(null);
   const [stepIndex, setStepIndex] = useState(0);
   const [done, setDone] = useState(false);
@@ -102,6 +104,25 @@ export default function SimulationLifecycleControls() {
           <ControlButton onClick={() => run('stop')} color="#ef4444" label="⏹" title="停止" />
         </>
       )}
+
+      <div style={{ width: 1, height: 18, margin: '0 4px', background: 'rgba(255,255,255,.10)' }} />
+      <div className="flex items-center gap-0.5" aria-label="仿真倍率">
+        <span style={{ marginRight: 3, color: '#8b949e', fontSize: 9 }}>倍率</span>
+        {[
+          { multiplier: 1, label: '1×', detail: '每现实秒推进约 1 秒仿真时间' },
+          { multiplier: 10, label: '10×', detail: '每现实秒推进约 10 秒仿真时间' },
+          { multiplier: 60, label: '60×', detail: '每现实秒推进约 1 分钟仿真时间' },
+        ].map(({ multiplier, label, detail }) => {
+          const enabled = engineClockState === 'RUNNING' && !operation;
+          const active = speed === multiplier;
+          return <button key={multiplier} type="button" disabled={!enabled} onClick={() => setSpeed(multiplier)} title={detail} style={{
+            minWidth: 29, height: 24, padding: '0 4px', borderRadius: 4, cursor: enabled ? 'pointer' : 'not-allowed',
+            fontSize: 9, color: active && enabled ? '#58a6ff' : '#6e7681', opacity: enabled ? 1 : .5,
+            background: active && enabled ? 'rgba(88,166,255,.14)' : 'transparent',
+            border: `1px solid ${active && enabled ? 'rgba(88,166,255,.45)' : 'rgba(255,255,255,.10)'}`,
+          }}>{label}</button>;
+        })}
+      </div>
 
       {operation && createPortal(
         <div style={{

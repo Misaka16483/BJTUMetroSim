@@ -173,6 +173,14 @@ class MitsubishiPlcCabParserTests(unittest.TestCase):
         self.assertTrue(command.emergency_brake)
         self.assertEqual(command.traction_percent, 0)
 
+    def test_emergency_command_button_also_requests_emergency_brake(self) -> None:
+        frame = bytearray(46)
+        frame[28] = 0b0001_0000
+
+        driver_input = MitsubishiPlcCabParser().parse_driver_input(bytes(frame))
+
+        self.assertTrue(driver_input.emergency_brake)
+
     def test_parser_rejects_wrong_frame_length(self) -> None:
         with self.assertRaises(ValueError):
             MitsubishiPlcCabParser().parse_driver_input(b"\x00" * 45)

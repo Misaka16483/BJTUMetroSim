@@ -172,7 +172,7 @@ function PISStationStrip({ stations, currentIdx, direction }: { stations: string
           const x1 = 30 + i * SPACING + ACTIVE_DOT_R;
           const x2 = 30 + (i + 1) * SPACING - ACTIVE_DOT_R;
           const y = STATION_H + ACTIVE_DOT_R;
-          const isPast = isUp ? i > currentIdx : i < currentIdx;
+          const isPast = isUp ? i < currentIdx : i > currentIdx;
           return (
             <line
               key={`line-${i}`}
@@ -188,7 +188,7 @@ function PISStationStrip({ stations, currentIdx, direction }: { stations: string
           const cx = 30 + i * SPACING;
           const cy = STATION_H + ACTIVE_DOT_R;
           const isCurrent = i === currentIdx;
-          const isPast = isUp ? i > currentIdx : i < currentIdx;
+          const isPast = isUp ? i < currentIdx : i > currentIdx;
           const isEnd = i === stations.length - 1;
 
           return (
