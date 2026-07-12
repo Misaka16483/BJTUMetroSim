@@ -55,15 +55,24 @@ class NetworkScreenAdapterTests(unittest.TestCase):
         frame[4:6] = (26).to_bytes(2, "little")
         frame[6:8] = (2).to_bytes(2, "little")
         frame[8:16] = (123456789).to_bytes(8, "little")
+        frame[16:18] = (2).to_bytes(2, "little")
+        frame[18:20] = (0x1234).to_bytes(2, "little")
+        frame[20:22] = (9).to_bytes(2, "little")
         frame[22:24] = (7).to_bytes(2, "little")
         frame[24] = 0b0010_0101
+        frame[25] = 0xA5
 
         request = TractionCutoffRequestParser().parse(bytes(frame))
 
         self.assertEqual(request.timestamp_ms, 123456789)
+        self.assertEqual(request.identify_bytes, b"\x55\xaa\x55\xaa")
+        self.assertEqual((request.total_len, request.data_len), (26, 2))
+        self.assertEqual((request.verify_type, request.verify_code), (2, 0x1234))
+        self.assertEqual(request.protocol_id, 9)
         self.assertEqual(request.msg_id, 7)
         self.assertEqual(request.pull_control_mask, 0b0010_0101)
         self.assertEqual(request.requested_car_numbers, [1, 3, 6])
+        self.assertEqual(request.reserve, 0xA5)
 
 
 class SignalScreenAdapterTests(unittest.TestCase):

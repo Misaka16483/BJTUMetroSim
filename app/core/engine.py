@@ -401,7 +401,13 @@ class SimulationEngine:
                 return {"ok": True, "trainId": train_id, "manualMode": enabled}
         return {"ok": False, "error": "TRAIN_NOT_FOUND"}
 
-    def set_manual_command(self, train_id: str, traction_percent: float, brake_percent: float) -> dict:
+    def set_manual_command(
+        self,
+        train_id: str,
+        traction_percent: float,
+        brake_percent: float,
+        emergency_brake: bool = False,
+    ) -> dict:
         """鎺ユ敹鎸囧畾鍒楄溅鐨勬墜鍔ㄩ┚椹舵寚浠?"""
         for train in self.trains:
             if train.train_id == train_id:
@@ -409,11 +415,18 @@ class SimulationEngine:
                     return {"ok": False, "error": "NOT_IN_MANUAL_MODE"}
                 train._manual_command = ControlCommand(
                     train_id=train_id,
-                    traction_percent=max(0.0, min(100.0, traction_percent)),
-                    brake_percent=max(0.0, min(100.0, brake_percent)),
+                    traction_percent=0.0 if emergency_brake else max(0.0, min(100.0, traction_percent)),
+                    brake_percent=100.0 if emergency_brake else max(0.0, min(100.0, brake_percent)),
+                    emergency_brake=emergency_brake,
                     source=CommandSource.MANUAL,
                 )
-                return {"ok": True, "trainId": train_id, "tractionPercent": train._manual_command.traction_percent, "brakePercent": train._manual_command.brake_percent}
+                return {
+                    "ok": True,
+                    "trainId": train_id,
+                    "tractionPercent": train._manual_command.traction_percent,
+                    "brakePercent": train._manual_command.brake_percent,
+                    "emergencyBrake": train._manual_command.emergency_brake,
+                }
         return {"ok": False, "error": "TRAIN_NOT_FOUND"}
 
     def _make_vehicle_config(self, train_id: str, onboard_pax: int = 0) -> VehicleConfig:

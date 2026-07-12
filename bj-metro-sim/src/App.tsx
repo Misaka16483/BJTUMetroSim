@@ -12,6 +12,7 @@ import PowerSystemView from './components/PowerSystemView';
 import StationPassengerView from './components/StationPassengerView';
 import TrainManagementPanel from './components/TrainManagementPanel';
 import SimulationLifecycleControls from './components/SimulationLifecycleControls';
+import DriverCabConnectionButton from './components/DriverCabConnectionButton';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -230,6 +231,8 @@ export default function App() {
             <SimulationLifecycleControls />
           )}
         </div>
+
+        {backendStatus === 'connected' ? <DriverCabConnectionButton /> : null}
 
         <div className="flex items-center gap-3">
           <button
