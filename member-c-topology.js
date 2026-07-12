@@ -6,7 +6,83 @@
   var selectedSegmentId = null;
   var chineseEvents = [];
   var seenServerEvents = {};
+  var stationStartBySegment = {};
+  var stationCount = 0;
 
+  function loadStationStarts() {
+    if (!window.ENGINE_MODE) return;
+    fetch(A + '/api/sim/topology-state')
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        (data.startOptions || []).forEach(function (option) {
+          stationStartBySegment[option.segmentId] = {
+            code: option.stationCode,
+            name: option.stationName,
+            directions: option.directions || []
+          };
+        });
+        updateRouteList(document.getElementById('route-filter').value);
+      })
+      .catch(function (error) { console.error('station start data load failed', error); });
+  }
+  function nextTopologyTrainId() {
+    var existing = {};
+    ((S && S.trains) || []).forEach(function (train) { existing[train.id] = true; });
+    var index = 1;
+    while (existing['T-TOPO-' + String(index).padStart(3, '0')]) index += 1;
+    return 'T-TOPO-' + String(index).padStart(3, '0');
+  }
+
+  function refreshEngineTopology() {
+    return fetch(A + '/api/sim/topology-state')
+      .then(function (response) { return response.json(); })
+      .then(function (data) { prev = S; S = data; updateRouteList(document.getElementById('route-filter').value); draw(); });
+  }
+
+  function scheduleEngineRefresh() {
+    if (!window.ENGINE_MODE) return;
+    function refreshAfterResponse() {
+      refreshEngineTopology()
+        .catch(function (error) { console.error('engine topology refresh failed', error); })
+        .then(function () { window.setTimeout(refreshAfterResponse, 150); });
+    }
+    refreshAfterResponse();
+  }
+  window.addEngineTrain = function (direction) {
+    var start = stationStartBySegment[selectedSegmentId];
+    if (!start) {
+      addChineseEvent('提示', '主引擎只允许从站台 Seg 加车。', S ? S.tick : 0);
+      renderChineseLog();
+      return;
+    }
+    var trainId = nextTopologyTrainId();
+    fetch(A + '/api/sim/train/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trainId: trainId, initialStationCode: start.code, initialSegmentId: selectedSegmentId, direction: direction, operationMode: 'ATO' })
+    }).then(function (response) { return response.json(); }).then(function (data) {
+      if (!data.ok) {
+        addChineseEvent('失败', '主引擎加车失败：' + (data.error || '未知原因'), S ? S.tick : 0);
+        renderChineseLog();
+        return;
+      }
+      addChineseEvent('加车', trainId + ' 已在 ' + start.name + ' 站台加入，ATO 将按 MA 自动申请进路。', S ? S.tick : 0);
+      if (S && S.clockState === 'RUNNING') { refreshEngineTopology(); return; }
+      var action = S && S.clockState === 'PAUSED' ? '/api/sim/resume' : '/api/sim/start';
+      fetch(A + action, { method: 'POST' }).then(function () { refreshEngineTopology(); });
+    }).catch(function () {
+      addChineseEvent('失败', '无法连接主引擎加车接口。', S ? S.tick : 0);
+      renderChineseLog();
+    });
+  };
+
+  function engineStartControls() {
+    var start = stationStartBySegment[selectedSegmentId];
+    if (!start) return '<div class="empty-note">主引擎仅允许从站台 Seg 加车；区间 Seg 仅用于查询进路。</div>';
+    var buttons = '';
+    if (start.directions.indexOf('UP') >= 0) buttons += '<button onclick="addEngineTrain(\'UP\')">在 ' + start.name + ' 上行加 ATO 车</button>';
+    if (start.directions.indexOf('DOWN') >= 0) buttons += '<button onclick="addEngineTrain(\'DOWN\')">在 ' + start.name + ' 下行加 ATO 车</button>';
+    return buttons ? '<div class="route-actions">' + buttons + '</div>' : '<div class="empty-note">该站台方向没有可办理的相邻站进路。</div>';
+  }
   function segmentPairKey(first, second) {
     return first < second ? first + ':' + second : second + ':' + first;
   }
@@ -144,7 +220,33 @@
         }
       });
     }
-    var list = document.getElementById('log-list');
+    if (prev && S.axleSections && prev.axleSections) {
+      var previousSections = {}, currentSections = {};
+      prev.axleSections.forEach(function (section) { previousSections[section.sectionId] = section; });
+      S.axleSections.forEach(function (section) { currentSections[section.sectionId] = section; });
+      Object.keys(currentSections).forEach(function (sectionId) {
+        if (currentSections[sectionId].occupied && !(previousSections[sectionId] || {}).occupied) {
+          addChineseEvent('占压', '计轴区段 ' + sectionId + ' 进入占压', S.tick);
+        }
+      });
+      Object.keys(previousSections).forEach(function (sectionId) {
+        if (previousSections[sectionId].occupied && !(currentSections[sectionId] || {}).occupied) {
+          addChineseEvent('出清', '计轴区段 ' + sectionId + ' 已出清', S.tick);
+        }
+      });
+    }
+    if (prev && S.trains && prev.trains) {
+      var previousTrains = {}, currentTrains = {};
+      prev.trains.forEach(function (train) { previousTrains[train.id] = train; });
+      S.trains.forEach(function (train) { currentTrains[train.id] = train; });
+      Object.keys(currentTrains).forEach(function (trainId) {
+        var current = currentTrains[trainId];
+        var previous = previousTrains[trainId] || {};
+        if (current.phase === 'WAITING_ROUTE' && previous.phase !== 'WAITING_ROUTE') {
+          addChineseEvent('等待', '列车 ' + trainId + ' 等待进路：' + (current.routeFailureReason || '当前不可办理'), S.tick);
+        }
+      });
+    }    var list = document.getElementById('log-list');
     if (!list) return;
     list.innerHTML = chineseEvents.length ? chineseEvents.map(function (event) {
       return '<div class="' + (event.category === '失败' ? 'occ' : event.category === '锁闭' ? 'lock' : event.category === '释放' ? 'rel' : 'sig') + '">[' + event.tick + '] ' + event.message + '</div>';
@@ -153,6 +255,11 @@
   }
 
   function postManual(path, payload) {
+    if (window.ENGINE_MODE) {
+      addChineseEvent('提示', '旧演示的手工锁闭已禁用；请在站台 Seg 使用主引擎 ATO 加车。', S ? S.tick : 0);
+      renderChineseLog();
+      return Promise.resolve({ ok: false, error: 'USE_ENGINE_ATO' });
+    }
     return fetch(A + path, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {})
     }).then(function (response) { return response.json(); }).then(function (data) {
@@ -248,22 +355,28 @@
     });
     var inspector = document.getElementById('route-inspector');
     if (selectedSegmentId == null) {
-      inspector.innerHTML = '点击图中的轨道以查看经过该 Seg 的进路。';
+      inspector.innerHTML = window.ENGINE_MODE
+        ? '选择标绿站台 Seg 可向主引擎加 ATO 列车；列车会经 MA、ATO 和自动进路链运行。'
+        : '点击图中的轨道以查看经过该 Seg 的进路。';
     } else {
       var segment = (RD.segments || []).find(function (item) { return item.id === selectedSegmentId; }) || {};
       var platformText = segment.platformIds && segment.platformIds.length ? '，站台 ' + segment.platformIds.join('、') : '';
-      inspector.innerHTML = '<b>S' + selectedSegmentId + '</b>　长度 ' + (segment.lengthM || 0) + ' m' + platformText +
-        '<div class="route-actions"><button onclick="placeFreeTrain()">在 S' + selectedSegmentId + ' 起点放置小车</button>' +
-        (S && S.manualMode === 'route' ? '<button class="warn" onclick="requestSelectedRoute()">办理当前选择进路</button>' : '') + '</div>';
+      var detail = '<b>S' + selectedSegmentId + '</b>　长度 ' + (segment.lengthM || 0) + ' m' + platformText;
+      inspector.innerHTML = window.ENGINE_MODE
+        ? detail + engineStartControls()
+        : detail + '<div class="route-actions"><button onclick="placeFreeTrain()">在 S' + selectedSegmentId + ' 起点放置小车</button>' +
+          (S && S.manualMode === 'route' ? '<button class="warn" onclick="requestSelectedRoute()">办理当前选择进路</button>' : '') + '</div>';
     }
     document.getElementById('route-list').innerHTML = routes.length ? routes.map(function (route) {
       var selected = selRoutes[route.id] ? ' sel' : '';
       var detail = '信号 ' + route.startSigName + ' -> ' + route.endSigName + '，' + route.pathSegs.length + ' 个 Seg';
+      var actions = window.ENGINE_MODE
+        ? '<div class="route-actions"><span class="m">ATO 按进路链自动办理</span></div>'
+        : '<div class="route-actions"><button onclick="event.stopPropagation();placeRouteTrain(\'' + route.id + '\')">在始端放车</button>' +
+          '<button class="warn" onclick="event.stopPropagation();placeAndRequestRoute(\'' + route.id + '\')">放车并办理</button>' +
+          '<button onclick="event.stopPropagation();requestRoute(\'' + route.id + '\')">仅办理（不放车）</button></div>';
       return '<div class="route-item' + selected + '" onclick="clickRoute(\'' + route.id + '\')">' +
-        '<div class="route-title"><span><b>' + route.id + '</b> ' + route.name + '</span><span>' + detail + '</span></div>' +
-        '<div class="route-actions"><button onclick="event.stopPropagation();placeRouteTrain(\'' + route.id + '\')">在始端放车</button>' +
-        '<button class="warn" onclick="event.stopPropagation();placeAndRequestRoute(\'' + route.id + '\')">放车并办理</button>' +
-        '<button onclick="event.stopPropagation();requestRoute(\'' + route.id + '\')">仅办理（不换车）</button></div></div>';
+        '<div class="route-title"><span><b>' + route.id + '</b> ' + route.name + '</span><span>' + detail + '</span></div>' + actions + '</div>';
     }).join('') : '<div class="empty-note">该 Seg 没有匹配的进路。</div>';
     document.getElementById('rcnt').textContent = selectedSegmentId == null ? routes.length + '/' + RD.routes.length : routes.length + ' 条相关进路';
   };
@@ -277,6 +390,8 @@
     var byId = {};
     var liveSegments = {};
     var liveSignalById = dynamicSignals();
+    var liveSwitchById = {};
+    ((S && S.switches) || []).forEach(function (sw) { liveSwitchById[String(sw.switchId || sw.id)] = sw; });
     var chosen = selectedSegmentIds();
     var lockedRoutes = lockedRouteMap();
     var lockedSegments = segmentIdsForRoutes(lockedRoutes);
@@ -391,15 +506,18 @@
       }
       var sw = switchByFrog[segment.id];
       if (sw) {
-        cx.fillStyle = '#d29922';
+        var liveSwitch = liveSwitchById[String(sw.id)] || {};
+        var isLocked = !!liveSwitch.lockedByRouteId;
+        var positionText = String(liveSwitch.actualPosition || 'NORMAL').toUpperCase() === 'REVERSE' ? 'R' : 'N';
+        cx.fillStyle = isLocked ? '#20c997' : '#d29922';
         cx.beginPath();
         cx.arc(pos.x + pos.w, pos.y, 4, 0, Math.PI * 2);
         cx.fill();
         if (sc >= 0.48) {
-          cx.fillStyle = '#f0c040';
+          cx.fillStyle = isLocked ? '#6ee7c8' : '#f0c040';
           cx.font = '8px monospace';
           cx.textAlign = 'left';
-          cx.fillText('W' + sw.id + ' N/R', pos.x + pos.w + 5, pos.y - 6);
+          cx.fillText('W' + sw.id + ' ' + positionText + (isLocked ? ' locked' : ''), pos.x + pos.w + 5, pos.y - 6);
         }
       }
       (staticSignalBySeg[segment.id] || []).forEach(function (signal, index) {
@@ -518,5 +636,7 @@
     draw();
   });
 
+  loadStationStarts();
   loadTopology();
+  scheduleEngineRefresh();
 }());

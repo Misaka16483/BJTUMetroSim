@@ -469,10 +469,17 @@ class InterlockingRuleEngineTests(unittest.TestCase):
             [_make_train(seg_id=14, offset_m=50.0, length_m=60.0)],
             _fake_track_query({14: {"id": 14, "lengthM": 100.0}}),
         )
-        result = self.engine.check("1", "T001")
+        result = self.engine.check("1", "T002")
         self.assertFalse(result.ok)
         self.assertEqual(result.failure_reason, "SECTION_OCCUPIED")
 
+    def test_own_occupied_entry_section_allows_route(self) -> None:
+        self.section_occ.update(
+            [_make_train(train_id="T001", seg_id=14, offset_m=50.0, length_m=60.0)],
+            _fake_track_query({14: {"id": 14, "lengthM": 100.0}}),
+        )
+        result = self.engine.check("1", "T001")
+        self.assertTrue(result.ok)
     def test_conflict_route_locked_blocks(self) -> None:
         result = self.engine.check("1", "T001", locked_route_ids=frozenset(["2"]))
         self.assertFalse(result.ok)
@@ -529,7 +536,7 @@ class RouteServiceTests(unittest.TestCase):
             [_make_train(seg_id=14, offset_m=50.0, length_m=60.0)],
             _fake_track_query({14: {"id": 14, "lengthM": 100.0}}),
         )
-        req = RouteRequest("REQ-1", "1", "T001")
+        req = RouteRequest("REQ-1", "1", "T002")
         result = self.svc.request(req)
         self.assertFalse(result.accepted)
         self.assertEqual(result.failure_reason, "SECTION_OCCUPIED")
@@ -553,24 +560,26 @@ class RouteServiceTests(unittest.TestCase):
         self.assertFalse(self.switch_lock.is_locked("1"))
 
     def test_auto_release_when_all_sections_cleared(self) -> None:
-        """T001 进入进路区段→全部离开→自动释放"""
+        """A route releases only after its train clears the final route section."""
         self.svc.request(RouteRequest("REQ-1", "1", "T001"))
-        # 第一步：T001 进入区段（触发 has_entered=True）
         self.section_occ.update(
             [_make_train(train_id="T001", seg_id=13, offset_m=80.0, length_m=60.0)],
             _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
         )
-        self.svc.update()  # 标记 has_entered
+        self.svc.update()
         self.assertTrue(self.svc.is_locked("1"))
-        # 第二步：T001 离开，区段全空
+        self.section_occ.update(
+            [_make_train(train_id="T001", seg_id=14, offset_m=80.0, length_m=60.0)],
+            _fake_track_query({14: {"id": 14, "lengthM": 100.0}}),
+        )
+        self.svc.update()
+        self.assertTrue(self.svc.is_locked("1"))
         self.section_occ.update([], _fake_track_query())
         self.svc.update()
         self.assertFalse(self.svc.is_locked("1"))
-
     def test_update_only_releases_our_train_sections(self) -> None:
-        """T001+T002同时在区段上→T001离开→进路释放（T002还在）"""
+        """Another train behind does not retain a route after its owner clears it."""
         self.svc.request(RouteRequest("REQ-1", "1", "T001"))
-        # 第一步：两车同时进入
         self.section_occ.update(
             [
                 _make_train(train_id="T001", seg_id=13),
@@ -578,17 +587,21 @@ class RouteServiceTests(unittest.TestCase):
             ],
             _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
         )
-        self.svc.update()  # 标记 has_entered
-        # 第二步：T001 离开，T002 还在
+        self.svc.update()
+        self.section_occ.update(
+            [
+                _make_train(train_id="T001", seg_id=14),
+                _make_train(train_id="T002", seg_id=13),
+            ],
+            _fake_track_query({13: {"id": 13, "lengthM": 100.0}, 14: {"id": 14, "lengthM": 100.0}}),
+        )
+        self.svc.update()
         self.section_occ.update(
             [_make_train(train_id="T002", seg_id=13)],
             _fake_track_query({13: {"id": 13, "lengthM": 100.0}}),
         )
         self.svc.update()
-        # Route should be released because T001 vacated all sections,
-        # even though T002 is still there
         self.assertFalse(self.svc.is_locked("1"))
-
 
 # ---------------------------------------------------------------------------
 # SignalAspectResolver

@@ -37,12 +37,14 @@ export default function App() {
   const speedProfile = useSimStore((s) => s.speedProfile);
   const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
+  const tickIntervalMs = useSimStore((s) => s.tickIntervalMs);
   const selectedTrainId = useSimStore((s) => s.selectedTrainId);
   const trains = useSimStore((s) => s.trains);
   const startBackendSim = useSimStore((s) => s.startBackendSim);
   const pauseBackendSim = useSimStore((s) => s.pauseBackendSim);
   const resumeBackendSim = useSimStore((s) => s.resumeBackendSim);
   const stopBackendSim = useSimStore((s) => s.stopBackendSim);
+  const setBackendTickInterval = useSimStore((s) => s.setBackendTickInterval);
   const [collapsed, setCollapsed] = useState(false);
   const [showTrainMgmt, setShowTrainMgmt] = useState(false);
   const modeIndex = viewMode === 'macro'
@@ -236,7 +238,7 @@ export default function App() {
           <button type="button" onClick={() => setViewMode('fullLine')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'fullLine' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>全线</button>
           <button type="button" onClick={() => setViewMode('driver')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>驾驶</button>
           <button type="button" onClick={() => setViewMode('power')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'power' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>供电</button>
-          <button type="button" onClick={() => setViewMode('memberCDemo')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'memberCDemo' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>TEST</button>
+          <button type="button" onClick={() => setViewMode('memberCDemo')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'memberCDemo' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>拓扑</button>
         </div>
         </div>
 
@@ -261,6 +263,23 @@ export default function App() {
           )}
         </div>
 
+        {backendStatus === 'connected' && (
+          <label className="flex items-center gap-1" title="自动播放的现实时间间隔；不改变每个仿真 tick 的物理时长">
+            <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Tick</span>
+            <input
+              type="range"
+              min="60"
+              max="2000"
+              step="20"
+              value={tickIntervalMs}
+              onChange={(event) => { void setBackendTickInterval(Number(event.target.value)); }}
+              style={{ width: 76, accentColor: 'var(--cyan)', cursor: 'pointer' }}
+            />
+            <span className="text-[10px] tabular-nums" style={{ color: 'var(--cyan)', minWidth: 42 }}>
+              {tickIntervalMs}ms
+            </span>
+          </label>
+        )}
         <div className="flex items-center gap-3">
           <button
             onClick={() => setShowTrainMgmt(true)}

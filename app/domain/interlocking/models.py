@@ -190,6 +190,9 @@ class RouteState:
     # LOCKED + 进入接近区段 → APPROACH_LOCKED
     # APPROACH_LOCKED + 进入第一个进路区段 → 开始监控释放
     has_entered: bool = False
+    # The latest route section occupied by the assigned train.  Future sections
+    # remain locked until this marker reaches the final route section and clears.
+    last_entered_section_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

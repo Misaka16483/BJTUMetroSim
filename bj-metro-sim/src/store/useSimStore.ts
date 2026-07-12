@@ -15,7 +15,7 @@ import type {
   VehicleConfigResponse,
   AddTrainPayload,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSetManualMode, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetTickInterval, simSetVehicleConfig, simSetManualMode, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'memberCDemo';
 
@@ -124,11 +124,13 @@ interface SimState {
 
   // 后端仿真引擎
   engineClockState: string;
+  tickIntervalMs: number;
   updateFromBackend: (data: SimStateResponse) => void;
   startBackendSim: () => Promise<void>;
   pauseBackendSim: () => Promise<void>;
   resumeBackendSim: () => Promise<void>;
   stopBackendSim: () => Promise<void>;
+  setBackendTickInterval: (intervalMs: number) => Promise<void>;
 
   // 车辆参数配置
   vehicleConfig: VehicleConfigPayload;
@@ -419,6 +421,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   trainPositions: {},
   segmentProgress: 0,
   engineClockState: 'IDLE',
+  tickIntervalMs: 250,
 
   vehicleConfig: {
     formation: 'Tc-M-M-M-M-Tc',
@@ -653,6 +656,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
     set({
       engineClockState: clock.state,
+      tickIntervalMs: clock.tickIntervalMs ?? state.tickIntervalMs,
       isRunning: isEngineRunning,
       trains: trains,
       selectedTrainId: selId,
@@ -691,26 +695,23 @@ export const useSimStore = create<SimState>((set, get) => ({
       set({ ...sel, manualMode: selTrain.operationMode === 'MANUAL' });
     }
 
-    // 全部列车地图位置
-    const line9 = state.metroLines.find((l) => l.id === '9');
+    // 全部列车地图位置：使用后端站码，避免与 Amap 站序混用。
+    const backendStations = state.trackMap?.stations ?? [];
+    const stationByCode = new Map(backendStations.map((station) => [station.stationCode, station]));
     const newPositions: Record<string, { lat: number; lng: number }> = {};
-    if (line9 && cachedPolyline) {
-      if (!cachedStationPolyIdx || cachedStationPolyIdx.length !== line9.stations.length) {
-        buildPolylineCache(line9);
-      }
-      for (const t of trains) {
-        const stIdx = t.stationIndex;
-        const nextIdx = t.direction === 'UP'
-          ? Math.min(stIdx + 1, (line9.stations.length || 1) - 1)
-          : Math.max(stIdx - 1, 0);
-        const pos = interpolateOnPolyline(stIdx, nextIdx, t.segmentProgress);
-        if (pos) {
-          newPositions[t.trainId] = { lat: pos[0], lng: pos[1] };
-        }
-      }
+    for (const train of trains) {
+      const current = stationByCode.get(train.currentStationCode);
+      const next = stationByCode.get(train.nextStationCode);
+      if (!current) continue;
+      const progress = Math.max(0, Math.min(1, train.segmentProgress ?? 0));
+      newPositions[train.trainId] = next
+        ? {
+            lat: current.lat + (next.lat - current.lat) * progress,
+            lng: current.lng + (next.lng - current.lng) * progress,
+          }
+        : { lat: current.lat, lng: current.lng };
     }
     set({ trainPositions: newPositions });
-
     // KPI
     set({
       totalBoarded: kpi.totalOnboardPax,
@@ -736,7 +737,7 @@ export const useSimStore = create<SimState>((set, get) => ({
         if (newHistory.length > 500) newHistory.splice(0, newHistory.length - 500);
         set({
           speedHistory: newHistory,
-          speedHistoryByTrain: { ...curState.speedHistoryByTrain, [selId]: newHistory },
+          speedHistoryByTrain: { ...curState.speedHistoryByTrain, [selTrain.trainId]: newHistory },
         });
       }
 
@@ -783,6 +784,10 @@ export const useSimStore = create<SimState>((set, get) => ({
     });
   },
 
+  setBackendTickInterval: async (intervalMs) => {
+    const result = await simSetTickInterval(intervalMs);
+    set({ tickIntervalMs: result.tickIntervalMs });
+  },
   setVehicleConfig: (partial) =>
     set((s) => ({ vehicleConfig: { ...s.vehicleConfig, ...partial } })),
 

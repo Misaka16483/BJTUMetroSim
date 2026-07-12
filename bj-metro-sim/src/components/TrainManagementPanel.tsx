@@ -309,7 +309,11 @@ export default function TrainManagementPanel() {
                   <div style={{ fontSize: 10, color: '#6b7280', marginTop: 2 }}>
                     {t.currentStation} → {t.nextStation}
                   </div>
-                  <div style={{ fontSize: 9, color: '#484f58', marginTop: 1 }}>
+                  <div style={{ fontSize: 9, color: '#8b949e', marginTop: 1, fontFamily: 'monospace' }}>
+                    {t.currentSegmentId == null
+                      ? 'SEG --'
+                      : `S${t.currentSegmentId} + ${(t.currentSegmentOffsetM ?? 0).toFixed(1)} m`}
+                  </div>                  <div style={{ fontSize: 9, color: '#484f58', marginTop: 1 }}>
                     {t.direction === 'UP' ? '上行' : '下行'} · {t.onboardPax}/{t.capacityPax} 人 · {t.phase}
                   </div>
                 </div>

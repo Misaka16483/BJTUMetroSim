@@ -252,23 +252,42 @@ class RouteService:
         state.approach_sections.clear()
         state.failure_reason = None
         state.has_entered = False
+        state.last_entered_section_id = None
         state.state = "IDLE"
 
     def _release_cleared_sections(self, route_id: str, state: RouteState) -> None:
-        """对已进入进路的列车，逐区段检查释放（本车离开→移除）。全部清空后自动释放。"""
+        """Release only sections cleared behind the assigned train.
+
+        ``locked_sections`` stays ordered as defined by the route table.  A
+        section which has not been reached yet must remain locked; only the
+        prefix behind the first currently occupied section may be released.
+        """
         train_id = state.train_id
         if train_id is None:
             self._do_release(route_id, state, "AUTO")
             return
 
-        # 保留列车仍占用的区段，移除已离开的
-        new_locked: list[str] = []
-        for sid in state.locked_sections:
-            if train_id in self._section_occ.occupied_by(sid):
-                new_locked.append(sid)
-        state.locked_sections[:] = new_locked
+        occupied_indexes = [
+            index
+            for index, section_id in enumerate(state.locked_sections)
+            if train_id in self._section_occ.occupied_by(section_id)
+        ]
+        if occupied_indexes:
+            first_occupied = occupied_indexes[0]
+            last_occupied = occupied_indexes[-1]
+            state.last_entered_section_id = state.locked_sections[last_occupied]
+            # Prefix sections are behind the train tail.  Keep the occupied
+            # section and every not-yet-reached section ahead of it locked.
+            del state.locked_sections[:first_occupied]
+            return
 
-        if not new_locked:
+        # A gap between route sections is normal.  Only after the assigned
+        # train has occupied and then cleared the final remaining section can
+        # the complete route be released.
+        if (
+            state.locked_sections
+            and state.last_entered_section_id == state.locked_sections[-1]
+        ):
             self._do_release(route_id, state, "AUTO")
 
     # -- query interface --------------------------------------------------
@@ -281,6 +300,13 @@ class RouteService:
     def is_locked(self, route_id: str) -> bool:
         """进路是否处于已锁闭状态（LOCKED 或 APPROACH_LOCKED）。"""
         return self.state_of(route_id) in ("LOCKED", "APPROACH_LOCKED")
+
+    def locked_by(self, route_id: str) -> str | None:
+        """Return the train currently owning a locked route, if any."""
+        state = self._routes.get(route_id)
+        if state is None or state.state not in ("LOCKED", "APPROACH_LOCKED"):
+            return None
+        return state.train_id
 
     def locked_routes(self) -> list[str]:
         """返回所有已锁闭/接近锁闭的进路 ID 列表。"""
@@ -300,6 +326,7 @@ class RouteService:
                 "lockedSwitches": dict(rs.locked_switches),
                 "approachSections": list(rs.approach_sections),
                 "hasEntered": rs.has_entered,
+                "lastEnteredSectionId": rs.last_entered_section_id,
                 "failureReason": rs.failure_reason,
             }
             for rs in self._routes.values()

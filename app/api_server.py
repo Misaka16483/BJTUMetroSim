@@ -784,6 +784,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.power_topology())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
+            elif path == "/api/sim/topology-state":
+                self._send_json(self._main_engine_topology_state())
             elif path == "/api/sim/power/state":
                 self._send_json(self._sim_power_state())
             elif path == "/api/sim/speed-profile":
@@ -845,7 +847,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ))
                 return
 
-            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop"}:
+            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/step", "/api/sim/tick-interval"}:
                 if not self.engine:
                     self._send_json(
                         {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
@@ -870,6 +872,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/step":
+                self.engine.step_once()
+                self._send_json(self._main_engine_topology_state())
+            elif path == "/api/sim/tick-interval":
+                payload = self._read_json_body()
+                interval_ms = float(payload.get("intervalMs", self.engine._tick_interval_seconds * 1000))
+                applied_seconds = self.engine.set_tick_interval_seconds(interval_ms / 1000.0)
+                self._send_json({"ok": True, "tickIntervalMs": round(applied_seconds * 1000)})
             elif path == "/api/sim/train/add":
                 self._send_json(self._add_train())
             elif path == "/api/sim/train/remove":
@@ -930,6 +940,82 @@ class ApiHandler(BaseHTTPRequestHandler):
             base["simEngine"] = "not_attached"
         return base
 
+    def _topology_start_options(self) -> list[JsonDict]:
+        if self.engine is None:
+            return []
+        options: list[JsonDict] = []
+        for station in self.service.station_mappings():
+            for platform in station.get("platforms", []):
+                segment_id = platform.get("segmentId")
+                if segment_id is None:
+                    continue
+                options.append({
+                    "segmentId": int(segment_id),
+                    "stationCode": station["stationCode"],
+                    "stationName": station["stationName"],
+                    "directions": list(self.engine.available_initial_directions(str(station["stationCode"]), int(segment_id))),
+                })
+        return options
+    def _main_engine_topology_state(self) -> JsonDict:
+        """Adapt the main engine snapshot to the established Member C canvas contract."""
+        static = self.service.member_c_static_routes()
+        if self.engine is None or self.engine.snapshot() is None:
+            return {
+                "tick": 0, "simTimeMs": 0, "clockState": "IDLE", "segments": static.get("segments", []),
+                "trains": [], "routes": [], "signals": [], "axleSections": [],
+                "segTrainColors": {}, "events": [], "occupiedCount": 0,
+                "totalAxleSections": len(self.service.line_map.get("axleSections", [])),
+                "lockedRouteCount": 0, "requestedRoutesCount": 0,
+            }
+        snap = self.engine.snapshot()
+        assert snap is not None
+        interlocking = snap.interlocking
+        sections = interlocking.get("sections", [])
+        section_by_id = {str(item.get("sectionId")): item for item in sections}
+        occupied_segments: set[int] = set()
+        for raw in self.service.line_map.get("axleSections", []):
+            section_id = str(raw.get("id"))
+            if section_by_id.get(section_id, {}).get("occupied"):
+                occupied_segments.update(int(seg_id) for seg_id in raw.get("segmentIds", []) if seg_id is not None)
+        signal_aspects = {
+            str(item.get("signalId")): item.get("aspect", "RED")
+            for item in interlocking.get("signals", [])
+        }
+        colors = ("#58a6ff", "#f0c040", "#f778ba", "#39d0c8", "#8fc31f")
+        trains = []
+        seg_train_colors = {segment_id: "#f85149" for segment_id in occupied_segments}
+        for index, train in enumerate(snap.trains):
+            segment_id = train.get("currentSegmentId")
+            color = colors[index % len(colors)]
+            if segment_id is not None:
+                seg_train_colors[int(segment_id)] = color
+            trains.append({
+                "id": train.get("trainId"), "segId": segment_id,
+                "offsetM": train.get("currentSegmentOffsetM", 0.0),
+                "positionM": train.get("pathPositionM", 0.0),
+                "speedMps": train.get("speedMps", 0.0),
+                "direction": "FORWARD" if train.get("direction") == "UP" else "BACKWARD",
+                "lengthM": 120.0, "phase": train.get("phase", "IDLE"),
+                "routeFailureReason": train.get("routeFailureReason"),
+                "movementAuthorityReason": train.get("movementAuthorityReason"), "color": color,
+            })
+        signals = [
+            {"id": item.get("id"), "segId": item.get("segId"), "name": item.get("name", ""),
+             "aspect": signal_aspects.get(str(item.get("id")), "RED")}
+            for item in static.get("signals", [])
+        ]
+        routes = interlocking.get("routes", [])
+        return {
+            "tick": snap.tick, "simTimeMs": snap.sim_time_ms, "clockState": snap.clock_state,
+            "segments": static.get("segments", []), "startOptions": self._topology_start_options(),
+            "trains": trains, "routes": routes,
+            "signals": signals, "axleSections": sections, "switches": interlocking.get("switches", []),
+            "segTrainColors": seg_train_colors, "events": [],
+            "occupiedCount": sum(1 for item in sections if item.get("occupied")),
+            "totalAxleSections": len(sections),
+            "lockedRouteCount": sum(1 for item in routes if item.get("state") in ("LOCKED", "APPROACH_LOCKED")),
+            "requestedRoutesCount": len(routes),
+        }
     def _sim_state(self) -> JsonDict:
         if self.engine is None:
             return {
@@ -947,6 +1033,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "simTime": snap.sim_time_str,
                 "tick": snap.tick,
                 "simTimeMs": snap.sim_time_ms,
+                "tickIntervalMs": round(self.engine._tick_interval_seconds * 1000),
             },
             "trains": snap.trains,
             "stations": snap.stations,

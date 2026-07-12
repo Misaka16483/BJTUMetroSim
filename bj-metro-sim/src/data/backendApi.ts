@@ -145,6 +145,11 @@ export interface SimTrainState {
   pathPositionM?: number;
   pathTotalLengthM?: number;
   currentSegmentId?: number | null;
+  currentSegmentOffsetM?: number;
+  movementAuthorityEndM?: number;
+  movementAuthorityReason?: string;
+  movementAuthoritySpeedMps?: number;
+  routeChainIds?: string[];
   localSpeedLimitMps?: number;
   gradeRatio?: number;
   pathSegmentCount?: number;
@@ -319,6 +324,7 @@ export interface SimClock {
   simTime: string;
   tick: number;
   simTimeMs: number;
+  tickIntervalMs?: number;
 }
 
 export interface SimStateResponse {
@@ -379,6 +385,17 @@ export function simResume(): Promise<unknown> {
 
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
+}
+
+export function simSetTickInterval(intervalMs: number): Promise<{ ok: boolean; tickIntervalMs: number }> {
+  return fetch('/api/sim/tick-interval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ intervalMs }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean; tickIntervalMs: number }>;
+  });
 }
 
 export interface VehicleConfigPayload {
@@ -447,6 +464,7 @@ export function simSendManualCommand(tractionPercent: number, brakePercent: numb
 export interface AddTrainPayload {
   trainId: string;
   initialStationCode: string;
+  initialSegmentId?: number;
   direction: 'UP' | 'DOWN';
   operationMode?: 'ATO' | 'MANUAL';
   capacityPax?: number;

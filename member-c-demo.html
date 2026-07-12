@@ -84,7 +84,10 @@ canvas{display:block}
 
 <script>
 /* ═══════════════════════════ 全局变量 ═══════════════════════════ */
-var A=(new URLSearchParams(location.search).get('api')||'http://127.0.0.1:8010'), S=null, prev=null, tm=null, spd=10;
+var query=new URLSearchParams(location.search);
+var ENGINE_MODE=query.get('engine')==='1';
+var A=query.get('api')||location.origin, S=null, prev=null, tm=null, spd=10;
+var STATE_ENDPOINT=ENGINE_MODE?'/api/sim/topology-state':'/api/phase2/member-c/state';
 var c=document.getElementById('c'), cx=c.getContext('2d');
 var sc=1, ox=0, oy=0, dr=null, w=document.getElementById('canvas-wrap');
 var BM=60, UY=90, DY=140, SY=60;
@@ -109,14 +112,35 @@ function api(u,fn){
     prev=S; S=d; if(fn)fn();
   }).catch(function(e){console.error(u,e)});
 }
-function st(){api('/api/phase2/member-c/step',draw)}
-function rst(){evts=[];prev=null;api('/api/phase2/member-c/reset',draw)}
-function playBtn(){
-  if(tm)return;
-  document.getElementById('btn-play').classList.add('on');
-  tm=setInterval(function(){st()},1000/spd);
+function enginePost(path,fn){
+  fetch(A+path,{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(d.tick!==undefined){prev=S;S=d;}
+    if(fn)fn(d);
+  }).catch(function(e){console.error(path,e)});
 }
-function ps(){clearInterval(tm);tm=null;document.getElementById('btn-play').classList.remove('on')}
+function st(){
+  if(!ENGINE_MODE){api('/api/phase2/member-c/step',draw);return;}
+  ps();enginePost('/api/sim/step',draw);
+}
+function rst(){
+  evts=[];prev=null;
+  if(!ENGINE_MODE){api('/api/phase2/member-c/reset',draw);return;}
+  ps();enginePost('/api/sim/stop',function(){api(STATE_ENDPOINT,draw)});
+}
+function playBtn(){
+  if(!ENGINE_MODE){
+    if(tm)return;
+    document.getElementById('btn-play').classList.add('on');
+    tm=setInterval(function(){st()},1000/spd);
+    return;
+  }
+  document.getElementById('btn-play').classList.add('on');
+  if(S&&S.clockState==='RUNNING')return;
+  enginePost(S&&S.clockState==='PAUSED'?'/api/sim/resume':'/api/sim/start',function(){api(STATE_ENDPOINT,draw)});
+}function ps(){
+  clearInterval(tm);tm=null;document.getElementById('btn-play').classList.remove('on');
+  if(ENGINE_MODE&&S&&S.clockState==='RUNNING')enginePost('/api/sim/pause',function(){api(STATE_ENDPOINT,draw)});
+}
 
 /* ═══════════════════════════ 缩放平移 ═══════════════════════════ */
 function zm(k){sc=Math.max(0.2,Math.min(10,sc*k));document.getElementById('zl').textContent=Math.round(sc*100)+'%';draw()}
@@ -232,7 +256,7 @@ detect();
 }
 
 /* 初始化 */
-api('/api/phase2/member-c/state',function(){fit();playBtn();});
+api(STATE_ENDPOINT,function(){fit();if(!ENGINE_MODE)playBtn();});
 // topology renderer loaded below
 </script>
 <script src="member-c-topology.js"></script>

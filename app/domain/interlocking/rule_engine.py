@@ -123,14 +123,18 @@ class InterlockingRuleEngine:
 
         # 检查 2：进路包含的计轴区段是否全部空闲
         for section_id in route_def.axle_section_ids:
-            if self._section_occ.is_occupied(section_id):
-                return RouteCheckResult(
-                    ok=False, route_id=route_id,
-                    failure_reason="SECTION_OCCUPIED",
-                    failed_section_id=section_id,
-                )
-
-        # 检查 3：保护区段是否空闲
+            if not self._section_occ.is_occupied(section_id):
+                continue
+            # The requesting train may occupy its own start/approach section.
+            # Foreign, shared, and unidentified occupations still block the route.
+            occupants = set(self._section_occ.occupied_by(section_id))
+            if occupants == {train_id}:
+                continue
+            return RouteCheckResult(
+                ok=False, route_id=route_id,
+                failure_reason="SECTION_OCCUPIED",
+                failed_section_id=section_id,
+            )
         for section_id in route_def.protection_section_ids:
             if self._section_occ.is_occupied(section_id):
                 return RouteCheckResult(
