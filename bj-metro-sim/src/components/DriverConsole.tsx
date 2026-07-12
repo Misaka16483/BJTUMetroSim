@@ -459,13 +459,13 @@ function CabPIS({ stations, currentIdx, direction, color }: {
         {stations.map((_, i) => {
           if (i === stations.length - 1) return null;
           const x1 = 32 + i * SP + ACTIVE_R, x2 = 32 + (i + 1) * SP - ACTIVE_R;
-          const past = direction === 'UP' ? i > currentIdx : i < currentIdx;
+          const past = direction === 'UP' ? i < currentIdx : i > currentIdx;
           return <line key={`l-${i}`} x1={x1} y1="20" x2={x2} y2="20"
             stroke={past ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.12)'} strokeWidth="1.5" />;
         })}
         {stations.map((name, i) => {
           const cx = 32 + i * SP, cur = i === currentIdx;
-          const past = direction === 'UP' ? i > currentIdx : i < currentIdx;
+          const past = direction === 'UP' ? i < currentIdx : i > currentIdx;
           return (
             <g key={`d-${i}`}>
               {cur && <circle cx={cx} cy="20" r={ACTIVE_R + 4} fill="none" stroke={color} strokeWidth="1.2" opacity="0.12" />}
