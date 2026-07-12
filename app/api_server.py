@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from app.adapters.cab import DriverCabHardwareController
+from app.adapters.vision import COMPACT_LAYOUT, VisionUdpPublisher
 from app.core.engine import SimulationEngine
 from app.domain.line.services import LineMapRepository, LineScope, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
@@ -427,6 +428,8 @@ class ApiHandler(BaseHTTPRequestHandler):
     experiment_registry: PowerExperimentRegistry | None = None
     cab_hardware_controller: DriverCabHardwareController | None = None
     cab_hardware_lock = threading.RLock()
+    vision_publisher: VisionUdpPublisher | None = None
+    vision_hardware_lock = threading.RLock()
 
     def do_GET(self) -> None:
         try:
@@ -460,6 +463,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json(controller.status())
+            elif path == "/api/hardware/vision/status":
+                publisher = self._vision_publisher()
+                if publisher is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(publisher.status())
             elif match := re.fullmatch(r"/api/sim/passenger-history/([^/]+)", path):
                 if self.engine is None:
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
@@ -641,6 +650,23 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json(controller.disconnect())
+            elif path == "/api/hardware/vision/connect":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    try:
+                        publisher = self._vision_publisher(self._read_json_body())
+                        if publisher is None:
+                            raise RuntimeError("vision publisher is unavailable")
+                        self._send_json(publisher.connect(), HTTPStatus.ACCEPTED)
+                    except (TypeError, ValueError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/hardware/vision/disconnect":
+                publisher = self._vision_publisher()
+                if publisher is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(publisher.disconnect())
             elif path == "/api/hardware/driver-cab/plc/connect":
                 controller = self._driver_cab_controller()
                 if controller is None:
@@ -743,6 +769,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             base["clockState"] = self.engine.clock.state.value
             base["simTimeStr"] = snap.sim_time_str if snap else "--:--:--"
             base["activeTrains"] = len([t for t in (snap.trains if snap else []) if t.get("phase") != "IDLE"])
+            if ApiHandler.vision_publisher is not None:
+                base["visionAdapter"] = ApiHandler.vision_publisher.status()["status"]["state"]
         else:
             base["simEngine"] = "not_attached"
         return base
@@ -895,6 +923,42 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ApiHandler.cab_hardware_controller = controller
             return controller
 
+    def _vision_publisher(self, payload: JsonDict | None = None) -> VisionUdpPublisher | None:
+        if self.engine is None:
+            return None
+        with ApiHandler.vision_hardware_lock:
+            publisher = ApiHandler.vision_publisher
+            needs_rebuild = publisher is None or publisher.engine is not self.engine or payload is not None
+            if not needs_rebuild:
+                return publisher
+            if publisher is not None:
+                publisher.disconnect()
+            config = payload or {}
+            signal_source_map = config.get("signalSourceMap")
+            switch_source_map = config.get("switchSourceMap")
+            if signal_source_map is not None and not isinstance(signal_source_map, dict):
+                raise ValueError("signalSourceMap must be an object")
+            if switch_source_map is not None and not isinstance(switch_source_map, dict):
+                raise ValueError("switchSourceMap must be an object")
+            publisher = VisionUdpPublisher(
+                self.engine,
+                remote_host=str(config.get("remoteHost", "18.32.115.28")),
+                remote_port=int(config.get("remotePort", 8303)),
+                local_host=str(config.get("localHost", "0.0.0.0")),
+                local_port=int(config.get("localPort", 8302)),
+                interval_s=float(config.get("intervalMs", 100.0)) / 1000.0,
+                layout=str(config.get("layout", COMPACT_LAYOUT)),
+                primary_train_id=(
+                    str(config["primaryTrainId"])
+                    if config.get("primaryTrainId") is not None
+                    else None
+                ),
+                signal_source_map=signal_source_map,
+                switch_source_map=switch_source_map,
+            )
+            ApiHandler.vision_publisher = publisher
+            return publisher
+
     @classmethod
     def _power_experiment_registry(cls) -> PowerExperimentRegistry:
         if cls.experiment_registry is None:
@@ -1019,6 +1083,13 @@ def main() -> None:
     parser.add_argument("--run-dir", default=str(DEFAULT_RUN_DIR))
     parser.add_argument("--scenario", default=str(DEFAULT_SCENARIO))
     parser.add_argument("--ws-port", type=int, default=8001)
+    parser.add_argument("--vision-enabled", action="store_true", help="Start the Line 9 vision UDP publisher")
+    parser.add_argument("--vision-host", default="18.32.115.28", help="Vision controller IPv4 address")
+    parser.add_argument("--vision-port", type=int, default=8303, help="Vision controller receive port")
+    parser.add_argument("--vision-local-host", default="0.0.0.0", help="Local IPv4 address to bind")
+    parser.add_argument("--vision-local-port", type=int, default=8302, help="Local UDP source port; 0 chooses an ephemeral port")
+    parser.add_argument("--vision-layout", choices=["compact", "fixed"], default="compact")
+    parser.add_argument("--vision-train-id", default=None, help="Train to publish as the cab-view train")
     args = parser.parse_args()
 
     service = Line9DataService(Path(args.cache), Path(args.stations), Path(args.run_dir))
@@ -1044,6 +1115,26 @@ def main() -> None:
         except Exception as exc:
             print(f"[engine] 初始化失败: {exc}")
 
+    if args.vision_enabled and ApiHandler.engine is not None:
+        vision = VisionUdpPublisher(
+            ApiHandler.engine,
+            remote_host=args.vision_host,
+            remote_port=args.vision_port,
+            local_host=args.vision_local_host,
+            local_port=args.vision_local_port,
+            layout=args.vision_layout,
+            primary_train_id=args.vision_train_id,
+        )
+        ApiHandler.vision_publisher = vision
+        vision.connect()
+        mapping = vision.status()["status"]["mapping"]
+        print(
+            "[vision] UDP publisher enabled: "
+            f"{args.vision_local_host}:{args.vision_local_port} -> {args.vision_host}:{args.vision_port}, "
+            f"layout={args.vision_layout}, mapped signals={mapping['mappedSignalCount']}/77, "
+            f"switches={mapping['mappedSwitchCount']}/29"
+        )
+
     # ── WebSocket ──
     ws = WebSocketBroadcaster(args.host, args.ws_port)
     ws.start()
@@ -1060,15 +1151,20 @@ def main() -> None:
     print("  GET  /api/sim/state")
     print("  GET  /api/sim/interlocking/state")
     print("  GET  /api/sim/dispatch/state")
+    print("  GET  /api/hardware/vision/status")
     print("  POST /api/sim/start")
     print("  POST /api/sim/pause")
     print("  POST /api/sim/resume")
     print("  POST /api/sim/stop")
+    print("  POST /api/hardware/vision/connect")
+    print("  POST /api/hardware/vision/disconnect")
     try:
         server.serve_forever()
     finally:
         if ApiHandler.cab_hardware_controller:
             ApiHandler.cab_hardware_controller.disconnect()
+        if ApiHandler.vision_publisher:
+            ApiHandler.vision_publisher.disconnect()
         if ApiHandler.engine:
             ApiHandler.engine.stop()
 

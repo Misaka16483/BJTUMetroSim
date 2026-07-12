@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 from dataclasses import asdict
@@ -26,6 +27,12 @@ from app.adapters.cab import (
 )
 from app.adapters.hmi import NetworkScreenClient, NetworkScreenFrameBuilder, NetworkScreenState
 from app.adapters.mmi import SignalScreenClient, SignalScreenFrameBuilder, SignalScreenState
+from app.adapters.vision import (
+    UdpDatagramSender,
+    VisionFrameBuilder,
+    VisionFrameParser,
+    VisionFrameState,
+)
 from app.core.clock import SimulationClock
 from app.core.message_bus import MessageBus
 from app.domain.control import CabControlService, DriverInput, VehicleInteractiveSession, run_ato_stop_demo
@@ -255,6 +262,72 @@ def mmi_send_demo(args: argparse.Namespace) -> None:
         return
     SignalScreenClient(host=args.host, port=args.port, timeout_s=args.timeout).send_state(state)
     print(f"sent mmi-signal-screen bytes={len(frame)} to {args.host}:{args.port}")
+
+
+def vision_send_demo(args: argparse.Namespace) -> None:
+    state = VisionFrameState(
+        live_counter=args.live_counter,
+        signal_states=(0x01,) * 77,
+        switch_states=(0x01,) * 29,
+        speed_mmps=round(args.speed_mps * 1000.0),
+        dwell_time_s=args.dwell_time,
+        run_state=args.run_state,
+        acceleration_percent=args.acceleration_percent,
+        section_distance_mm=round(args.section_distance_m * 1000.0),
+        edge_id=args.edge_id,
+        direction=args.direction,
+    )
+    frame = VisionFrameBuilder(args.layout).build(state)
+    if args.dry_run:
+        _print_frame_summary(f"vision-v1.3-{args.layout}", frame)
+        return
+    sender = UdpDatagramSender(
+        remote_host=args.host,
+        remote_port=args.port,
+        local_host=args.local_host,
+        local_port=args.local_port,
+    )
+    try:
+        sender.send(frame)
+    finally:
+        sender.close()
+    print(
+        f"sent vision-v1.3-{args.layout} bytes={len(frame)} "
+        f"from {args.local_host}:{args.local_port} to {args.host}:{args.port}"
+    )
+
+
+def vision_receive(args: argparse.Namespace) -> None:
+    parser = VisionFrameParser(args.layout)
+    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    receiver.settimeout(args.timeout)
+    receiver.bind((args.host, args.port))
+    max_frames = args.max_frames if args.max_frames > 0 else None
+    received = 0
+    try:
+        print(f"vision receiver listening on {args.host}:{args.port}, layout={args.layout}", file=sys.stderr)
+        while max_frames is None or received < max_frames:
+            frame, source = receiver.recvfrom(4096)
+            state = parser.parse(frame)
+            received += 1
+            print(json.dumps({
+                "sequence": received,
+                "source": f"{source[0]}:{source[1]}",
+                "bytes": len(frame),
+                "liveCounter": state.live_counter,
+                "signalCount": len(state.signal_states),
+                "switchCount": len(state.switch_states),
+                "speedMmps": state.speed_mmps,
+                "dwellTimeS": state.dwell_time_s,
+                "runState": state.run_state,
+                "accelerationPercent": state.acceleration_percent,
+                "sectionDistanceMm": state.section_distance_mm,
+                "edgeId": state.edge_id,
+                "direction": state.direction,
+                "otherTrainCount": len(state.other_trains),
+            }, ensure_ascii=False))
+    finally:
+        receiver.close()
 
 
 def vehicle_console(args: argparse.Namespace) -> None:
@@ -757,6 +830,37 @@ def build_parser() -> argparse.ArgumentParser:
     mmi_parser.add_argument("--next-station-distance", type=float, default=0.0, help="Distance to next station in meters")
     mmi_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
     mmi_parser.set_defaults(func=mmi_send_demo)
+
+    vision_parser = subparsers.add_parser(
+        "vision-send-demo",
+        help="Build or send one Line 9 Vision Version 1.3 UDP frame",
+    )
+    vision_parser.add_argument("--host", default="18.32.115.28", help="Vision controller IP address")
+    vision_parser.add_argument("--port", type=int, default=8303, help="Vision controller receive port")
+    vision_parser.add_argument("--local-host", default="0.0.0.0", help="Local bind address")
+    vision_parser.add_argument("--local-port", type=int, default=8302, help="Local source port; 0 chooses an ephemeral port")
+    vision_parser.add_argument("--layout", choices=["compact", "fixed"], default="compact")
+    vision_parser.add_argument("--live-counter", type=int, default=0)
+    vision_parser.add_argument("--speed-mps", type=float, default=0.0)
+    vision_parser.add_argument("--dwell-time", type=int, default=0)
+    vision_parser.add_argument("--run-state", type=lambda value: int(value, 0), default=0x13)
+    vision_parser.add_argument("--acceleration-percent", type=int, default=0)
+    vision_parser.add_argument("--section-distance-m", type=float, default=0.0)
+    vision_parser.add_argument("--edge-id", type=int, default=11)
+    vision_parser.add_argument("--direction", type=int, choices=[-1, 1], default=1)
+    vision_parser.add_argument("--dry-run", action="store_true", help="Print frame summary without opening UDP")
+    vision_parser.set_defaults(func=vision_send_demo)
+
+    vision_receive_parser = subparsers.add_parser(
+        "vision-receive",
+        help="Receive and decode Line 9 Vision Version 1.3 UDP frames",
+    )
+    vision_receive_parser.add_argument("--host", default="0.0.0.0", help="Local bind address")
+    vision_receive_parser.add_argument("--port", type=int, default=8303, help="Local receive port")
+    vision_receive_parser.add_argument("--layout", choices=["compact", "fixed"], default="compact")
+    vision_receive_parser.add_argument("--timeout", type=float, default=10.0, help="Receive timeout in seconds")
+    vision_receive_parser.add_argument("--max-frames", type=int, default=0, help="Frames to decode; 0 means forever")
+    vision_receive_parser.set_defaults(func=vision_receive)
 
     console_parser = subparsers.add_parser("vehicle-console", help="Interactively control a single train")
     console_parser.add_argument("--train-id", default="T001", help="Train id")
