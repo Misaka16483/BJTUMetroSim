@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSimStore } from '../store/useSimStore';
 import { fetchBackendTrackMap, fetchSimState } from '../data/backendApi';
 import type { SimStateResponse, TrackMapData } from '../data/backendApi';
 import { ggzInterlockingData, fspInterlockingData, bwrInterlockingData, gtgInterlockingData, kylInterlockingData, ftnInterlockingData, ftdInterlockingData, qlzInterlockingData, llqInterlockingData, lleInterlockingData, jbgInterlockingData, bdzInterlockingData, bqsInterlockingData } from '../data/stationInterlockingData';
@@ -12,9 +13,6 @@ const COLORS = {
   train: '#8FC31F',
   text: '#dce8f8',
   muted: '#5f7088',
-  signalMain: '#58a6ff',
-  signalShunting: '#d29922',
-  signalDistant: '#8b949e',
 };
 
 const SYMBOLS: Record<number, string> = { 1: '◆', 2: '◇', 3: '●' };
@@ -185,6 +183,7 @@ export default function FullLineInterlockingView() {
   const [trackMap, setTrackMap] = useState<TrackMapData | null>(null);
   const [loading, setLoading] = useState(true);
   const [interlockingData] = useState(() => getCombinedInterlockingData());
+  const selectedTrainId = useSimStore((s) => s.selectedTrainId);
 
   // 加载数据
   useEffect(() => {
@@ -294,10 +293,17 @@ export default function FullLineInterlockingView() {
     }
 
     // 绘制信号机
+    const aspectMap = new Map<number, string>();
+    if (simState?.interlocking) {
+      for (const sig of simState.interlocking.signals) {
+        aspectMap.set(parseInt(sig.signalId, 10), sig.aspect);
+      }
+    }
     for (const sig of interlockingData.signals) {
       const track = interlockingData.tracks.find(t => t.id === sig.trackId);
       if (!track) continue;
-      drawSignal(ctx, sig, track.y);
+      const backendAspect = aspectMap.get(sig.id % 1000);
+      drawSignal(ctx, sig, track.y, backendAspect);
     }
 
     // 绘制进路
@@ -337,6 +343,17 @@ export default function FullLineInterlockingView() {
         if (!TRAIN_IMG.complete || TRAIN_IMG.naturalWidth <= 0) continue;
         const cx = mileageToCanvasX(train.headMileageM);
         const cy = train.direction === 'UP' ? 140 : 220;
+        // 选中列车高亮外圈
+        if (selectedTrainId === train.trainId) {
+          ctx.save();
+          ctx.strokeStyle = '#f59e0b';
+          ctx.lineWidth = 2 / (s || 0.001);
+          ctx.setLineDash([4 / (s || 0.001), 3 / (s || 0.001)]);
+          ctx.beginPath();
+          ctx.arc(cx, cy, 32, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
         ctx.save();
         // 列车逆行时水平翻转图标
         if (train.direction === 'DOWN') {
@@ -352,6 +369,21 @@ export default function FullLineInterlockingView() {
 
     ctx.restore();
   }, [scale, interlockingData, trackMap, simState]);
+
+  // 选中列车时居中定位
+  const prevSelectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!simState || !selectedTrainId || selectedTrainId === prevSelectedRef.current) return;
+    prevSelectedRef.current = selectedTrainId;
+    const train = simState.trains.find((t) => t.trainId === selectedTrainId);
+    if (!train) return;
+    const c = canvasWrapRef.current;
+    if (!c) return;
+    const canvasX = mileageToCanvasX(train.headMileageM);
+    const containerW = c.clientWidth;
+    offsetRef.current.x = Math.round(containerW / 2 - canvasX * scale);
+    draw();
+  }, [selectedTrainId, simState, scale, draw]);
 
   // 居中计算：将内容水平和垂直居中于容器
   function centerView() {
@@ -541,16 +573,16 @@ export default function FullLineInterlockingView() {
           <span>轨道</span>
         </div>
         <div className="flex items-center gap-2">
-          <span style={{ color: COLORS.signalMain, fontSize: '12px' }}>◆</span>
-          <span>主信号</span>
+          <span style={{ color: '#3fb950', fontSize: '12px' }}>◆</span>
+          <span>绿灯（GREEN）</span>
         </div>
         <div className="flex items-center gap-2">
-          <span style={{ color: COLORS.signalShunting, fontSize: '12px' }}>◇</span>
-          <span>调车信号</span>
+          <span style={{ color: '#d29922', fontSize: '12px' }}>◆</span>
+          <span>黄灯（YELLOW）</span>
         </div>
         <div className="flex items-center gap-2">
-          <span style={{ color: COLORS.signalDistant, fontSize: '12px' }}>●</span>
-          <span>预告信号</span>
+          <span style={{ color: '#f85149', fontSize: '12px' }}>◆</span>
+          <span>红灯（RED）</span>
         </div>
         <div className="flex items-center gap-2">
           <img src="/metro_train.png" className="w-5 h-3 object-contain" alt="train" />
@@ -720,7 +752,7 @@ function drawConnectionProfile(
   // 第三层：区间信号机
   for (const { absPos, signal: sig } of profile.sigs) {
     const sx = mileToX(absPos);
-    const color = sig.type === 1 ? COLORS.signalMain : sig.type === 2 ? COLORS.signalShunting : COLORS.signalDistant;
+    const color = sig.type === 1 ? '#58a6ff' : sig.type === 2 ? '#8b949e' : '#5f7088';
     const sym = SYMBOLS[sig.type] || '●';
     const sy = sign;
 
@@ -771,8 +803,21 @@ function drawTrack(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   }
 }
 
-function drawSignal(ctx: CanvasRenderingContext2D, sig: any, trackY: number) {
-  const color = sig.type === 1 ? COLORS.signalMain : sig.type === 2 ? COLORS.signalShunting : COLORS.signalDistant;
+function drawSignal(ctx: CanvasRenderingContext2D, sig: any, trackY: number, aspect?: string) {
+  // 根据动态灯色决定颜色
+  let color: string;
+  if (aspect === 'GREEN') {
+    color = '#3fb950';       // 绿灯
+  } else if (aspect === 'YELLOW') {
+    color = '#d29922';       // 黄灯
+  } else if (aspect === 'RED') {
+    color = '#f85149';       // 红灯
+  } else {
+    // 无数据/UNKNOWN → 按类型使用静态色
+    color = sig.type === 1 ? '#58a6ff'
+         : sig.type === 2 ? '#8b949e'
+         : '#5f7088';
+  }
   const sym = SYMBOLS[sig.type] || '●';
   const sy = sig.dir === 'up' ? -1 : 1;
   ctx.strokeStyle = '#3a4a5a'; 

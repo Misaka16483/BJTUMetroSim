@@ -1,7 +1,7 @@
 {
   "lineId": "9",
   "name": "9号线交互式双向仿真",
-  "startTimeMs": 28800000,
+  "startTimeMs": 21600000,
   "tickSeconds": 0.25,
   "useDynamicProgrammingProfile": true,
   "autoSpawnTrains": false,

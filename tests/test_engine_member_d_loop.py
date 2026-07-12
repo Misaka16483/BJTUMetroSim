@@ -27,8 +27,8 @@ class EngineMemberDLoopTests(unittest.TestCase):
 
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual(snapshot.sim_time_str, "08:00:00")
-        self.assertEqual(snapshot.sim_time_ms, 28_800_000)
+        self.assertEqual(snapshot.sim_time_str, "06:00:00")
+        self.assertEqual(snapshot.sim_time_ms, 21_600_000)
 
     def test_member_d_state_enters_tick_snapshot(self) -> None:
         engine = self._engine()
@@ -52,6 +52,83 @@ class EngineMemberDLoopTests(unittest.TestCase):
         self.assertIn("regenWastedKwh", train)
         self.assertIn("selfConsumedKw", snapshot.power_network["regen"])
         self.assertIn("tractionPowerDeliveredKw", snapshot.power_network["trainVoltages"][0])
+
+    def test_global_passenger_service_has_distinct_bidirectional_platforms(self) -> None:
+        engine = self._engine()
+        engine.clock.start()
+        engine._tick()
+        snapshot = engine.snapshot()
+
+        assert snapshot is not None
+        ggz = [item for item in snapshot.stations if item["code"] == "GGZ"]
+        self.assertEqual({item["direction"] for item in ggz}, {"UP", "DOWN"})
+        absolute_time_ms = engine._absolute_sim_time_ms()
+        generator = engine.station_service.flow_generator
+        self.assertGreater(generator.arrival_rate_pax_per_min("GGZ", "UP", absolute_time_ms), 0)
+        self.assertGreater(generator.arrival_rate_pax_per_min("GGZ", "DOWN", absolute_time_ms), 0)
+
+    def test_speed_multiplier_is_snapshot_state_and_validated(self) -> None:
+        engine = self._engine()
+        self.assertEqual(engine.set_speed_multiplier(20), 20)
+        snapshot = engine.snapshot()
+        assert snapshot is not None
+        self.assertEqual(snapshot.speed_multiplier, 20)
+        with self.assertRaisesRegex(ValueError, "SPEED_MULTIPLIER_OUT_OF_RANGE"):
+            engine.set_speed_multiplier(241)
+
+    def test_fast_forward_uses_cached_profile_or_braking_curve_without_new_dcdp_solve(self) -> None:
+        engine = self._engine()
+        engine.set_speed_multiplier(60)
+        controller = engine._ato_for_train("T0901")
+        self.assertFalse(controller.allow_profile_compute)
+        engine.set_speed_multiplier(1)
+        self.assertTrue(engine._ato_for_train("T0901").allow_profile_compute)
+
+    def test_60x_samples_power_once_per_simulated_second(self) -> None:
+        engine = self._engine()
+        engine.set_speed_multiplier(60)
+        self.assertTrue(engine._should_solve_power(21_600_250))
+        engine._last_power_solve_sim_time_ms = 21_600_250
+        self.assertFalse(engine._should_solve_power(21_601_000))
+        self.assertTrue(engine._should_solve_power(21_601_250))
+        engine.set_speed_multiplier(10)
+        self.assertTrue(engine._should_solve_power(21_601_500))
+
+    def test_approaching_phase_is_latched_until_station_arrival(self) -> None:
+        engine = self._engine()
+        train = engine.trains[0]
+        train.phase = "DEPARTING"
+        train.speed_mps = 8.0
+        train.distance_to_next_m = 120.0
+        train.local_speed_limit_mps = 22.0
+        engine._update_running_phase(train, brake_percent=30.0, braking_profile=False)
+        self.assertEqual(train.phase, "APPROACHING")
+
+        # ATO may coast or give a brief traction correction while braking; this
+        # must not relabel the same station approach as a fresh departure.
+        engine._update_running_phase(train, brake_percent=0.0, braking_profile=False)
+        self.assertEqual(train.phase, "APPROACHING")
+
+        train.phase = "DEPARTING"
+        train.distance_to_next_m = 1_000.0
+        engine._update_running_phase(train, brake_percent=30.0, braking_profile=False)
+        self.assertEqual(train.phase, "DEPARTING")
+
+    def test_initial_station_uses_simulated_door_sequence_and_history(self) -> None:
+        engine = self._engine()
+        train = engine.trains[0]
+        self.assertEqual(train.door_state, "PREPARE_OPEN")
+        self.assertEqual(train.door_side, "LEFT")
+
+        engine.clock.start()
+        for _ in range(6):
+            engine._tick()
+
+        self.assertEqual(train.door_state, "OPEN")
+        self.assertEqual(train.door_notice, "OPEN")
+        self.assertLess(train.dwell_remaining_sec, 30.0)
+        history = engine.station_passenger_history("GGZ")
+        self.assertGreaterEqual(len(history["history"]["UP"]), 2)
 
     def test_engine_exports_path_plan_context_for_interval(self) -> None:
         engine = self._engine()
@@ -114,8 +191,45 @@ class EngineMemberDLoopTests(unittest.TestCase):
         engine._process_station_stop(train, 28_800_000)
 
         self.assertEqual(train.current_station_code, "GGZ")
+        self.assertEqual(train.last_boarding, 0)
+        self.assertEqual(train.dwell_remaining_sec, 30.0)
+        self.assertEqual(train.door_state, "OPEN")
+        self.assertEqual(train.door_side, "LEFT")
+        for step in range(10):
+            engine._advance_open_door_passengers(train, 28_800_250 + step * 250, 0.25)
+            train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - 0.25)
         self.assertGreater(train.onboard_pax, 0)
-        self.assertGreater(train.dwell_remaining_sec, 30.0)
+        self.assertGreater(train.last_boarding, 0)
+
+    def test_open_door_exchange_is_continuous_and_fills_available_capacity(self) -> None:
+        engine = self._engine()
+        train = engine.trains[0]
+        engine.station_service.ensure_platform("GGZ", "UP").waiting_pax = 200
+        engine._process_station_stop(train, 28_800_000)
+        for step in range(120):
+            engine._advance_open_door_passengers(train, 28_800_250 + step * 250, 0.25)
+            train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - 0.25)
+
+        self.assertEqual(train.last_boarding, 200)
+        self.assertEqual(train.onboard_pax, 200)
+        self.assertEqual(engine.station_service.ensure_platform("GGZ", "UP").waiting_pax, 0)
+
+    def test_open_door_exchange_smoothly_distributes_alighting(self) -> None:
+        engine = self._engine()
+        train = engine.trains[0]
+        train.onboard_pax = 200
+        engine.station_service.ensure_platform("GGZ", "UP").waiting_pax = 500
+        engine._process_station_stop(train, 28_800_000)
+        rates: list[tuple[float, float]] = []
+        for step in range(120):
+            engine._advance_open_door_passengers(train, 28_800_250 + step * 250, 0.25)
+            rates.append((train.current_boarding_rate_pax_per_sec, train.current_alighting_rate_pax_per_sec))
+            train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - 0.25)
+
+        self.assertEqual(train.last_alighting, 10)  # GGZ UP fixed alighting ratio: 5%
+        self.assertGreater(train.last_boarding, 90)
+        self.assertGreater(max(rate for rate, _ in rates), rates[0][0])
+        self.assertGreater(max(rate for _, rate in rates), 0.0)
 
 
 if __name__ == "__main__":

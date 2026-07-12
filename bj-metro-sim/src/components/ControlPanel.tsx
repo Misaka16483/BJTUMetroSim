@@ -92,6 +92,7 @@ export default function ControlPanel() {
 
   const isBackend = backendStatus === 'connected';
   const backendState = engineClockState;
+  const canChangeSpeed = isBackend ? backendState === 'RUNNING' : isRunning;
   const stateColor = backendState === 'RUNNING' ? 'var(--green)'
     : starting ? 'var(--cyan)'
     : stopping ? 'var(--amber)'
@@ -256,18 +257,26 @@ export default function ControlPanel() {
 
       <div className="flex items-center gap-1">
         <span className="label" style={{ color: 'var(--text-muted)' }}>SPD</span>
-        {[1, 2, 5, 10].map((x) => (
+        {[
+          { multiplier: 1, label: '1秒' },
+          { multiplier: 10, label: '10秒' },
+          { multiplier: 60, label: '1分钟' },
+        ].map(({ multiplier, label }) => (
           <button
-            key={x}
-            onClick={() => setSpeed(x)}
-            className="w-8 h-7 flex items-center justify-center cursor-pointer board-num text-[10px] rounded-md"
+            key={multiplier}
+            onClick={() => { if (canChangeSpeed) setSpeed(multiplier); }}
+            disabled={!canChangeSpeed}
+            title={`每现实秒推进约 ${label} 仿真时间`}
+            className="h-7 min-w-9 px-1 flex items-center justify-center cursor-pointer board-num text-[10px] rounded-md"
             style={{
-              background: speed === x ? 'rgba(100,210,255,0.08)' : 'transparent',
-              border: speed === x ? '1px solid rgba(100,210,255,0.18)' : '1px solid transparent',
-              color: speed === x ? 'var(--cyan)' : 'var(--text-muted)',
+              background: speed === multiplier && canChangeSpeed ? 'rgba(100,210,255,0.08)' : 'transparent',
+              border: speed === multiplier && canChangeSpeed ? '1px solid rgba(100,210,255,0.18)' : '1px solid transparent',
+              color: canChangeSpeed && speed === multiplier ? 'var(--cyan)' : 'var(--text-muted)',
+              cursor: canChangeSpeed ? 'pointer' : 'not-allowed',
+              opacity: canChangeSpeed ? 1 : .45,
             }}
           >
-            {x}x
+            {label}
           </button>
         ))}
       </div>

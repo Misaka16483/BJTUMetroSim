@@ -203,45 +203,162 @@ function InterlockingDiagram({ data }: { data: StationInterlockingData }) {
 /* ════════════════ Checker 面板 ════════════════ */
 function Inspector({ data }: { data: StationInterlockingData }) {
   const { signals, platforms, routes } = data;
+  const stationCode = data.stationCode;
+
+  const trains = useSimStore((s) => s.trains);
+  const simStations = useSimStore((s) => s.simStations);
+
+  // 该站客流数据（汇总全部方向）
+  const stationPax = useMemo(() => {
+    const stations = simStations.filter((st) => st.code === stationCode);
+    const totalWaiting = stations.reduce((s, st) => s + (st.waitingPax ?? 0), 0);
+    const totalLeftBehind = stations.reduce((s, st) => s + (st.leftBehindPax ?? 0), 0);
+    const crowding = stations.find((st) => st.crowdingLevel)?.crowdingLevel;
+    const density = stations.find((st) => st.platformDensity)?.platformDensity;
+    return { totalWaiting, totalLeftBehind, crowding, density };
+  }, [simStations, stationCode]);
+
+  // 该站停靠列车
+  const dwellTrains = useMemo(() => {
+    return trains.filter((t) => {
+      const code = t.currentStationCode || (t.currentStation?.match(/[A-Z]+/) ?? [''])[0];
+      return code === stationCode && (t.phase === 'DWELLING' || t.phase === 'DEPARTING');
+    });
+  }, [trains, stationCode]);
+
+  // 下一趟进站列车
+  const nextArrivals = useMemo(() => {
+    const arrivals: { trainId: string; direction: string; etaSec: number; speed: number }[] = [];
+    for (const t of trains) {
+      const targetCode = t.nextStationCode || (t.nextStation?.match(/[A-Z]+/) ?? [''])[0];
+      if (targetCode === stationCode && t.speedMps > 0.1 && t.distanceToNextM > 0) {
+        arrivals.push({ trainId: t.trainId, direction: t.direction, etaSec: t.distanceToNextM / t.speedMps, speed: t.speedMps });
+      }
+    }
+    arrivals.sort((a, b) => a.etaSec - b.etaSec);
+    return arrivals;
+  }, [trains, stationCode]);
+
+  function fmtEta(sec: number) {
+    if (sec < 60) return `${sec.toFixed(0)}s`;
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return `${m}m${s}s`;
+  }
+
+  function crowdingColor(level?: string): string {
+    const map: Record<string, string> = { LOW: '#30d158', MEDIUM: '#d29922', HIGH: '#f59e0b', CRITICAL: '#ef4444' };
+    return level ? map[level] ?? '#484f58' : '#484f58';
+  }
+
   return (
-    <aside className="w-[280px] shrink-0 border-l border-[#172436] bg-[#07101b] p-4 overflow-auto">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-[#5f7088] mb-4">Inspector</div>
+    <aside className="w-[300px] shrink-0 border-l border-[#172436] bg-[#07101b] p-5 overflow-auto">
+      <div className="text-[12px] uppercase tracking-[0.16em] text-[#5f7088] mb-4">Inspector</div>
       <div className="mb-5">
-        <h3 className="text-[16px] font-semibold text-[#dce8f8]">{data.stationName}</h3>
-        <div className="text-[12px] font-mono text-[#5f7088] mt-0.5">{data.stationCode} · 9号线</div>
+        <h3 className="text-[18px] font-semibold text-[#dce8f8]">{data.stationName}</h3>
+        <div className="text-[13px] font-mono text-[#5f7088] mt-0.5">{data.stationCode} · 9号线</div>
       </div>
 
+      {/* ─── 人流信息 ─── */}
+      <Section title="人流" count={stationPax.totalWaiting}>
+        <div className="flex items-center justify-between py-1.5">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full" style={{ background: crowdingColor(stationPax.crowding) }} />
+            <span className="text-[13px] text-[#c7d5e8]">候车</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className={`text-[13px] font-mono ${stationPax.crowding ? '' : 'text-[#5f7088]'}`}
+              style={stationPax.crowding ? { color: crowdingColor(stationPax.crowding) } : {}}>
+              {stationPax.totalWaiting}人
+            </span>
+            {stationPax.totalLeftBehind > 0 && (
+              <span className="text-[11px] font-mono text-[#f59e0b]">滞留{stationPax.totalLeftBehind}</span>
+            )}
+          </div>
+        </div>
+        {stationPax.density != null && (
+          <div className="text-[11px] text-[#5f7088] mt-1">站台密度 {stationPax.density.toFixed(2)} pax/m²</div>
+        )}
+      </Section>
+
+      {/* ─── 停靠车辆 ─── */}
+      <Section title="停靠" count={dwellTrains.length}>
+        {dwellTrains.length === 0 ? (
+          <div className="text-[12px] text-[#484f58] py-1">无列车停靠</div>
+        ) : (
+          <div className="space-y-1">
+            {dwellTrains.map((t) => (
+              <div key={t.trainId} className="flex items-center justify-between py-1.5 border-b border-[#101d2d] last:border-0">
+                <span className="text-[13px] text-[#c7d5e8] font-medium">{t.trainId}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-[#5f7088]">{t.direction === 'UP' ? '上行' : '下行'}</span>
+                  <span className="text-[11px] font-mono text-[#8b949e]">{t.onboardPax}/{t.capacityPax}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      {/* ─── 下一趟进站 ─── */}
+      <Section title="下一趟进站" count={nextArrivals.length}>
+        {nextArrivals.length === 0 ? (
+          <div className="text-[12px] text-[#484f58] py-1">无进站列车</div>
+        ) : (
+          <div className="space-y-1">
+            {nextArrivals.slice(0, 3).map((a) => (
+              <div key={`${a.trainId}-${a.direction}`} className="flex items-center justify-between py-1.5 border-b border-[#101d2d] last:border-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] text-[#c7d5e8]">{a.trainId}</span>
+                  <span className="w-2 h-2 rounded-full" style={{ background: a.direction === 'UP' ? '#30d158' : '#64d2ff' }} />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-[#5f7088]">{a.direction === 'UP' ? '上行' : '下行'}</span>
+                  <span className="text-[12px] font-mono" style={{ color: a.etaSec < 30 ? '#f59e0b' : '#8b949e' }}>{fmtEta(a.etaSec)}</span>
+                </div>
+              </div>
+            ))}
+            {nextArrivals.length > 3 && (
+              <div className="text-[10px] text-[#484f58] text-center pt-1">还有 {nextArrivals.length - 3} 辆...</div>
+            )}
+          </div>
+        )}
+      </Section>
+
+      {/* ─── 信号机 ─── */}
       <Section title="信号机" count={signals.length}>
         {signals.map(sig => (
           <div key={sig.id} className="flex items-center justify-between py-1.5 border-b border-[#101d2d] last:border-0">
             <div className="flex items-center gap-2">
-              <span style={{ color: COLORS[sig.type] }} className="text-[12px]">{SYMBOLS[sig.type]}</span>
-              <span className="text-[12px] text-[#c7d5e8]">{sig.name}</span>
+              <span style={{ color: COLORS[sig.type] }} className="text-[13px]">{SYMBOLS[sig.type]}</span>
+              <span className="text-[13px] text-[#c7d5e8]">{sig.name}</span>
             </div>
-            <span className="text-[10px] font-mono text-[#5f7088]">{SIG_LABELS[sig.type]} · {sig.dir === 'up' ? '上行' : '下行'}</span>
+            <span className="text-[11px] font-mono text-[#5f7088]">{SIG_LABELS[sig.type]} · {sig.dir === 'up' ? '上行' : '下行'}</span>
           </div>
         ))}
       </Section>
 
+      {/* ─── 站台 ─── */}
       <Section title="站台" count={platforms.length}>
         {platforms.map(p => (
           <div key={p.id} className="py-1.5 border-b border-[#101d2d] last:border-0">
             <div className="flex items-center justify-between">
-              <span className="text-[12px] text-[#c7d5e8]">{p.name}</span>
-              <span className="text-[10px] font-mono text-[#8FC31F]">{p.id}</span>
+              <span className="text-[13px] text-[#c7d5e8]">{p.name}</span>
+              <span className="text-[11px] font-mono text-[#8FC31F]">{p.id}</span>
             </div>
-            {p.mileageM != null && <div className="text-[10px] text-[#5f7088] font-mono mt-0.5">K{(p.mileageM / 1000).toFixed(3)}</div>}
-            {p.direction && <div className="text-[10px] text-[#5f7088] mt-0.5">方向 0x{p.direction}</div>}
+            {p.mileageM != null && <div className="text-[11px] text-[#5f7088] font-mono mt-0.5">K{(p.mileageM / 1000).toFixed(3)}</div>}
+            {p.direction && <div className="text-[11px] text-[#5f7088] mt-0.5">方向 0x{p.direction}</div>}
             {p.segmentIds && p.segmentIds.length > 0 && <div className="text-[10px] text-[#3a4a5a] font-mono mt-0.5">Seg {p.segmentIds.join(', ')}</div>}
           </div>
         ))}
       </Section>
 
+      {/* ─── 进路 ─── */}
       <Section title="进路" count={routes.length}>
         {routes.map(r => (
           <div key={r.id} className="flex items-center justify-between py-1.5 border-b border-[#101d2d] last:border-0">
-            <span className="text-[12px] text-[#c7d5e8]">{r.name}</span>
-            <span className="text-[10px] font-mono text-[#5f7088]">#{r.id}</span>
+            <span className="text-[13px] text-[#c7d5e8]">{r.name}</span>
+            <span className="text-[11px] font-mono text-[#5f7088]">#{r.id}</span>
           </div>
         ))}
       </Section>
@@ -251,10 +368,10 @@ function Inspector({ data }: { data: StationInterlockingData }) {
 
 function Section({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
   return (
-    <div className="mb-4">
+    <div className="mb-5">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[10px] uppercase tracking-[0.12em] text-[#5f7088]">{title}</span>
-        <span className="text-[10px] font-mono text-[#3a4a5a]">{count}</span>
+        <span className="text-[11px] uppercase tracking-[0.12em] text-[#5f7088]">{title}</span>
+        <span className="text-[11px] font-mono text-[#3a4a5a]">{count}</span>
       </div>
       {children}
     </div>

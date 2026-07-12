@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from collections import deque
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -26,12 +27,9 @@ from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.services import (
-    BoardingResult,
     DayType,
-    DwellPlan,
     DwellTimeConfig,
     FlowScenario,
-    PlatformCrowdState,
     PoissonPassengerFlowGenerator,
     StationFlowConfig,
     StationService,
@@ -76,6 +74,16 @@ class SimTrainState:
     onboard_pax: int = 0
     capacity_pax: int = 600
     load_factor: float = 0.0
+    door_state: str = "CLOSED"
+    door_side: str = "NONE"
+    door_notice: str = "CLOSED"
+    door_permission: str = "SIMULATED_GRANTED"
+    door_transition_remaining_sec: float = 0.0
+    last_boarding: int = 0
+    last_alighting: int = 0
+    current_boarding_rate_pax_per_sec: float = 0.0
+    current_alighting_rate_pax_per_sec: float = 0.0
+    last_passenger_event_ms: int | None = None
     current_station_name: str = ""
     next_station_name: str = ""
     segment_progress: float = 0.0  # 0鈫? between current and next station
@@ -135,6 +143,10 @@ class SimTrainState:
     _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
     # 鈹€鈹€ 鎵嬪姩椹鹃┒ per-train 鎸囦护 鈹€鈹€
     _manual_command: ControlCommand | None = field(default=None, repr=False, compare=False)
+    _passenger_service_pending: bool = field(default=False, repr=False, compare=False)
+    _planned_alighting_total: int = field(default=0, repr=False, compare=False)
+    _boarding_credit_pax: float = field(default=0.0, repr=False, compare=False)
+    _passenger_stop_started_ms: int | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> JsonDict:
         return {
@@ -153,6 +165,16 @@ class SimTrainState:
             "onboardPax": self.onboard_pax,
             "capacityPax": self.capacity_pax,
             "loadFactor": round(self.load_factor, 3),
+            "doorState": self.door_state,
+            "doorSide": self.door_side,
+            "doorNotice": self.door_notice,
+            "doorPermission": self.door_permission,
+            "doorTransitionRemainingSec": round(self.door_transition_remaining_sec, 1),
+            "lastBoarding": self.last_boarding,
+            "lastAlighting": self.last_alighting,
+            "currentBoardingRatePaxPerSec": round(self.current_boarding_rate_pax_per_sec, 2),
+            "currentAlightingRatePaxPerSec": round(self.current_alighting_rate_pax_per_sec, 2),
+            "lastPassengerEventMs": self.last_passenger_event_ms,
             "currentStation": self.current_station_name,
             "nextStation": self.next_station_name,
             "segmentProgress": round(self.segment_progress, 3),
@@ -232,8 +254,9 @@ class TickSnapshot:
     """姣忎釜 tick 鐨勫畬鏁村揩鐓э紝渚?API 璇诲彇."""
     tick: int = 0
     sim_time_ms: int = 0
-    sim_time_str: str = "08:00:00"
+    sim_time_str: str = "06:00:00"
     clock_state: str = "IDLE"
+    speed_multiplier: int = 1
     trains: list[dict[str, Any]] = field(default_factory=list)
     stations: list[dict[str, Any]] = field(default_factory=list)
     power: list[dict[str, Any]] = field(default_factory=list)
@@ -271,6 +294,9 @@ class SimulationEngine:
 
         # 鏍稿績缁勪欢
         self.clock = SimulationClock(tick_seconds=scenario.tick_seconds)
+        # Keep the physics timestep fixed; acceleration runs multiple complete
+        # ticks instead of increasing dt and skipping station/power transitions.
+        self._speed_multiplier = 1
         self.bus = MessageBus()
         self.track_query = TrackQueryService(line_map)
         self.path_planner = PathPlanner(
@@ -321,7 +347,12 @@ class SimulationEngine:
             headway_config=HeadwayConfig(min_headway_sec=90.0),
         )
         self._last_arrivals_by_platform: dict[tuple[str, str], int] = {}
+        self._station_history: dict[tuple[str, str], deque[JsonDict]] = {}
+        self._station_history_arrivals: dict[tuple[str, str], int] = {}
+        self._station_history_second: int | None = None
+        self._reset_station_history()
         self._last_power_states: dict[str, Any] = {}
+        self._last_power_solve_sim_time_ms: int | None = None
         self._last_dispatch_decisions: list[DispatchDecision] = []
         self._power_commands: deque[PowerCommand] = deque()
         self._power_command_sequence = 0
@@ -571,6 +602,7 @@ class SimulationEngine:
         """Load a clean runtime from the persistent configured fleet."""
         self.clock.load()
         self.station_service = self._build_station_service()
+        self._reset_station_history()
         self.power_service = self._build_power_service()
         self.interlocking_runtime.reset()
         self.dispatch_service = RuleBasedDispatchService(
@@ -584,6 +616,7 @@ class SimulationEngine:
         self.dispatch_runtime = DispatchRuntimeCoordinator(self.dispatch_service)
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
+        self._last_power_solve_sim_time_ms = None
         self._last_dispatch_decisions = []
         self._ato_by_train = {}
         self._dcdp_curve_data = {}
@@ -596,11 +629,10 @@ class SimulationEngine:
         self._manual_mode_by_train = {}
         self._vehicle_config_by_train = {}
         self.kpi_tracker.reset()
-        self.trains = (
-            [self._create_train(cfg) for cfg in self.scenario.trains]
-            if self.scenario.auto_spawn_trains
-            else []
-        )
+        self.trains = [
+            self._create_train_from_spec(spec)
+            for spec in self._train_specs.values()
+        ]
         for train in self.trains:
             self._train_power_geometry(train, self._make_vehicle_config(train.train_id, train.onboard_pax))
             self.dispatch_runtime.register_train(train)
@@ -640,7 +672,6 @@ class SimulationEngine:
             if self.clock.state.value == "IDLE":
                 self.load()
             elif self.clock.state.value == "STOPPED":
-                # stop() 已保留 self.trains 并重置了 clock tick；仅需切到 LOADED
                 self.clock.load()
                 self.kpi_tracker.reset()
                 self._snapshot = self._build_snapshot()
@@ -662,11 +693,31 @@ class SimulationEngine:
         self.clock.resume()
         self._snapshot = self._build_snapshot()
 
+    def set_speed_multiplier(self, multiplier: int) -> int:
+        """Set software-only acceleration as a whole number of micro ticks."""
+        value = int(multiplier)
+        if value < 1 or value > 240:
+            raise ValueError("SPEED_MULTIPLIER_OUT_OF_RANGE")
+        with self._lifecycle_lock:
+            self._speed_multiplier = value
+            self._snapshot = self._build_snapshot()
+        return value
+
+    def _should_solve_power(self, sim_time_ms: int) -> bool:
+        """Keep electrical fidelity at 1×/10× and sample it once per sim second at 60×."""
+        if self._speed_multiplier < 60:
+            return True
+        return (
+            self._last_power_solve_sim_time_ms is None
+            or sim_time_ms - self._last_power_solve_sim_time_ms >= 1_000
+        )
+
     def reset_power_network(self) -> None:
         """Restore traction-power topology and clear transient power states."""
         with self._power_lock:
             self.power_service = self._build_power_service()
             self._last_power_states = self._empty_power_states()
+            self._last_power_solve_sim_time_ms = None
             self._snapshot = self._build_snapshot()
 
     def queue_power_command(self, command_type: str, payload: JsonDict) -> JsonDict:
@@ -821,6 +872,7 @@ class SimulationEngine:
                 big_bilateral=big_bilateral,
             )
             self._last_power_states = self._empty_power_states()
+            self._last_power_solve_sim_time_ms = None
             self._snapshot = self._build_snapshot()
             return result
 
@@ -832,6 +884,7 @@ class SimulationEngine:
                 raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
             switch = network.operate_switch(switch_id, state)
             self._last_power_states = self._empty_power_states()
+            self._last_power_solve_sim_time_ms = None
             self._snapshot = self._build_snapshot()
             return switch
 
@@ -847,11 +900,13 @@ class SimulationEngine:
             self.clock.current_tick = 0
             self.clock.sim_time_seconds = 0.0
             self.station_service = self._build_station_service()
+            self._reset_station_history()
             self.power_service = self._build_power_service()
             self.interlocking_runtime.reset()
             self.dispatch_runtime.reset()
             self._last_arrivals_by_platform = {}
             self._last_power_states = self._empty_power_states()
+            self._last_power_solve_sim_time_ms = None
             self._last_dispatch_decisions = []
             self._ato_by_train = {}
             self._dcdp_curve_data = {}
@@ -880,9 +935,14 @@ class SimulationEngine:
             if self.clock.state.value != "RUNNING":
                 break
             loop_start = time.perf_counter()
-            self._tick()
+            # Every micro tick still updates passenger arrivals, train stops,
+            # power flow and dispatch, so fast-forward preserves the lifecycle.
+            for _ in range(self._speed_multiplier):
+                if self._stop_event.is_set() or self.clock.state.value != "RUNNING":
+                    break
+                self._tick()
             elapsed = time.perf_counter() - loop_start
-            sleep_sec = max(0.06, self.clock.tick_seconds - elapsed)
+            sleep_sec = max(0.01, self.clock.tick_seconds - elapsed)
             time.sleep(sleep_sec)
 
     def _tick(self) -> None:
@@ -922,9 +982,16 @@ class SimulationEngine:
                 prepared_steps[train.train_id] = prepared
 
         # 3) 同时求解全部列车负载，得到本 tick 电压、限牵和再生能力。
-        power_states = self._update_power(sim_time_ms, prepared_steps)
-        self._last_power_states = power_states
-        solver_failure = self.power_service.last_solver_failure
+        power_solved = self._should_solve_power(sim_time_ms)
+        if power_solved:
+            power_states = self._update_power(sim_time_ms, prepared_steps)
+            self._last_power_states = power_states
+            self._last_power_solve_sim_time_ms = sim_time_ms
+        else:
+            # 60× fast-forward retains 250 ms train/passenger ticks while
+            # holding the most recent 1-second electrical solution.
+            power_states = self._last_power_states
+        solver_failure = self.power_service.last_solver_failure if power_solved else None
         if solver_failure is not None:
             if self.clock.state == ClockState.RUNNING:
                 self.clock.pause()
@@ -1163,6 +1230,7 @@ class SimulationEngine:
                             tick=tick,
                         )
 
+        self._record_station_history(sim_time_ms)
         # 8) 鏇存柊蹇収
         self._snapshot = self._build_snapshot()
 
@@ -1212,10 +1280,42 @@ class SimulationEngine:
             train.local_speed_limit_mps = path_plan.speed_limit_at(0.0, train.permitted_speed_mps)
             if not train._profile_triggered:
                 train._profile_triggered = self._prime_path_profile(train, path_plan)
+            if train._passenger_service_pending:
+                train.door_transition_remaining_sec = max(0.0, train.door_transition_remaining_sec - dt)
+                if train.door_transition_remaining_sec > 0:
+                    return True, None
+                train.door_state = "OPEN"
+                train.door_notice = "OPEN"
+                self._process_station_stop(train, sim_time_ms)
+                train._passenger_service_pending = False
+                return True, None
+            if train.door_state == "CLOSING":
+                train.door_transition_remaining_sec = max(0.0, train.door_transition_remaining_sec - dt)
+                if train.door_transition_remaining_sec > 0:
+                    return True, None
+                train.door_state = "CLOSED"
+                train.door_notice = "CLOSED"
+                train.door_side = "NONE"
             if train.dwell_remaining_sec > 0:
+                if train.door_state == "OPEN":
+                    self._advance_open_door_passengers(train, sim_time_ms, dt)
                 train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - dt)
+                if 0 < train.dwell_remaining_sec <= 5.0:
+                    train.door_notice = "PREPARE_CLOSE"
+                if train.dwell_remaining_sec == 0.0:
+                    self._record_completed_station_stop(train, sim_time_ms)
+                    train.current_boarding_rate_pax_per_sec = 0.0
+                    train.current_alighting_rate_pax_per_sec = 0.0
+                    train.door_state = "CLOSING"
+                    train.door_notice = "CLOSING"
+                    train.door_transition_remaining_sec = 1.0
                 return True, None
             train.dwell_remaining_sec = 0.0
+            if train.door_state != "CLOSED":
+                train.door_state = "CLOSING"
+                train.door_notice = "CLOSING"
+                train.door_transition_remaining_sec = 1.0
+                return True, None
             train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
             train.phase = DEPARTING
 
@@ -1229,10 +1329,23 @@ class SimulationEngine:
             segment_id=train.current_segment_id,
             net_energy_kwh=train.energy_kwh,
         )
+
+        # 检查前方信号灯色
+        emergency_brake = False
+        if train.phase != DWELLING and train.phase != IDLE:
+            next_sig = self._next_signal_ahead(train, path_plan, path_position_m)
+            if next_sig is not None:
+                aspect = self.interlocking_runtime.signal_resolver.resolve(
+                    int(next_sig.get("id", 0))
+                )
+                if aspect == "RED":
+                    emergency_brake = True
+
         target = AtoTarget(
             target_position_m=path_plan.total_length_m,
             permitted_speed_mps=train.permitted_speed_mps,
             path_plan=path_plan,
+            emergency_brake_required=emergency_brake,
         )
         ato = self._ato_for_train(train.train_id)
         command = ato.decide(state, target)
@@ -1328,14 +1441,8 @@ class SimulationEngine:
                 return
 
             ato = self._ato_for_train(train.train_id)
-            cruise_threshold = min(self.CRUISE_SPEED_MPS, train.local_speed_limit_mps) * 0.95
             braking_profile = ato.last_profile_mode == "MAX_BRAKE" or ato.last_profile_mode.startswith("BRAKE_")
-            if train.speed_mps >= cruise_threshold:
-                train.phase = CRUISING
-            elif (prepared.command.brake_percent > 5 or braking_profile) and train.speed_mps > 0.5:
-                train.phase = APPROACHING
-            else:
-                train.phase = DEPARTING
+            self._update_running_phase(train, prepared.command.brake_percent, braking_profile)
         except Exception as exc:
             print(f"[Engine] Prepared advancement failed for {train.train_id}: {exc}")
             train.traction_percent = 0.0
@@ -1494,7 +1601,7 @@ class SimulationEngine:
                     train.target_distance_m = 0
                     train.distance_to_next_m = 0
 
-                self._process_station_stop(train, sim_time_ms)
+                self._begin_station_stop(train)
             else:
                 train.segment_progress = new_progress
                 train.distance_to_next_m = target_position_m - result.position_m if train.direction == "UP" else result.position_m - target_position_m
@@ -1567,10 +1674,23 @@ class SimulationEngine:
                 segment_id=train.current_segment_id,
                 net_energy_kwh=train.energy_kwh,
             )
+
+            # 检查前方信号灯色
+            emergency_brake = False
+            if train.phase != DWELLING and train.phase != IDLE:
+                next_sig = self._next_signal_ahead(train, path_plan, path_position_m)
+                if next_sig is not None:
+                    aspect = self.interlocking_runtime.signal_resolver.resolve(
+                        int(next_sig.get("id", 0))
+                    )
+                    if aspect == "RED":
+                        emergency_brake = True
+
             target = AtoTarget(
                 target_position_m=path_plan.total_length_m,
                 permitted_speed_mps=train.permitted_speed_mps,
                 path_plan=path_plan,
+                emergency_brake_required=emergency_brake,
             )
             ato = self._ato_for_train(train.train_id)
             cmd = ato.decide(state, target)
@@ -1613,14 +1733,8 @@ class SimulationEngine:
                 self._complete_path_arrival(train, next_idx, next_stn, sim_time_ms)
                 return
 
-            cruise_threshold = min(self.CRUISE_SPEED_MPS, train.local_speed_limit_mps) * 0.95
             braking_profile = ato.last_profile_mode == "MAX_BRAKE" or ato.last_profile_mode.startswith("BRAKE_")
-            if train.speed_mps >= cruise_threshold:
-                train.phase = CRUISING
-            elif (cmd.brake_percent > 5 or braking_profile) and train.speed_mps > 0.5:
-                train.phase = APPROACHING
-            else:
-                train.phase = DEPARTING
+            self._update_running_phase(train, cmd.brake_percent, braking_profile)
 
         except Exception as exc:
             print(f"[Engine] PathPlan advancement failed for {train.train_id}: {exc}")
@@ -1632,6 +1746,32 @@ class SimulationEngine:
             train.distance_to_next_m = max(0.0, path_plan.total_length_m - train.path_position_m)
             train.segment_progress = train.path_position_m / dist if dist > 0 else 1.0
             self._update_train_path_context(train)
+
+    def _update_running_phase(
+        self,
+        train: SimTrainState,
+        brake_percent: float,
+        braking_profile: bool,
+    ) -> None:
+        """Classify a moving train without flickering on ATO command micro-adjustments."""
+        # APPROACHING is an operational phase, not a per-tick brake-command
+        # indicator.  Once a train has entered its terminal braking zone it
+        # remains approaching until `_complete_path_arrival` makes it DWELLING.
+        if train.phase == APPROACHING:
+            return
+
+        cruise_threshold = min(self.CRUISE_SPEED_MPS, train.local_speed_limit_mps) * 0.95
+        if train.speed_mps >= cruise_threshold:
+            train.phase = CRUISING
+            return
+
+        braking_distance_m = train.speed_mps * train.speed_mps / (2.0 * self._ato_config.expected_deceleration_mps2)
+        approach_zone_m = max(120.0, braking_distance_m + self._ato_config.brake_margin_m * 2.0)
+        is_braking = brake_percent > 5.0 or braking_profile
+        if is_braking and train.speed_mps > 0.5 and train.distance_to_next_m <= approach_zone_m:
+            train.phase = APPROACHING
+        else:
+            train.phase = DEPARTING
 
     def _complete_path_arrival(
         self,
@@ -1690,7 +1830,7 @@ class SimulationEngine:
             train.target_distance_m = 0.0
             train.distance_to_next_m = 0.0
 
-        self._process_station_stop(train, sim_time_ms)
+        self._begin_station_stop(train)
 
     def _turn_train_at_terminal(self, train: SimTrainState) -> None:
         """At either terminal, reverse service direction and continue after the dwell."""
@@ -1718,6 +1858,10 @@ class SimulationEngine:
             self._ato_by_train[train_id] = controller
             if len(self._ato_by_train) == 1:
                 self.ato = controller
+        # At fast-forward rates, do not block a complete simulation batch on a
+        # new DCDP optimization.  Cached DCDP profiles remain in use; otherwise
+        # ATO falls back to its deterministic braking curve for that interval.
+        controller.allow_profile_compute = self._speed_multiplier < 10
         return controller
 
     def _ensure_interval_path(self, train: SimTrainState, next_idx: int) -> PathPlan | None:
@@ -1920,6 +2064,23 @@ class SimulationEngine:
         train.grade_ratio = path_plan.grade_ratio_at(bounded_position_m)
 
 
+    def _next_signal_ahead(self, train: SimTrainState, path_plan: PathPlan, path_position_m: float) -> JsonDict | None:
+        """查询列车前方最近信号机."""
+        constraint = path_plan.constraint_at(path_position_m)
+        if constraint is None:
+            return None
+        seg_span = constraint.end_offset_m - constraint.start_offset_m
+        path_span = constraint.path_end_m - constraint.path_start_m
+        if abs(path_span) < 1e-9:
+            return None
+        ratio = (path_position_m - constraint.path_start_m) / path_span
+        seg_offset = constraint.start_offset_m + ratio * seg_span
+        # 根据约束方向确定信号搜索方向：
+        #   forward  →  segment偏移递增方向 = path前进方向
+        #   reverse  →  segment偏移递减方向 = path前进方向
+        sig_dir = constraint.direction  # "forward" | "reverse"
+        return self.track_query.get_next_signal(constraint.segment_id, seg_offset, sig_dir)
+
     def _lookup_profile_speed(self, train_id: str, position_m: float) -> tuple[float, str] | None:
         """浠庤鍒掓洸绾夸腑绾挎€ф彃鍊煎綋鍓嶄綅缃殑鐩爣閫熷害鍜岃繍琛屾ā寮?"""
         points = self._dcdp_curve_data.get(train_id)
@@ -1949,67 +2110,179 @@ class SimulationEngine:
     def _process_station_stop(self, train: SimTrainState, sim_time_ms: int) -> None:
         """澶勭悊鍒楄溅鍋滅珯涓婁笅瀹?"""
         try:
-            result, dwell_plan = self.station_service.process_train_stop(
-                sim_time_ms=sim_time_ms,
-                station_id=train.current_station_code,
-                direction=train.direction,
-                train_load=TrainLoadState(
-                    train_id=train.train_id,
-                    onboard_pax=train.onboard_pax,
-                    capacity_pax=train.capacity_pax,
-                ),
-                platform_area_m2=120.0,
+            train.door_state = "OPEN"
+            train.door_side = self._door_side_for(train.direction)
+            train.door_notice = "OPEN"
+            ratio = self.station_service.flow_generator.alighting_ratio(
+                train.current_station_code, train.direction, sim_time_ms,
             )
-            # 鍙栬緝澶х殑鍋滅珯鏃堕棿锛堝娴侀┍鍔?or 榛樿鍊硷級
-            effective_dwell = max(
-                dwell_plan.estimated_dwell_sec,
-                float(self._station_list[train.station_index].get("dwellSeconds", 30)),
+            train._planned_alighting_total = min(
+                train.onboard_pax,
+                max(0, int(round(train.onboard_pax * ratio))),
             )
-            train.dwell_remaining_sec = effective_dwell
-            train.onboard_pax = result.updated_load.onboard_pax
-            train.load_factor = result.updated_load.load_factor
-
-            # 璁板綍鍒?SQLite
-            if self.recorder is not None and self._run_id is not None:
-                platform = self.station_service.ensure_platform(result.station_id, result.direction)
-                arrivals = self._last_arrivals_by_platform.get((result.station_id, result.direction), 0)
-                self.recorder.record_station_passenger(
-                    self._run_id,
-                    sim_time_ms=sim_time_ms,
-                    station_id=result.station_id,
-                    direction=result.direction,
-                    arrivals=arrivals,
-                    boarding=result.boarding,
-                    alighting=result.alighting,
-                    waiting=result.waiting,
-                    left_behind=result.left_behind,
-                    platform_density_pax_per_m2=platform.platform_density_pax_per_m2,
-                    crowding_level=platform.crowding_level,
-                )
-                self.recorder.record_train_load(
-                    self._run_id,
-                    sim_time_ms=sim_time_ms,
-                    train_id=result.train_id,
-                    onboard_pax=result.updated_load.onboard_pax,
-                    capacity_pax=result.updated_load.capacity_pax,
-                    load_factor=result.updated_load.load_factor,
-                    vehicle_load_kg=result.updated_load.vehicle_load_kg,
-                    detail={"stationId": result.station_id},
-                )
-                self.recorder.record_dwell(
-                    self._run_id,
-                    train_id=train.train_id,
-                    station_id=result.station_id,
-                    arrival_ms=sim_time_ms,
-                    depart_ms=sim_time_ms + int(effective_dwell * 1000),
-                    planned_dwell_sec=dwell_plan.planned_dwell_sec,
-                    estimated_dwell_sec=dwell_plan.estimated_dwell_sec,
-                    actual_dwell_sec=effective_dwell,
-                    reason=dwell_plan.blocking_reason or "PASSENGER_BOARDING",
-                )
+            train._boarding_credit_pax = 0.0
+            train._passenger_stop_started_ms = sim_time_ms
+            train.last_boarding = 0
+            train.last_alighting = 0
+            train.current_boarding_rate_pax_per_sec = 0.0
+            train.current_alighting_rate_pax_per_sec = 0.0
+            train.last_passenger_event_ms = None
+            train.dwell_remaining_sec = 30.0
         except Exception:
             # 客流服务失败时使用默认停站时间
             train.dwell_remaining_sec = 30.0
+
+    def _advance_open_door_passengers(
+        self,
+        train: SimTrainState,
+        sim_time_ms: int,
+        dt_sec: float,
+    ) -> None:
+        """Continuously exchange passengers, prioritising demand and remaining capacity."""
+        dwell_total_sec = 30.0
+        elapsed_sec = max(0.0, dwell_total_sec - train.dwell_remaining_sec)
+        next_elapsed_sec = min(dwell_total_sec, elapsed_sec + dt_sec)
+        next_progress = next_elapsed_sec / dwell_total_sec
+        # Smooth cosine schedule: the fixed station alighting ratio determines
+        # the total, while the actual alighting flow ramps up then down.
+        target_alighting = round(
+            train._planned_alighting_total * (1.0 - math.cos(math.pi * next_progress)) / 2.0
+        )
+        requested_alighting = max(0, target_alighting - train.last_alighting)
+
+        platform = self.station_service.ensure_platform(train.current_station_code, train.direction)
+        available_capacity = max(train.capacity_pax - (train.onboard_pax - requested_alighting), 0)
+        boardable = min(platform.waiting_pax, available_capacity)
+        remaining_ticks = max(1, round(train.dwell_remaining_sec / dt_sec))
+        flow_shape = 0.3 + 3.0 * math.sin(math.pi * next_progress)
+        train._boarding_credit_pax += boardable * flow_shape / remaining_ticks
+        requested_boarding = min(boardable, max(0, int(train._boarding_credit_pax)))
+        if requested_alighting <= 0 and requested_boarding <= 0:
+            train.current_boarding_rate_pax_per_sec = 0.0
+            train.current_alighting_rate_pax_per_sec = 0.0
+            return
+        result = self.station_service.exchange_open_door_passengers(
+            station_id=train.current_station_code,
+            direction=train.direction,
+            train_load=TrainLoadState(train.train_id, train.onboard_pax, train.capacity_pax),
+            requested_alighting=requested_alighting,
+            requested_boarding=requested_boarding,
+            platform_area_m2=120.0,
+        )
+        train._boarding_credit_pax -= result.boarding
+        train.onboard_pax = result.updated_load.onboard_pax
+        train.load_factor = result.updated_load.load_factor
+        train.mass_kg = self._make_vehicle_config(train.train_id, train.onboard_pax).mass_kg
+        train.last_boarding += result.boarding
+        train.last_alighting += result.alighting
+        train.current_boarding_rate_pax_per_sec = result.boarding / dt_sec
+        train.current_alighting_rate_pax_per_sec = result.alighting / dt_sec
+        if result.boarding or result.alighting:
+            train.last_passenger_event_ms = sim_time_ms
+
+    def _record_completed_station_stop(self, train: SimTrainState, sim_time_ms: int) -> None:
+        if self.recorder is None or self._run_id is None or train._passenger_stop_started_ms is None:
+            return
+        platform = self.station_service.ensure_platform(train.current_station_code, train.direction)
+        self.recorder.record_station_passenger(
+            self._run_id,
+            sim_time_ms=sim_time_ms,
+            station_id=train.current_station_code,
+            direction=train.direction,
+            arrivals=self._last_arrivals_by_platform.get((train.current_station_code, train.direction), 0),
+            boarding=train.last_boarding,
+            alighting=train.last_alighting,
+            waiting=platform.waiting_pax,
+            left_behind=platform.left_behind_pax,
+            platform_density_pax_per_m2=platform.platform_density_pax_per_m2,
+            crowding_level=platform.crowding_level,
+        )
+        self.recorder.record_train_load(
+            self._run_id,
+            sim_time_ms=sim_time_ms,
+            train_id=train.train_id,
+            onboard_pax=train.onboard_pax,
+            capacity_pax=train.capacity_pax,
+            load_factor=train.load_factor,
+            vehicle_load_kg=train.onboard_pax * 65.0,
+            detail={"stationId": train.current_station_code},
+        )
+        self.recorder.record_dwell(
+            self._run_id,
+            train_id=train.train_id,
+            station_id=train.current_station_code,
+            arrival_ms=train._passenger_stop_started_ms,
+            depart_ms=sim_time_ms,
+            planned_dwell_sec=30.0,
+            estimated_dwell_sec=30.0,
+            actual_dwell_sec=30.0,
+            reason="PASSENGER_BOARDING",
+        )
+        train._passenger_stop_started_ms = None
+
+    @staticmethod
+    def _door_side_for(direction: str) -> str:
+        """Scenario convention pending authoritative Line 9 platform-side data."""
+        return "LEFT" if direction == "UP" else "RIGHT"
+
+    def _begin_station_stop(self, train: SimTrainState) -> None:
+        train.phase = DWELLING
+        train.door_state = "PREPARE_OPEN"
+        train.door_side = self._door_side_for(train.direction)
+        train.door_notice = "PREPARE_OPEN"
+        train.door_transition_remaining_sec = 1.0
+        train.dwell_remaining_sec = 0.0
+        train._passenger_service_pending = True
+
+    def _reset_station_history(self) -> None:
+        start_ms = self._absolute_sim_time_ms()
+        self._station_history = {
+            key: deque(
+                [{
+                    "simTimeMs": start_ms,
+                    "waitingPax": platform.waiting_pax,
+                    "arrivals": 0,
+                    "leftBehindPax": platform.left_behind_pax,
+                    "platformDensity": round(platform.platform_density_pax_per_m2, 3),
+                }],
+                maxlen=6 * 3600 + 1,
+            )
+            for key, platform in self.station_service.platforms.items()
+        }
+        self._station_history_arrivals = {key: 0 for key in self.station_service.platforms}
+        self._station_history_second = start_ms // 1000
+
+    def _record_station_history(self, sim_time_ms: int) -> None:
+        for key, arrivals in self._last_arrivals_by_platform.items():
+            self._station_history_arrivals[key] = self._station_history_arrivals.get(key, 0) + arrivals
+        current_second = sim_time_ms // 1000
+        if self._station_history_second == current_second:
+            return
+        for key, platform in self.station_service.platforms.items():
+            self._station_history.setdefault(key, deque(maxlen=6 * 3600 + 1)).append({
+                "simTimeMs": current_second * 1000,
+                "waitingPax": platform.waiting_pax,
+                "arrivals": self._station_history_arrivals.get(key, 0),
+                "leftBehindPax": platform.left_behind_pax,
+                "platformDensity": round(platform.platform_density_pax_per_m2, 3),
+            })
+            self._station_history_arrivals[key] = 0
+        self._station_history_second = current_second
+
+    def station_passenger_history(self, station_code: str, since_sim_time_ms: int | None = None) -> JsonDict:
+        code = str(station_code)
+        since = int(since_sim_time_ms) if since_sim_time_ms is not None else None
+        return {
+            "stationCode": code,
+            "source": "simulation-engine",
+            "history": {
+                direction: [
+                    point for point in self._station_history.get((code, direction), ())
+                    if since is None or int(point["simTimeMs"]) > since
+                ]
+                for direction in ("UP", "DOWN")
+            },
+        }
 
     def _update_power(
         self,
@@ -2205,6 +2478,7 @@ class SimulationEngine:
             sim_time_ms=self._absolute_sim_time_ms(),
             sim_time_str=time_str,
             clock_state=self.clock.state.value,
+            speed_multiplier=self._speed_multiplier,
             trains=[t.to_dict() for t in self.trains],
             stations=[
                 s
@@ -2330,7 +2604,11 @@ class SimulationEngine:
             phase=DWELLING,
             speed_mps=0.0,
             target_distance_m=dist,
-            dwell_remaining_sec=5.0,  # 鍒濆绛夊緟5绉掑悗鍙戣溅
+            dwell_remaining_sec=30.0,
+            door_state="PREPARE_OPEN",
+            door_side=self._door_side_for(cfg.direction),
+            door_notice="PREPARE_OPEN",
+            door_transition_remaining_sec=1.0,
             distance_to_next_m=dist,
             onboard_pax=cfg.initial_load_pax,
             capacity_pax=cfg.capacity_pax,
@@ -2338,6 +2616,7 @@ class SimulationEngine:
             mass_kg=225_000.0 + cfg.initial_load_pax * 65.0,
             current_station_name=stn.get("name", ""),
             next_station_name=next_stn.get("name", ""),
+            _passenger_service_pending=True,
         )
 
     def _create_train_from_spec(self, spec: JsonDict) -> SimTrainState:
@@ -2361,20 +2640,31 @@ class SimulationEngine:
 
     def _build_station_service(self) -> StationService:
         """构建客流服务 — 使用 Poisson 客流生成器 + 六时段多日型."""
+        # Scenario priors, not AFC/OD measurements.  Each physical station has
+        # an explicit UP and DOWN platform so all global-engine trains consume
+        # the same queues rather than a second independent passenger clock.
+        station_demand = [
+            ("GGZ", 60.0, 0.05, 54.0, 0.12),
+            ("FSP", 72.0, 0.10, 56.0, 0.12),
+            ("KYL", 48.0, 0.12, 38.0, 0.10),
+            ("FTN", 55.0, 0.15, 44.0, 0.12),
+            ("FTD", 40.0, 0.15, 36.0, 0.14),
+            ("QLZ", 65.0, 0.18, 70.0, 0.20),
+            ("LLQ", 90.0, 0.20, 82.0, 0.18),
+            ("LLE", 50.0, 0.18, 76.0, 0.22),
+            ("BWR", 120.0, 0.25, 128.0, 0.28),
+            ("JBG", 80.0, 0.20, 74.0, 0.22),
+            ("BDZ", 35.0, 0.15, 32.0, 0.13),
+            ("BQS", 45.0, 0.15, 62.0, 0.20),
+            ("GTG", 70.0, 0.25, 88.0, 0.24),
+        ]
         station_configs = [
-            StationFlowConfig("GGZ", base_arrival_rate_pax_per_min=60.0, alighting_ratio=0.05, direction="UP"),
-            StationFlowConfig("FSP", base_arrival_rate_pax_per_min=72.0, alighting_ratio=0.10, direction="UP"),
-            StationFlowConfig("KYL", base_arrival_rate_pax_per_min=48.0, alighting_ratio=0.12, direction="UP"),
-            StationFlowConfig("FTN", base_arrival_rate_pax_per_min=55.0, alighting_ratio=0.15, direction="UP"),
-            StationFlowConfig("FTD", base_arrival_rate_pax_per_min=40.0, alighting_ratio=0.15, direction="UP"),
-            StationFlowConfig("QLZ", base_arrival_rate_pax_per_min=65.0, alighting_ratio=0.18, direction="UP"),
-            StationFlowConfig("LLQ", base_arrival_rate_pax_per_min=90.0, alighting_ratio=0.20, direction="UP"),
-            StationFlowConfig("LLE", base_arrival_rate_pax_per_min=50.0, alighting_ratio=0.18, direction="UP"),
-            StationFlowConfig("BWR", base_arrival_rate_pax_per_min=120.0, alighting_ratio=0.25, direction="UP"),
-            StationFlowConfig("JBG", base_arrival_rate_pax_per_min=80.0, alighting_ratio=0.20, direction="UP"),
-            StationFlowConfig("BDZ", base_arrival_rate_pax_per_min=35.0, alighting_ratio=0.15, direction="UP"),
-            StationFlowConfig("BQS", base_arrival_rate_pax_per_min=45.0, alighting_ratio=0.15, direction="UP"),
-            StationFlowConfig("GTG", base_arrival_rate_pax_per_min=70.0, alighting_ratio=0.25, direction="UP"),
+            StationFlowConfig(code, rate, alighting, direction=direction)
+            for code, up_rate, up_alighting, down_rate, down_alighting in station_demand
+            for direction, rate, alighting in (
+                ("UP", up_rate, up_alighting),
+                ("DOWN", down_rate, down_alighting),
+            )
         ]
 
         flow_generator = PoissonPassengerFlowGenerator(

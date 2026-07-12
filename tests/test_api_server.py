@@ -4,7 +4,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.api_server import Line9DataService
+from app.api_server import ApiHandler, Line9DataService
+
+
+class _ModeEngine:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    def set_manual_mode(self, train_id: str, enabled: bool) -> dict:
+        self.calls.append((train_id, enabled))
+        return {"ok": True, "trainId": train_id, "manualMode": enabled}
+
+
+class _CabController:
+    def __init__(self, state: str, train_id: str = "T0901") -> None:
+        self.state = state
+        self.train_id = train_id
+
+    def status(self) -> dict:
+        return {"ok": True, "status": {"state": self.state, "trainId": self.train_id}}
 
 
 class ApiServerTests(unittest.TestCase):
@@ -44,6 +62,40 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(storage["storageId"], "SCESS-0905")
         self.assertEqual(storage["dischargeTriggerPowerKw"], 1000.0)
         self.assertEqual(storage["quality"], "ENGINEERING_ESTIMATE")
+
+    def test_frontend_mode_switch_is_rejected_while_driver_cab_connected(self) -> None:
+        handler = object.__new__(ApiHandler)
+        engine = _ModeEngine()
+        handler.engine = engine
+        handler._driver_cab_controller = lambda: _CabController("CONNECTED")
+
+        result = handler._set_manual_mode_from_frontend("T0901", False)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "DRIVER_CAB_MODE_CONTROL_EXCLUSIVE")
+        self.assertEqual(engine.calls, [])
+
+    def test_frontend_mode_switch_is_allowed_after_driver_cab_disconnects(self) -> None:
+        handler = object.__new__(ApiHandler)
+        engine = _ModeEngine()
+        handler.engine = engine
+        handler._driver_cab_controller = lambda: _CabController("DISCONNECTED")
+
+        result = handler._set_manual_mode_from_frontend("T0901", True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(engine.calls, [("T0901", True)])
+
+    def test_connected_driver_cab_does_not_lock_other_trains(self) -> None:
+        handler = object.__new__(ApiHandler)
+        engine = _ModeEngine()
+        handler.engine = engine
+        handler._driver_cab_controller = lambda: _CabController("CONNECTED", "T0901")
+
+        result = handler._set_manual_mode_from_frontend("T0902", True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(engine.calls, [("T0902", True)])
 
     def test_member_d_demo_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

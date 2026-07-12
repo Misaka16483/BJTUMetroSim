@@ -1,7 +1,7 @@
 {
   "lineId": "9",
   "name": "9号线五车供电闭环验收",
-  "startTimeMs": 28800000,
+  "startTimeMs": 21600000,
   "tickSeconds": 0.25,
   "useDynamicProgrammingProfile": false,
   "autoSpawnTrains": true,

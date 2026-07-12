@@ -79,8 +79,12 @@ async function getJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { method: 'POST' });
+async function postJson(url: string, payload?: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: payload === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -132,6 +136,16 @@ export interface SimTrainState {
   onboardPax: number;
   capacityPax: number;
   loadFactor: number;
+  doorState?: string;
+  doorSide?: string;
+  doorNotice?: string;
+  doorPermission?: string;
+  doorTransitionRemainingSec?: number;
+  lastBoarding?: number;
+  lastAlighting?: number;
+  currentBoardingRatePaxPerSec?: number;
+  currentAlightingRatePaxPerSec?: number;
+  lastPassengerEventMs?: number | null;
   currentStation: string;
   nextStation: string;
   segmentProgress: number;
@@ -462,6 +476,7 @@ export interface SimClock {
   simTime: string;
   tick: number;
   simTimeMs: number;
+  speedMultiplier?: number;
 }
 
 export interface InterlockingRuntimeState {
@@ -524,6 +539,20 @@ export interface SimStateResponse {
   source: string;
 }
 
+export interface PassengerHistoryPoint {
+  simTimeMs: number;
+  waitingPax: number;
+  arrivals: number;
+  leftBehindPax: number;
+  platformDensity: number;
+}
+
+export interface StationPassengerHistoryResponse {
+  stationCode: string;
+  source: string;
+  history: Record<'UP' | 'DOWN', PassengerHistoryPoint[]>;
+}
+
 // ── 速度规划曲线 ──
 export interface SpeedProfilePoint {
   positionM: number;
@@ -553,6 +582,11 @@ export function fetchSimState(): Promise<SimStateResponse> {
   return getJson<SimStateResponse>('/api/sim/state');
 }
 
+export function fetchStationPassengerHistory(stationCode: string, sinceSimTimeMs?: number): Promise<StationPassengerHistoryResponse> {
+  const suffix = sinceSimTimeMs === undefined ? '' : `?sinceSimTimeMs=${sinceSimTimeMs}`;
+  return getJson<StationPassengerHistoryResponse>(`/api/sim/passenger-history/${encodeURIComponent(stationCode)}${suffix}`);
+}
+
 export function fetchSpeedProfile(): Promise<SpeedProfileResponse> {
   return getJson<SpeedProfileResponse>('/api/sim/speed-profile');
 }
@@ -571,6 +605,10 @@ export function simResume(): Promise<unknown> {
 
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
+}
+
+export function simSetSpeedMultiplier(multiplier: number): Promise<unknown> {
+  return postJson('/api/sim/speed', { multiplier });
 }
 
 export interface VehicleConfigPayload {
@@ -616,14 +654,22 @@ export function simSetVehicleConfig(payload: VehicleConfigPayload): Promise<Vehi
   });
 }
 
-export function simSetManualMode(enabled: boolean, trainId?: string): Promise<{ ok: boolean; manualMode: boolean }> {
+export interface ManualModeResponse {
+  ok: boolean;
+  manualMode?: boolean;
+  error?: string;
+  message?: string;
+  trainId?: string;
+}
+
+export function simSetManualMode(enabled: boolean, trainId?: string): Promise<ManualModeResponse> {
   return fetch('/api/sim/manual-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled, trainId }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+    return resp.json() as Promise<ManualModeResponse>;
   });
 }
 
@@ -688,14 +734,14 @@ export function simSetTrainVehicleConfig(trainId: string, payload: VehicleConfig
   });
 }
 
-export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<{ ok: boolean; manualMode: boolean }> {
+export function simSetTrainManualMode(trainId: string, enabled: boolean): Promise<ManualModeResponse> {
   return fetch('/api/sim/train/manual-mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ trainId, enabled }),
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    return resp.json() as Promise<{ ok: boolean; manualMode: boolean }>;
+    return resp.json() as Promise<ManualModeResponse>;
   });
 }
 
@@ -711,6 +757,17 @@ export function simSendTrainManualCommand(trainId: string, tractionPercent: numb
 }
 
 export type DriverCabConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+export type DisplayConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RETRYING';
+
+export interface DriverCabDisplayStatus {
+  state: DisplayConnectionState;
+  host: string;
+  port: number;
+  framesSent: number;
+  connectedAt: string | null;
+  lastFrameAt: string | null;
+  lastError: string | null;
+}
 
 export interface DriverCabHardwareStatus {
   state: DriverCabConnectionState;
@@ -738,6 +795,12 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     handleMode: string;
   } | null;
+  networkScreenHost: string;
+  networkScreenPort: number;
+  signalScreenHost: string;
+  signalScreenPort: number;
+  networkScreen: DriverCabDisplayStatus;
+  signalScreen: DriverCabDisplayStatus;
 }
 
 export interface DriverCabHardwareResponse {
@@ -750,10 +813,17 @@ export function fetchDriverCabStatus(): Promise<DriverCabHardwareResponse> {
   return getJson<DriverCabHardwareResponse>('/api/hardware/driver-cab/status');
 }
 
-export function connectDriverCab(host?: string, port?: number): Promise<DriverCabHardwareResponse> {
+export function connectDriverCab(
+  host?: string,
+  port?: number,
+  networkScreenHost?: string,
+  signalScreenHost?: string,
+): Promise<DriverCabHardwareResponse> {
   const body: Record<string, unknown> = {};
   if (host) body.host = host;
   if (port) body.port = port;
+  if (networkScreenHost) body.networkScreenHost = networkScreenHost;
+  if (signalScreenHost) body.signalScreenHost = signalScreenHost;
   return fetch('/api/hardware/driver-cab/connect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -766,6 +836,34 @@ export function connectDriverCab(host?: string, port?: number): Promise<DriverCa
 
 export function disconnectDriverCab(): Promise<DriverCabHardwareResponse> {
   return fetch('/api/hardware/driver-cab/disconnect', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export type DriverCabEndpoint = 'plc' | 'network-screen' | 'signal-screen';
+
+export function connectDriverCabEndpoint(
+  endpoint: DriverCabEndpoint,
+  host: string,
+  port?: number,
+): Promise<DriverCabHardwareResponse> {
+  const body: Record<string, unknown> = { host };
+  if (port !== undefined) body.port = port;
+  return fetch(`/api/hardware/driver-cab/${endpoint}/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export function disconnectDriverCabEndpoint(
+  endpoint: DriverCabEndpoint,
+): Promise<DriverCabHardwareResponse> {
+  return fetch(`/api/hardware/driver-cab/${endpoint}/disconnect`, { method: 'POST' }).then((response) => {
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     return response.json() as Promise<DriverCabHardwareResponse>;
   });
