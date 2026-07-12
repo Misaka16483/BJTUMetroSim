@@ -136,6 +136,7 @@ interface SimState {
     expectedActiveRunIds?: Record<string, string>,
   ) => void;
   setSelectedStationCode: (code: string | null) => void;
+  setSelectedTrainId: (id: string | null) => void;
   tick: () => void;
 
   // 后端仿真引擎
@@ -583,6 +584,7 @@ export const useSimStore = create<SimState>((set, get) => ({
     });
   },
   setSelectedStationCode: (code: string | null) => set({ selectedStationCode: code }),
+  setSelectedTrainId: (id: string | null) => set({ selectedTrainId: id }),
 
   setMetroLines: (lines) => {
     const line9 = lines.find((l) => l.id === '9');

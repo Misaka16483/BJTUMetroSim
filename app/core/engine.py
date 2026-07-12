@@ -1213,10 +1213,23 @@ class SimulationEngine:
             segment_id=train.current_segment_id,
             net_energy_kwh=train.energy_kwh,
         )
+
+        # 检查前方信号灯色
+        emergency_brake = False
+        if train.phase != DWELLING and train.phase != IDLE:
+            next_sig = self._next_signal_ahead(train, path_plan, path_position_m)
+            if next_sig is not None:
+                aspect = self.interlocking_runtime.signal_resolver.resolve(
+                    int(next_sig.get("id", 0))
+                )
+                if aspect == "RED":
+                    emergency_brake = True
+
         target = AtoTarget(
             target_position_m=path_plan.total_length_m,
             permitted_speed_mps=train.permitted_speed_mps,
             path_plan=path_plan,
+            emergency_brake_required=emergency_brake,
         )
         ato = self._ato_for_train(train.train_id)
         command = ato.decide(state, target)
@@ -1551,10 +1564,23 @@ class SimulationEngine:
                 segment_id=train.current_segment_id,
                 net_energy_kwh=train.energy_kwh,
             )
+
+            # 检查前方信号灯色
+            emergency_brake = False
+            if train.phase != DWELLING and train.phase != IDLE:
+                next_sig = self._next_signal_ahead(train, path_plan, path_position_m)
+                if next_sig is not None:
+                    aspect = self.interlocking_runtime.signal_resolver.resolve(
+                        int(next_sig.get("id", 0))
+                    )
+                    if aspect == "RED":
+                        emergency_brake = True
+
             target = AtoTarget(
                 target_position_m=path_plan.total_length_m,
                 permitted_speed_mps=train.permitted_speed_mps,
                 path_plan=path_plan,
+                emergency_brake_required=emergency_brake,
             )
             ato = self._ato_for_train(train.train_id)
             cmd = ato.decide(state, target)
@@ -1903,6 +1929,23 @@ class SimulationEngine:
         train.local_speed_limit_mps = path_plan.speed_limit_at(bounded_position_m, train.permitted_speed_mps)
         train.grade_ratio = path_plan.grade_ratio_at(bounded_position_m)
 
+
+    def _next_signal_ahead(self, train: SimTrainState, path_plan: PathPlan, path_position_m: float) -> JsonDict | None:
+        """查询列车前方最近信号机."""
+        constraint = path_plan.constraint_at(path_position_m)
+        if constraint is None:
+            return None
+        seg_span = constraint.end_offset_m - constraint.start_offset_m
+        path_span = constraint.path_end_m - constraint.path_start_m
+        if abs(path_span) < 1e-9:
+            return None
+        ratio = (path_position_m - constraint.path_start_m) / path_span
+        seg_offset = constraint.start_offset_m + ratio * seg_span
+        # 根据约束方向确定信号搜索方向：
+        #   forward  →  segment偏移递增方向 = path前进方向
+        #   reverse  →  segment偏移递减方向 = path前进方向
+        sig_dir = constraint.direction  # "forward" | "reverse"
+        return self.track_query.get_next_signal(constraint.segment_id, seg_offset, sig_dir)
 
     def _lookup_profile_speed(self, train_id: str, position_m: float) -> tuple[float, str] | None:
         """浠庤鍒掓洸绾夸腑绾挎€ф彃鍊煎綋鍓嶄綅缃殑鐩爣閫熷害鍜岃繍琛屾ā寮?"""

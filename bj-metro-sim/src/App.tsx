@@ -11,6 +11,7 @@ import PowerNetworkPanel from './components/PowerNetworkPanel';
 import PowerSystemView from './components/PowerSystemView';
 import StationPassengerView from './components/StationPassengerView';
 import TrainManagementPanel from './components/TrainManagementPanel';
+import FullLineTrainPanel from './components/FullLineTrainPanel';
 import SimulationLifecycleControls from './components/SimulationLifecycleControls';
 import DriverCabConnectionButton from './components/DriverCabConnectionButton';
 import { useSimStore } from './store/useSimStore';
@@ -354,21 +355,24 @@ export default function App() {
             }}
           >
             <div className="flex flex-col" style={{ gap: 8 }}>
-              {/* kpi */}
-              <div className="shrink-0" style={{ height: 240 }}>
-                <KPIPanel />
-              </div>
-              {/* member D closed-loop */}
-              <div className="shrink-0" style={{ height: 360 }}>
-                <OperationalLoopPanel />
-              </div>
-              <div className="shrink-0" style={{ height: 380 }}>
-                <PowerNetworkPanel />
-              </div>
-              {/* lines */}
-              <div className="shrink-0" style={{ minHeight: 280 }}>
-                <LinesPanel />
-              </div>
+              {viewMode === 'fullLine' ? (
+                <FullLineTrainPanel />
+              ) : (
+                <>
+                  <div className="shrink-0" style={{ height: 240 }}>
+                    <KPIPanel />
+                  </div>
+                  <div className="shrink-0" style={{ height: 360 }}>
+                    <OperationalLoopPanel />
+                  </div>
+                  <div className="shrink-0" style={{ height: 380 }}>
+                    <PowerNetworkPanel />
+                  </div>
+                  <div className="shrink-0" style={{ minHeight: 280 }}>
+                    <LinesPanel />
+                  </div>
+                </>
+              )}
             </div>
           </div>
           )}
