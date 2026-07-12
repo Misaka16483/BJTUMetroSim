@@ -3,7 +3,7 @@
   "name": "9号线交互式双向仿真",
   "startTimeMs": 28800000,
   "tickSeconds": 0.25,
-  "useDynamicProgrammingProfile": false,
+  "useDynamicProgrammingProfile": true,
   "autoSpawnTrains": false,
   "lineScopeFile": "line9_mainline_scope.json",
   "trains": []
