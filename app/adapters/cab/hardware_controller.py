@@ -7,8 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from app.adapters.binary import TcpFrameClient
-from app.adapters.cab.mitsubishi_plc import MitsubishiPlcCabInputState, MitsubishiPlcTcpClient
+from app.adapters.binary import UdpFrameClient
+from app.adapters.cab.mitsubishi_plc import (
+    MitsubishiPlcCabInputState,
+    MitsubishiPlcCabOutputFrameBuilder,
+    MitsubishiPlcCabOutputState,
+    MitsubishiPlcTcpClient,
+)
 from app.adapters.hmi import NetworkScreenFrameBuilder, NetworkScreenState
 from app.adapters.mmi import SignalScreenFrameBuilder, SignalScreenState
 from app.domain.control import CabControlService
@@ -29,15 +34,15 @@ class ManualControlEngine(Protocol):
 
 
 ClientFactory = Callable[[str, int, float], MitsubishiPlcTcpClient]
-DisplayClientFactory = Callable[[str, int, float], TcpFrameClient]
+DisplayClientFactory = Callable[[str, int, float], UdpFrameClient]
 
 
 def _default_client_factory(host: str, port: int, timeout_s: float) -> MitsubishiPlcTcpClient:
     return MitsubishiPlcTcpClient(host=host, port=port, timeout_s=timeout_s)
 
 
-def _default_display_client_factory(host: str, port: int, timeout_s: float) -> TcpFrameClient:
-    return TcpFrameClient(host=host, port=port, timeout_s=timeout_s)
+def _default_display_client_factory(host: str, port: int, timeout_s: float) -> UdpFrameClient:
+    return UdpFrameClient(host=host, port=port, timeout_s=timeout_s)
 
 
 def _utc_now_iso() -> str:
@@ -145,12 +150,13 @@ class DriverCabHardwareController:
         self._control_service = CabControlService()
         self._network_screen_builder = NetworkScreenFrameBuilder()
         self._signal_screen_builder = SignalScreenFrameBuilder()
+        self._plc_output_builder = MitsubishiPlcCabOutputFrameBuilder()
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._client: MitsubishiPlcTcpClient | None = None
         self._display_threads: dict[str, threading.Thread] = {}
-        self._display_clients: dict[str, TcpFrameClient] = {}
+        self._display_clients: dict[str, UdpFrameClient] = {}
         self._display_stop_events: dict[str, threading.Event] = {}
         self._state = "DISCONNECTED"
         self._control_state = "IDLE"
@@ -170,6 +176,9 @@ class DriverCabHardwareController:
         self._last_command: dict[str, Any] | None = None
         self._manual_mode_armed = False
         self._ever_armed = False
+        self._ato_available_sent = False
+        self._ato_active_sent = False
+        self._last_plc_output: MitsubishiPlcCabOutputState | None = None
 
     def connect(
         self,
@@ -238,6 +247,9 @@ class DriverCabHardwareController:
             self._thread = None
             self._manual_mode_armed = False
             self._ever_armed = False
+            self._ato_available_sent = False
+            self._ato_active_sent = False
+            self._last_plc_output = None
             self._state = "DISCONNECTED"
             self._control_state = "IDLE"
             return {"ok": True, "status": self._snapshot_locked().to_dict()}
@@ -288,6 +300,9 @@ class DriverCabHardwareController:
         self._last_command = None
         self._manual_mode_armed = False
         self._ever_armed = False
+        self._ato_available_sent = False
+        self._ato_active_sent = False
+        self._last_plc_output = None
         stop_event = threading.Event()
         self._stop_event = stop_event
         self._thread = threading.Thread(
@@ -325,27 +340,26 @@ class DriverCabHardwareController:
         """Apply one decoded frame; public for deterministic integration tests.
 
         状态机:
-          DISCONNECTED → 首次连入: 武装人工
-          人工模式     → ATO 激活条件满足: 切 ATO
-          ATO 模式     → 司机推手柄: 切回人工
+          DISCONNECTED → 首次连入: 武装人工 + 发送 ATO 可用
+          人工模式     → 司机按 ATO 启动: 切 ATO + 发送 ATO 激活
+          ATO 模式     → 司机推手柄: 切回人工 + 发送 ATO 复位
         """
         emergency_brake_requested = input_state.emergency_brake_requested
 
-        # —— ATO 激活: 具备 + 激活 + 按下启动按钮 ——
-        # 紧急制动优先级高于 ATO，两者同帧时不允许 ATO 覆盖紧制。
+        # —— ATO 激活: 系统已发送 ATO 可用 → 司机按启动按钮 → 系统发送 ATO 激活 ——
         if (
             not emergency_brake_requested
-            and input_state.ato_available
-            and input_state.ato_active
+            and self._ato_available_sent
             and input_state.ato_start_triggered
         ):
             self._ever_armed = True
             if self._manual_mode_armed:
                 self.engine.set_manual_mode(self.train_id, False)
                 self._manual_mode_armed = False
+            self._ato_active_sent = True
             with self._lock:
                 self._record_input_locked(input_state)
-                self._control_state = "ACTIVE"
+                self._control_state = "ATO_ACTIVE"
                 self._last_error = None
                 self._last_command = None
             return {"ok": True, "trainId": self.train_id, "manualMode": False, "message": "ATO_ACTIVATED"}
@@ -357,6 +371,8 @@ class DriverCabHardwareController:
             mode_result = self.engine.set_manual_mode(self.train_id, True)
             if mode_result.get("ok"):
                 self._manual_mode_armed = True
+                self._ato_available_sent = False
+                self._ato_active_sent = False
             else:
                 with self._lock:
                     self._record_input_locked(input_state)
@@ -367,12 +383,10 @@ class DriverCabHardwareController:
             # fall through to send the manual command below
 
         # —— ATO 持续运行: 启动按钮松开后仍保持 ATO ——
-        # ATO 启动指令是瞬时信号。只要司机没有再次推动主手柄，
-        # 后续 PLC 帧就只用于状态显示，不应向 ATO 列车发送人工驾驶命令。
         if self._ever_armed and not self._manual_mode_armed:
             with self._lock:
                 self._record_input_locked(input_state)
-                self._control_state = "ACTIVE"
+                self._control_state = "ATO_ACTIVE"
                 self._last_error = None
                 self._last_command = None
             return {
@@ -382,7 +396,7 @@ class DriverCabHardwareController:
                 "message": "ATO_ACTIVE",
             }
 
-        # —— 首次连入: 武装人工模式 (只执行一次) ——
+        # —— 首次连入: 武装人工模式 + 发送 ATO 可用 (只执行一次) ——
         if not self._ever_armed:
             self._ever_armed = True
             if not self._manual_mode_armed:
@@ -395,6 +409,7 @@ class DriverCabHardwareController:
                         self._record_input_locked(input_state)
                     return mode_result
                 self._manual_mode_armed = True
+                self._ato_available_sent = True
             # Apply the first valid PLC frame below instead of replacing it
             # with a synthetic neutral command.
 
@@ -440,6 +455,7 @@ class DriverCabHardwareController:
             while not stop_event.is_set():
                 input_state = client.read_input_state(train_id=self.train_id)
                 self.process_input_state(input_state)
+                self._send_plc_output(client)
         except (ConnectionError, OSError, RuntimeError, socket.timeout, ValueError) as exc:
             if not stop_event.is_set():
                 self._apply_connection_loss_protection()
@@ -464,8 +480,6 @@ class DriverCabHardwareController:
                 self._display_clients[endpoint] = client
             try:
                 client.connect()
-                if stop_event.is_set():
-                    break
                 with self._lock:
                     runtime.state = "CONNECTED"
                     runtime.connected_at = _utc_now_iso()
@@ -490,7 +504,7 @@ class DriverCabHardwareController:
                         runtime.last_frame_at = _utc_now_iso()
                     if stop_event.wait(self.display_interval_s):
                         break
-            except (ConnectionError, OSError, RuntimeError, socket.timeout, ValueError) as exc:
+            except (OSError, RuntimeError) as exc:
                 if not stop_event.is_set():
                     with self._lock:
                         runtime.state = "RETRYING"
@@ -643,6 +657,20 @@ class DriverCabHardwareController:
                     "emergencyBrake": True,
                     "handleMode": "CONNECTION_LOSS",
                 }
+
+    def _send_plc_output(self, client: MitsubishiPlcTcpClient) -> None:
+        output = MitsubishiPlcCabOutputState(
+            ato_available=self._ato_available_sent,
+            ato_active=self._ato_active_sent,
+        )
+        if self._last_plc_output is not None:
+            if (
+                self._last_plc_output.ato_available == output.ato_available
+                and self._last_plc_output.ato_active == output.ato_active
+            ):
+                return
+        self._last_plc_output = output
+        client.send_output_state(output, builder=self._plc_output_builder)
 
     def _record_input_locked(self, input_state: MitsubishiPlcCabInputState) -> None:
         self._frames_received += 1

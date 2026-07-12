@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.adapters.binary import (
-    TcpFrameClient,
+    UdpFrameClient,
     write_display_header,
     write_float_le,
     write_u8,
@@ -97,5 +97,5 @@ class SignalScreenClient:
 
     def send_state(self, state: SignalScreenState) -> None:
         frame = self.builder.build(state)
-        with TcpFrameClient(self.host, self.port, self.timeout_s) as client:
+        with UdpFrameClient(self.host, self.port, self.timeout_s) as client:
             client.send_frame(frame)
