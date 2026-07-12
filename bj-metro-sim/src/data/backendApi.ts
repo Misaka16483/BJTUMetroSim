@@ -718,6 +718,17 @@ export function simSendTrainManualCommand(trainId: string, tractionPercent: numb
 }
 
 export type DriverCabConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+export type DisplayConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RETRYING';
+
+export interface DriverCabDisplayStatus {
+  state: DisplayConnectionState;
+  host: string;
+  port: number;
+  framesSent: number;
+  connectedAt: string | null;
+  lastFrameAt: string | null;
+  lastError: string | null;
+}
 
 export interface DriverCabHardwareStatus {
   state: DriverCabConnectionState;
@@ -745,6 +756,12 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     handleMode: string;
   } | null;
+  networkScreenHost: string;
+  networkScreenPort: number;
+  signalScreenHost: string;
+  signalScreenPort: number;
+  networkScreen: DriverCabDisplayStatus;
+  signalScreen: DriverCabDisplayStatus;
 }
 
 export interface DriverCabHardwareResponse {
@@ -757,10 +774,17 @@ export function fetchDriverCabStatus(): Promise<DriverCabHardwareResponse> {
   return getJson<DriverCabHardwareResponse>('/api/hardware/driver-cab/status');
 }
 
-export function connectDriverCab(host?: string, port?: number): Promise<DriverCabHardwareResponse> {
+export function connectDriverCab(
+  host?: string,
+  port?: number,
+  networkScreenHost?: string,
+  signalScreenHost?: string,
+): Promise<DriverCabHardwareResponse> {
   const body: Record<string, unknown> = {};
   if (host) body.host = host;
   if (port) body.port = port;
+  if (networkScreenHost) body.networkScreenHost = networkScreenHost;
+  if (signalScreenHost) body.signalScreenHost = signalScreenHost;
   return fetch('/api/hardware/driver-cab/connect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -773,6 +797,34 @@ export function connectDriverCab(host?: string, port?: number): Promise<DriverCa
 
 export function disconnectDriverCab(): Promise<DriverCabHardwareResponse> {
   return fetch('/api/hardware/driver-cab/disconnect', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export type DriverCabEndpoint = 'plc' | 'network-screen' | 'signal-screen';
+
+export function connectDriverCabEndpoint(
+  endpoint: DriverCabEndpoint,
+  host: string,
+  port?: number,
+): Promise<DriverCabHardwareResponse> {
+  const body: Record<string, unknown> = { host };
+  if (port !== undefined) body.port = port;
+  return fetch(`/api/hardware/driver-cab/${endpoint}/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export function disconnectDriverCabEndpoint(
+  endpoint: DriverCabEndpoint,
+): Promise<DriverCabHardwareResponse> {
+  return fetch(`/api/hardware/driver-cab/${endpoint}/disconnect`, { method: 'POST' }).then((response) => {
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     return response.json() as Promise<DriverCabHardwareResponse>;
   });

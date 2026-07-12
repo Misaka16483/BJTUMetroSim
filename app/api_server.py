@@ -621,6 +621,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                         result = controller.connect(
                             host=str(payload["host"]) if payload.get("host") is not None else None,
                             port=int(payload["port"]) if payload.get("port") is not None else None,
+                            network_screen_host=(
+                                str(payload["networkScreenHost"])
+                                if payload.get("networkScreenHost") is not None
+                                else None
+                            ),
+                            signal_screen_host=(
+                                str(payload["signalScreenHost"])
+                                if payload.get("signalScreenHost") is not None
+                                else None
+                            ),
                         )
                         self._send_json(result, HTTPStatus.ACCEPTED)
                     except (TypeError, ValueError) as exc:
@@ -631,6 +641,52 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json(controller.disconnect())
+            elif path == "/api/hardware/driver-cab/plc/connect":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    payload = self._read_json_body()
+                    try:
+                        self._send_json(controller.connect_plc(
+                            host=str(payload["host"]) if payload.get("host") is not None else None,
+                            port=int(payload["port"]) if payload.get("port") is not None else None,
+                        ), HTTPStatus.ACCEPTED)
+                    except (TypeError, ValueError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/hardware/driver-cab/plc/disconnect":
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(controller.disconnect_plc())
+            elif path in {
+                "/api/hardware/driver-cab/network-screen/connect",
+                "/api/hardware/driver-cab/signal-screen/connect",
+            }:
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    payload = self._read_json_body()
+                    endpoint = "networkScreen" if "/network-screen/" in path else "signalScreen"
+                    try:
+                        self._send_json(controller.connect_display(
+                            endpoint,
+                            host=str(payload["host"]) if payload.get("host") is not None else None,
+                        ), HTTPStatus.ACCEPTED)
+                    except (TypeError, ValueError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path in {
+                "/api/hardware/driver-cab/network-screen/disconnect",
+                "/api/hardware/driver-cab/signal-screen/disconnect",
+            }:
+                controller = self._driver_cab_controller()
+                if controller is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    endpoint = "networkScreen" if "/network-screen/" in path else "signalScreen"
+                    self._send_json(controller.disconnect_display(endpoint))
             elif path == "/api/sim/power/faults":
                 payload = self._read_json_body()
                 self._send_json(self._apply_power_fault(payload))
