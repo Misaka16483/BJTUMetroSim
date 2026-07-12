@@ -16,8 +16,10 @@ from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
 from app.domain.control.services import ATOController
 from app.domain.dispatch.kpi import DispatchKpiTracker
+from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
 from app.domain.dispatch.timetable import HeadwayConfig, TimetableService
+from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
@@ -121,6 +123,9 @@ class SimTrainState:
     tail_mileage_m: float = 0.0
     pantograph_mileages_m: tuple[float, ...] = ()
     spanned_power_section_ids: tuple[str, ...] = ()
+    departure_authorized: bool = False
+    interlocking_hold_reason: str | None = None
+    active_route_ids: tuple[str, ...] = ()
     # ── profile 触发控制 ──
     _profile_triggered: bool = False
     _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
@@ -192,6 +197,9 @@ class SimTrainState:
             "tailMileageM": round(self.tail_mileage_m, 3),
             "pantographMileagesM": [round(value, 3) for value in self.pantograph_mileages_m],
             "spannedPowerSectionIds": list(self.spanned_power_section_ids),
+            "departureAuthorized": self.departure_authorized,
+            "interlockingHoldReason": self.interlocking_hold_reason,
+            "activeRouteIds": list(self.active_route_ids),
         }
 
 
@@ -229,6 +237,8 @@ class TickSnapshot:
     power: list[dict[str, Any]] = field(default_factory=list)
     power_network: dict[str, Any] = field(default_factory=dict)
     dispatch_decisions: list[dict[str, Any]] = field(default_factory=list)
+    dispatch_runtime: dict[str, Any] = field(default_factory=dict)
+    interlocking: dict[str, Any] = field(default_factory=dict)
     kpi: dict[str, Any] = field(default_factory=dict)
 
 
@@ -297,6 +307,12 @@ class SimulationEngine:
                 overload_threshold=1.20,
                 left_behind_threshold_pax=80,
             )
+        )
+        self.dispatch_runtime = DispatchRuntimeCoordinator(self.dispatch_service)
+        self.interlocking_runtime = InterlockingRuntimeCoordinator(
+            line_map,
+            self.track_query,
+            line_scope.segment_ids if line_scope is not None else None,
         )
         self.kpi_tracker = DispatchKpiTracker()
         self.timetable_service = TimetableService(
@@ -507,6 +523,7 @@ class SimulationEngine:
 
         self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self.trains.append(train)
+        self.dispatch_runtime.register_train(train)
         self._snapshot = self._build_snapshot()
         return {"ok": True, "train": train.to_dict()}
 
@@ -514,6 +531,8 @@ class SimulationEngine:
         """鍔ㄦ€佸垹闄や竴鍒楄溅."""
         before = len(self.trains)
         existed_in_specs = train_id in self._train_specs
+        self.interlocking_runtime.release_train(train_id)
+        self.dispatch_runtime.unregister_train(train_id)
         self.trains = [t for t in self.trains if t.train_id != train_id]
         self._train_specs.pop(train_id, None)
         self._vehicle_config_by_train.pop(train_id, None)
@@ -532,6 +551,16 @@ class SimulationEngine:
         self.clock.load()
         self.station_service = self._build_station_service()
         self.power_service = self._build_power_service()
+        self.interlocking_runtime.reset()
+        self.dispatch_service = RuleBasedDispatchService(
+            DispatchRuleConfig(
+                min_headway_sec=90.0,
+                max_headway_sec=300.0,
+                overload_threshold=1.20,
+                left_behind_threshold_pax=80,
+            )
+        )
+        self.dispatch_runtime = DispatchRuntimeCoordinator(self.dispatch_service)
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
         self._last_dispatch_decisions = []
@@ -553,6 +582,7 @@ class SimulationEngine:
         )
         for train in self.trains:
             self._train_power_geometry(train, self._make_vehicle_config(train.train_id, train.onboard_pax))
+            self.dispatch_runtime.register_train(train)
         self._snapshot = self._build_snapshot()
 
         if self.recorder is not None:
@@ -797,6 +827,8 @@ class SimulationEngine:
             self.clock.sim_time_seconds = 0.0
             self.station_service = self._build_station_service()
             self.power_service = self._build_power_service()
+            self.interlocking_runtime.reset()
+            self.dispatch_runtime.reset()
             self._last_arrivals_by_platform = {}
             self._last_power_states = self._empty_power_states()
             self._last_dispatch_decisions = []
@@ -846,6 +878,11 @@ class SimulationEngine:
             dt_sec=self.clock.tick_seconds,
         )
 
+        # CI scan before control: refresh real head/tail occupation and keep a
+        # train at the platform until its interval authority is available.
+        self.interlocking_runtime.update(self._interlocking_train_states(sim_time_ms))
+        self._authorize_ready_departures()
+
         # 2a) KPI: 记录各列车满载率
         for train in self.trains:
             if train.onboard_pax > 0 or train.phase != IDLE:
@@ -889,6 +926,24 @@ class SimulationEngine:
             if train.train_id not in handled_train_ids:
                 self._advance_train(train, sim_time_ms)
 
+        for train in self.trains:
+            if (
+                train.phase == DWELLING
+                and train.dwell_remaining_sec > self.clock.tick_seconds
+                and train.departure_authorized
+            ):
+                train.departure_authorized = False
+                train.interlocking_hold_reason = None
+                train.active_route_ids = ()
+
+        # Scan again after movement so signal aspects and tail-clear releases
+        # in the published snapshot correspond to the current tick.
+        self.interlocking_runtime.update(self._interlocking_train_states(sim_time_ms))
+        departures = self.dispatch_runtime.observe(
+            self.trains,
+            self.clock.sim_time_seconds,
+        )
+
         # 5) 璋冨害鍐崇瓥
         decisions = self._make_dispatch_decisions(sim_time_ms, power_states)
         self._last_dispatch_decisions = decisions
@@ -901,6 +956,13 @@ class SimulationEngine:
                 source="engine",
                 tick=tick,
             )
+        for departure in departures:
+            self.bus.publish(
+                "dispatch.departed",
+                departure.to_dict(),
+                source="dispatch",
+                tick=tick,
+            )
         self.bus.publish("clock.tick", {"tick": tick, "simTimeMs": sim_time_ms}, source="engine", tick=tick)
 
         # 7) 璁板綍鍒?SQLite
@@ -910,6 +972,13 @@ class SimulationEngine:
                     self._run_id,
                     "train.state",
                     train.to_dict(),
+                    tick=tick,
+                )
+            for departure in departures:
+                self.recorder.record_event(
+                    self._run_id,
+                    "dispatch.departed",
+                    departure.to_dict(),
                     tick=tick,
                 )
             for decision in decisions:
@@ -1920,14 +1989,29 @@ class SimulationEngine:
             platform = self.station_service.ensure_platform(train.current_station_code, train.direction)
             ps = power_states.get(self._power_section_for_train(train))
             limit_ratio = ps.traction_limit_ratio if ps and hasattr(ps, "traction_limit_ratio") else 1.0
+            front_headway_sec, rear_headway_sec = self.dispatch_runtime.headways_for(
+                train.train_id,
+                train.station_index,
+                train.direction,
+                self.clock.sim_time_seconds,
+            )
             context = DispatchContext(
                 sim_time_ms=sim_time_ms,
                 train_id=train.train_id,
                 station_id=train.current_station_code,
+                station_index=train.station_index,
+                front_headway_sec=front_headway_sec,
+                rear_headway_sec=rear_headway_sec,
                 platform_crowding_level=platform.crowding_level,
                 load_factor=train.load_factor,
                 left_behind_pax=platform.left_behind_pax,
                 power_traction_limit_ratio=limit_ratio,
+                route_available=self.interlocking_runtime.route_available(
+                    train.train_id,
+                    train._path_plan,
+                ) if train._path_plan is not None else False,
+                onboard_pax=train.onboard_pax,
+                capacity_pax=train.capacity_pax,
             )
             decision = self.dispatch_service.decide(context)
             train.last_dispatch_action = decision.action
@@ -1942,6 +2026,74 @@ class SimulationEngine:
                 train.dispatch_hold_applied_station_index = train.station_index
             decisions.append(decision)
         return decisions
+
+    def _authorize_ready_departures(self) -> None:
+        """Apply CI authority at the dwell/departure boundary without owning dwell logic."""
+        station_count = len(self._station_list)
+        for train in self.trains:
+            if train.phase != DWELLING or train.dwell_remaining_sec > self.clock.tick_seconds:
+                continue
+            next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
+            if next_idx < 0 or next_idx >= station_count:
+                continue
+            path_plan = self._ensure_interval_path(train, next_idx)
+            if path_plan is None:
+                train.departure_authorized = False
+                train.interlocking_hold_reason = "NO_MAINLINE_PATH"
+                train.active_route_ids = ()
+                train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
+                continue
+            self._update_train_path_context(train)
+            authority = self.interlocking_runtime.request_departure(train.train_id, path_plan)
+            train.departure_authorized = authority.granted
+            train.interlocking_hold_reason = authority.failure_reason
+            train.active_route_ids = authority.route_ids
+            if not authority.granted:
+                train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
+
+    def _interlocking_train_states(self, sim_time_ms: int) -> list[TrainState]:
+        states: list[TrainState] = []
+        occupied_platform_queues: set[tuple[int, str]] = set()
+        for train in self.trains:
+            if train.phase in {DWELLING, IDLE}:
+                queue_key = (train.station_index, train.direction)
+                if queue_key in occupied_platform_queues:
+                    # Additional trains at the same origin are treated as a
+                    # depot/dispatch queue, not overlapping physical consists.
+                    continue
+                occupied_platform_queues.add(queue_key)
+            path_plan = train._path_plan
+            if path_plan is None or train.current_segment_id is None:
+                continue
+            constraint = path_plan.constraint_at(train.path_position_m)
+            if constraint is None:
+                continue
+            span_m = max(constraint.path_end_m - constraint.path_start_m, 1e-9)
+            ratio = min(
+                1.0,
+                max(0.0, (train.path_position_m - constraint.path_start_m) / span_m),
+            )
+            offset_m = constraint.start_offset_m + ratio * (
+                constraint.end_offset_m - constraint.start_offset_m
+            )
+            states.append(
+                TrainState(
+                    train_id=train.train_id,
+                    sim_time_ms=sim_time_ms,
+                    sim_time_s=self.clock.sim_time_seconds,
+                    seg_id=int(constraint.segment_id),
+                    segment_id=int(constraint.segment_id),
+                    offset_m=max(0.0, offset_m),
+                    position_m=max(0.0, train.head_mileage_m),
+                    speed_mps=max(0.0, train.speed_mps),
+                    direction="FORWARD" if train.direction == "UP" else "BACKWARD",
+                    operation_mode=train.operation_mode,
+                    run_phase=train.phase,
+                    length_m=train.train_length_m,
+                    net_energy_kwh=train.energy_kwh,
+                )
+            )
+        return states
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  蹇収鏋勫缓
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -1967,6 +2119,8 @@ class SimulationEngine:
             power=[self._power_snapshot(state) for state in self._last_power_states.values()],
             power_network=self._power_network_snapshot(),
             dispatch_decisions=[self._dispatch_snapshot(item) for item in self._last_dispatch_decisions],
+            dispatch_runtime=self.dispatch_runtime.snapshot(),
+            interlocking=self.interlocking_runtime.snapshot(),
             kpi=dict({
                 "activeTrains": len(active),
                 "totalTrains": len(self.trains),

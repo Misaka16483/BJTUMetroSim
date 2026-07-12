@@ -139,12 +139,19 @@ class RuleBasedDispatchService:
                 expected_impact={"tractionLimitRatio": context.power_traction_limit_ratio},
             )
 
-        # 规则2：后车间隔太近 → 扣车等待
-        if context.rear_headway_sec is not None and context.rear_headway_sec < cfg.min_headway_sec:
+        # The elapsed gap to the train ahead is the actionable departure
+        # headway. Keep rear_headway_sec as a compatibility fallback for old
+        # demo callers that used the legacy field name.
+        short_headway_sec = (
+            context.front_headway_sec
+            if context.front_headway_sec is not None
+            else context.rear_headway_sec
+        )
+        if short_headway_sec is not None and short_headway_sec < cfg.min_headway_sec:
             return DispatchDecision(
                 decision_id, context.sim_time_ms, context.train_id, context.station_id,
                 "HOLD", cfg.default_hold_sec, "HEADWAY_TOO_SHORT",
-                expected_impact={"rearHeadwaySec": context.rear_headway_sec},
+                expected_impact={"headwaySec": short_headway_sec},
             )
 
         # 规则3：前车间隔过长 + 站台拥挤 → 提前发车

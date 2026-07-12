@@ -441,6 +441,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.power_topology())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
+            elif path == "/api/sim/interlocking/state":
+                snap = self.engine.snapshot() if self.engine else None
+                self._send_json(snap.interlocking if snap else {
+                    "mode": "UNAVAILABLE", "routes": [], "sections": [], "switches": [], "signals": []
+                })
+            elif path == "/api/sim/dispatch/state":
+                snap = self.engine.snapshot() if self.engine else None
+                self._send_json(snap.dispatch_runtime if snap else {
+                    "registeredTrainCount": 0, "departureCount": 0, "recentDepartures": []
+                })
             elif path == "/api/passenger-sim/state":
                 self._send_json(self.service.passenger_sim.snapshot())
             elif path == "/api/sim/power/state":
@@ -658,6 +668,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             "power": snap.power,
             "powerNetwork": snap.power_network,
             "dispatchDecisions": snap.dispatch_decisions,
+            "dispatchRuntime": snap.dispatch_runtime,
+            "interlocking": snap.interlocking,
             "kpi": snap.kpi,
             "source": "simulation-engine",
         }
@@ -915,6 +927,8 @@ def main() -> None:
     print("  GET  /api/lines/9/macro")
     print("  GET  /api/lines/9/track-map")
     print("  GET  /api/sim/state")
+    print("  GET  /api/sim/interlocking/state")
+    print("  GET  /api/sim/dispatch/state")
     print("  POST /api/sim/start")
     print("  POST /api/sim/pause")
     print("  POST /api/sim/resume")

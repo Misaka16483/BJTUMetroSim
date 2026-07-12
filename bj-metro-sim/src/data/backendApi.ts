@@ -168,6 +168,9 @@ export interface SimTrainState {
   tailMileageM: number;
   pantographMileagesM: number[];
   spannedPowerSectionIds: string[];
+  departureAuthorized?: boolean;
+  interlockingHoldReason?: string | null;
+  activeRouteIds?: string[];
 }
 
 export interface SimStationInfo {
@@ -422,6 +425,53 @@ export interface SimClock {
   simTimeMs: number;
 }
 
+export interface InterlockingRuntimeState {
+  mode: string;
+  routeCount: number;
+  occupiedSectionCount: number;
+  lockedRouteCount: number;
+  reservedIntervalCount: number;
+  routes: Array<{
+    routeId: string;
+    name: string;
+    startSignalId: number;
+    endSignalId: number;
+    axleSectionIds: string[];
+    state: string;
+    trainId?: string | null;
+    failureReason?: string | null;
+  }>;
+  sections: Array<{
+    sectionId: string;
+    sectionType: string;
+    occupied: boolean;
+    trainIds: string[];
+    segmentIds: number[];
+  }>;
+  switches: Array<Record<string, unknown>>;
+  signals: Array<{ signalId: string; aspect: string; faulted: boolean }>;
+  departureAuthorities: Array<{
+    trainId: string;
+    granted: boolean;
+    authorityMode: string;
+    routeIds: string[];
+    signalAspects: Record<string, string>;
+    failureReason?: string | null;
+  }>;
+}
+
+export interface DispatchRuntimeState {
+  registeredTrainCount: number;
+  departureCount: number;
+  recentDepartures: Array<{
+    trainId: string;
+    stationIndex: number;
+    stationId: string;
+    direction: string;
+    simTimeS: number;
+  }>;
+}
+
 export interface SimStateResponse {
   clock: SimClock;
   trains: SimTrainState[];
@@ -429,6 +479,8 @@ export interface SimStateResponse {
   power?: SimPowerState[];
   powerNetwork?: PowerNetworkState;
   dispatchDecisions?: SimDispatchDecision[];
+  dispatchRuntime?: DispatchRuntimeState;
+  interlocking?: InterlockingRuntimeState;
   kpi: SimKpi;
   source: string;
 }

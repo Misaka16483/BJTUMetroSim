@@ -481,7 +481,30 @@ export default function FullLineInterlockingView() {
           <div className="text-[11px] uppercase tracking-[0.18em] text-[#5f7088]">全线图</div>
           <h2 className="text-[18px] font-semibold text-[#dce8f8] mt-1">9号线全线联锁图 · 郭公庄 → 国家图书馆 (13站)</h2>
         </div>
-        <div className="flex items-center gap-1 ml-auto">
+        {simState?.interlocking && (
+          <div className="ml-auto hidden xl:flex items-center gap-3 border-l border-[#26354a] pl-4 font-mono text-[11px]">
+            <span className="text-[#8b949e]">
+              主线进路 <b className="text-[#58a6ff]">{simState.interlocking.lockedRouteCount}</b>
+            </span>
+            <span className="text-[#8b949e]">
+              占用区段 <b className="text-[#ff7b72]">{simState.interlocking.occupiedSectionCount}</b>
+            </span>
+            <span className="text-[#8b949e]">
+              区间授权 <b className="text-[#8FC31F]">{simState.interlocking.reservedIntervalCount}</b>
+            </span>
+            <span className="text-[#8b949e]">
+              开放信号 <b className="text-[#8FC31F]">
+                {simState.interlocking.signals.filter(signal => signal.aspect !== 'RED').length}
+              </b>
+            </span>
+            <span className="text-[#8b949e]">
+              待发 <b className="text-[#d29922]">
+                {simState.trains.filter(train => Boolean(train.interlockingHoldReason)).length}
+              </b>
+            </span>
+          </div>
+        )}
+        <div className="flex items-center gap-1 ml-auto xl:ml-0">
           <button onClick={() => zoomTo(scale * 1.3)} className="px-2 py-1 text-[13px] bg-[#0d1424] border border-[#1a2240] text-[#8b949e] hover:text-white cursor-pointer">
             +
           </button>
