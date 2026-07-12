@@ -16,7 +16,7 @@ import type {
   AddTrainPayload,
   DriverCabHardwareStatus,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow';
 
@@ -31,6 +31,7 @@ interface SimState {
   isRunning: boolean;
   speed: number;
   simTime: string;
+  simTimeMs: number;
   dayType: 'weekday' | 'friday' | 'saturday' | 'sunday';
 
   // 地铁线路数据
@@ -187,7 +188,7 @@ interface SimState {
 }
 
 let tickCount = 0;
-let simSecAccum = 7 * 3600; // 07:00:00 起点
+let simSecAccum = 6 * 3600; // 06:00:00 起点
 let currentRunDirection: 'UP' | 'DOWN' = 'DOWN';
 let backendStartPromise: Promise<void> | null = null;
 let awaitingRunConfirmation = false;
@@ -411,7 +412,8 @@ function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimSto
 export const useSimStore = create<SimState>((set, get) => ({
   isRunning: false,
   speed: 1,
-  simTime: '07:00:00',
+  simTime: '06:00:00',
+  simTimeMs: 21_600_000,
   dayType: 'weekday',
   metroLines: [],
   linesLoading: false,
@@ -521,10 +523,17 @@ export const useSimStore = create<SimState>((set, get) => ({
     }
     // 前端独立模式
     const next = !state.isRunning;
-    if (!next) { tickCount = 0; simSecAccum = 7 * 3600; currentRunDirection = 'DOWN'; }
+    if (!next) { tickCount = 0; simSecAccum = 6 * 3600; currentRunDirection = 'DOWN'; }
     set({ isRunning: next, trainPositions: {} });
   },
-  setSpeed: (speed: number) => set({ speed }),
+  setSpeed: (speed: number) => {
+    const multiplier = Math.max(1, Math.min(240, Math.floor(speed)));
+    set({ speed: multiplier });
+    void simSetSpeedMultiplier(multiplier).catch(() => {
+      // Keep the UI usable when the backend is unavailable; the next backend
+      // snapshot will restore the authoritative multiplier.
+    });
+  },
   setDayType: (dayType) => set({ dayType }),
   selectTrain: (id: string | null) => {
     const state = get();
@@ -771,6 +780,9 @@ export const useSimStore = create<SimState>((set, get) => ({
     set({
       engineClockState: clock.state,
       isRunning: isEngineRunning,
+      speed: clock.speedMultiplier ?? state.speed,
+      simTime: clock.simTime,
+      simTimeMs: clock.simTimeMs,
       trains: trains,
       selectedTrainId: selId,
       simStations: stations ?? [],
@@ -803,7 +815,6 @@ export const useSimStore = create<SimState>((set, get) => ({
     if (changed) set({ trainColors: newColors });
 
     if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
-      set({ simTime: clock.simTime });
       const sel = _applyTrainDetail(selTrain, get());
       set({ ...sel, manualMode: selTrain.operationMode === 'MANUAL' });
     }

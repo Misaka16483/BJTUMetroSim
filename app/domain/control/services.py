@@ -30,6 +30,11 @@ class ATOController:
         self._filtered_derivative: float = 0.0
         self._profile_cache_key: tuple[object, ...] | None = None
         self._profile_cache: OptimizedSpeedProfile | None = None
+        # Fast-forward must keep the 250 ms physics lifecycle responsive.  A
+        # fresh DCDP solve can take seconds per interval, so the engine may
+        # temporarily use the deterministic braking curve while preserving an
+        # already-computed profile.
+        self.allow_profile_compute: bool = True
         self.last_target_speed_mps: float = 0.0
         self.last_speed_error_mps: float = 0.0
         self.last_pid_output_percent: float = 0.0
@@ -188,6 +193,11 @@ class ATOController:
     def _profile_for(self, state: TrainState, target: AtoTarget) -> OptimizedSpeedProfile | None:
         if not self.config.use_dynamic_programming_profile:
             return None
+        # During fast-forward, never construct a new cache key or solve DCDP.
+        # Path changes call reset(), so an existing cache is still the profile
+        # for the active interval.
+        if not self.allow_profile_compute:
+            return self._profile_cache
         target_position_m = self._target_position_m(target)
         if target_position_m <= 0:
             return None

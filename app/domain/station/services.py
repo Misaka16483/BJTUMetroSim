@@ -325,6 +325,43 @@ class StationService:
         )
         return result, plan
 
+    def exchange_open_door_passengers(
+        self,
+        *,
+        station_id: str,
+        direction: str,
+        train_load: TrainLoadState,
+        requested_alighting: int,
+        requested_boarding: int,
+        platform_area_m2: float = 120.0,
+    ) -> BoardingResult:
+        """Apply one short passenger-exchange slice while a train door is open."""
+        platform = self.ensure_platform(station_id, direction, platform_area_m2)
+        alighting = min(train_load.onboard_pax, max(0, int(requested_alighting)))
+        remaining_capacity = max(train_load.capacity_pax - (train_load.onboard_pax - alighting), 0)
+        boarding = min(platform.waiting_pax, remaining_capacity, max(0, int(requested_boarding)))
+        platform.waiting_pax -= boarding
+        platform.left_behind_pax = platform.waiting_pax
+        self._total_alighted += alighting
+        self._total_boarded += boarding
+        updated_load = TrainLoadState(
+            train_id=train_load.train_id,
+            onboard_pax=train_load.onboard_pax - alighting + boarding,
+            capacity_pax=train_load.capacity_pax,
+            average_passenger_weight_kg=train_load.average_passenger_weight_kg,
+        )
+        return BoardingResult(
+            station_id=station_id,
+            direction=direction,
+            train_id=train_load.train_id,
+            arrivals=0,
+            boarding=boarding,
+            alighting=alighting,
+            waiting=platform.waiting_pax,
+            left_behind=platform.left_behind_pax,
+            updated_load=updated_load,
+        )
+
 
 # ── 兼容旧版 member_d_demo 接口 ──
 

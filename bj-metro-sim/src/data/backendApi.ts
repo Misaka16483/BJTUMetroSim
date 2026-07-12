@@ -79,8 +79,12 @@ async function getJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { method: 'POST' });
+async function postJson(url: string, payload?: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: payload === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -132,6 +136,16 @@ export interface SimTrainState {
   onboardPax: number;
   capacityPax: number;
   loadFactor: number;
+  doorState?: string;
+  doorSide?: string;
+  doorNotice?: string;
+  doorPermission?: string;
+  doorTransitionRemainingSec?: number;
+  lastBoarding?: number;
+  lastAlighting?: number;
+  currentBoardingRatePaxPerSec?: number;
+  currentAlightingRatePaxPerSec?: number;
+  lastPassengerEventMs?: number | null;
   currentStation: string;
   nextStation: string;
   segmentProgress: number;
@@ -423,6 +437,7 @@ export interface SimClock {
   simTime: string;
   tick: number;
   simTimeMs: number;
+  speedMultiplier?: number;
 }
 
 export interface InterlockingRuntimeState {
@@ -485,6 +500,20 @@ export interface SimStateResponse {
   source: string;
 }
 
+export interface PassengerHistoryPoint {
+  simTimeMs: number;
+  waitingPax: number;
+  arrivals: number;
+  leftBehindPax: number;
+  platformDensity: number;
+}
+
+export interface StationPassengerHistoryResponse {
+  stationCode: string;
+  source: string;
+  history: Record<'UP' | 'DOWN', PassengerHistoryPoint[]>;
+}
+
 // ── 速度规划曲线 ──
 export interface SpeedProfilePoint {
   positionM: number;
@@ -514,6 +543,11 @@ export function fetchSimState(): Promise<SimStateResponse> {
   return getJson<SimStateResponse>('/api/sim/state');
 }
 
+export function fetchStationPassengerHistory(stationCode: string, sinceSimTimeMs?: number): Promise<StationPassengerHistoryResponse> {
+  const suffix = sinceSimTimeMs === undefined ? '' : `?sinceSimTimeMs=${sinceSimTimeMs}`;
+  return getJson<StationPassengerHistoryResponse>(`/api/sim/passenger-history/${encodeURIComponent(stationCode)}${suffix}`);
+}
+
 export function fetchSpeedProfile(): Promise<SpeedProfileResponse> {
   return getJson<SpeedProfileResponse>('/api/sim/speed-profile');
 }
@@ -532,6 +566,10 @@ export function simResume(): Promise<unknown> {
 
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
+}
+
+export function simSetSpeedMultiplier(multiplier: number): Promise<unknown> {
+  return postJson('/api/sim/speed', { multiplier });
 }
 
 export interface VehicleConfigPayload {
