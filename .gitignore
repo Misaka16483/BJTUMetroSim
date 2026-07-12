@@ -9,6 +9,7 @@ venv/
 
 # Runtime outputs
 outputs/
+data/cache/speed_profiles/
 *.sqlite
 *.db
 MetroDynamicsJavaDemo/out/

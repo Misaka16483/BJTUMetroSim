@@ -15,6 +15,8 @@ from app.core.message_bus import Envelope, MessageBus
 from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
 from app.domain.control.services import ATOController
+from app.domain.control.profile_runtime import AsyncSpeedProfileService, build_speed_profile_request
+from app.domain.control.speed_profile import stopping_target_speed_mps
 from app.domain.dispatch.kpi import DispatchKpiTracker
 from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
@@ -335,7 +337,13 @@ class SimulationEngine:
             profile_speed_step_mps=1.0,
             profile_max_states_per_stage=700,
         )
-        self.ato = ATOController(self._ato_config)
+        self.speed_profile_service = AsyncSpeedProfileService(
+            Path(__file__).resolve().parents[2] / "data" / "cache" / "speed_profiles"
+        )
+        self.ato = ATOController(
+            self._ato_config,
+            enable_synchronous_profile_optimization=False,
+        )
         self._ato_by_train: dict[str, ATOController] = {}
         self._dcdp_curve_data: dict[str, list[dict[str, Any]]] = {}     # 瑙勫垝鏇茬嚎
         self._dcdp_curve_meta: dict[str, dict[str, Any]] = {}
@@ -839,6 +847,7 @@ class SimulationEngine:
             self._power_commands.clear()
             self._power_command_results = []
             self._recorded_power_command_ids = set()
+            self.speed_profile_service.shutdown()
             self.kpi_tracker.reset()
             self.trains = []
             self._snapshot = self._build_snapshot()
@@ -865,6 +874,7 @@ class SimulationEngine:
 
     def _tick(self) -> None:
         """鍗曟浠跨湡."""
+        self.speed_profile_service.poll()
         self.clock.step()
         tick = self.clock.current_tick
         sim_time_ms = self._absolute_sim_time_ms()
@@ -1172,8 +1182,7 @@ class SimulationEngine:
             train.permitted_speed_mps = limit_kmh / 3.6
             train.local_speed_limit_mps = path_plan.speed_limit_at(0.0, train.permitted_speed_mps)
             if not train._profile_triggered:
-                train._profile_triggered = True
-                self._prime_path_profile(train, path_plan)
+                train._profile_triggered = self._prime_path_profile(train, path_plan)
             if train.dwell_remaining_sec > 0:
                 train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - dt)
                 return True, None
@@ -1507,8 +1516,7 @@ class SimulationEngine:
             train.local_speed_limit_mps = path_plan.speed_limit_at(train.path_position_m, train.permitted_speed_mps)
 
             if not train._profile_triggered:
-                train._profile_triggered = True
-                self._prime_path_profile(train, path_plan)
+                train._profile_triggered = self._prime_path_profile(train, path_plan)
 
             if train.dwell_remaining_sec > 0:
                 train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - dt)
@@ -1674,7 +1682,10 @@ class SimulationEngine:
     def _ato_for_train(self, train_id: str) -> ATOController:
         controller = self._ato_by_train.get(train_id)
         if controller is None:
-            controller = ATOController(self._ato_config)
+            controller = ATOController(
+                self._ato_config,
+                enable_synchronous_profile_optimization=False,
+            )
             self._ato_by_train[train_id] = controller
             if len(self._ato_by_train) == 1:
                 self.ato = controller
@@ -1749,7 +1760,7 @@ class SimulationEngine:
             )
         return None
 
-    def _prime_path_profile(self, train: SimTrainState, path_plan: PathPlan) -> None:
+    def _prime_path_profile(self, train: SimTrainState, path_plan: PathPlan) -> bool:
         ato = self._ato_for_train(train.train_id)
         state = TrainState(
             train_id=train.train_id,
@@ -1764,8 +1775,24 @@ class SimulationEngine:
             permitted_speed_mps=train.permitted_speed_mps,
             path_plan=path_plan,
         )
+        if self._ato_config.use_dynamic_programming_profile:
+            load_bucket_pax = int((max(0, train.onboard_pax) + 25) // 50 * 50)
+            vehicle_config = self._make_vehicle_config(train.train_id, load_bucket_pax)
+            request = build_speed_profile_request(
+                path_plan,
+                train.permitted_speed_mps,
+                self._ato_config,
+                vehicle_config,
+            )
+            profile = self.speed_profile_service.request(request)
+            if profile is None:
+                train.target_speed_mps = ato.fallback_target_speed_mps(state, target)
+                self._store_fallback_path_profile(train, path_plan, request.cache_key)
+                return False
+            ato.install_profile(state, target, profile)
         train.target_speed_mps = ato.target_speed_mps(state, target)
         self._store_path_profile(train, path_plan, ato)
+        return True
 
     def _store_path_profile(
         self,
@@ -1803,6 +1830,45 @@ class SimulationEngine:
             "pointCount": len(points),
         }
         self._profile_run_times[train.train_id] = profile.scheduled_run_time_s
+
+    def _store_fallback_path_profile(
+        self,
+        train: SimTrainState,
+        path_plan: PathPlan,
+        cache_key: str,
+    ) -> None:
+        """Expose a cheap safe curve while the exact DCDP profile is pending."""
+        sample_count = max(2, int(path_plan.total_length_m // 25.0) + 1)
+        points: list[dict[str, Any]] = []
+        for index in range(sample_count + 1):
+            position_m = min(path_plan.total_length_m, path_plan.total_length_m * index / sample_count)
+            local_limit_mps = path_plan.speed_limit_at(position_m, train.permitted_speed_mps)
+            speed_mps = stopping_target_speed_mps(
+                position_m=position_m,
+                target_position_m=path_plan.total_length_m,
+                permitted_speed_mps=local_limit_mps,
+                cruise_speed_mps=self._ato_config.target_cruise_speed_mps,
+                expected_deceleration_mps2=self._ato_config.expected_deceleration_mps2,
+                stop_tolerance_m=self._ato_config.stop_tolerance_m,
+                approach_margin_m=self._ato_config.creep_distance_m,
+            )
+            constraint = path_plan.constraint_at(position_m)
+            points.append({
+                "positionM": round(position_m, 1),
+                "speedMps": round(speed_mps, 2),
+                "mode": "BRAKING_CURVE",
+                "localSpeedLimitMps": round(local_limit_mps, 2),
+                "gradeRatio": round(path_plan.grade_ratio_at(position_m), 7),
+                "segmentId": constraint.segment_id if constraint is not None else None,
+            })
+        self._dcdp_curve_data[train.train_id] = points
+        self._dcdp_curve_meta[train.train_id] = {
+            "source": "BRAKING_CURVE_FALLBACK",
+            "status": "DCDP_PENDING",
+            "cacheKey": cache_key,
+            "targetPositionM": path_plan.total_length_m,
+            "pointCount": len(points),
+        }
 
     def _update_train_path_context(self, train: SimTrainState) -> None:
         path_plan = train._path_plan

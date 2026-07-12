@@ -15,8 +15,14 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 
 
 class ATOController:
-    def __init__(self, config: AtoConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: AtoConfig | None = None,
+        *,
+        enable_synchronous_profile_optimization: bool = True,
+    ) -> None:
         self.config = config or AtoConfig()
+        self.enable_synchronous_profile_optimization = enable_synchronous_profile_optimization
         self._last_train_id: str | None = None
         self._last_sim_time_s: float | None = None
         self._last_error_mps: float | None = None
@@ -115,6 +121,16 @@ class ATOController:
     def current_profile(self) -> OptimizedSpeedProfile | None:
         return self._profile_cache
 
+    def install_profile(
+        self,
+        state: TrainState,
+        target: AtoTarget,
+        profile: OptimizedSpeedProfile,
+    ) -> None:
+        """Install a profile produced outside the real-time control thread."""
+        self._profile_cache_key = self._make_profile_cache_key(state, target)
+        self._profile_cache = profile
+
     def target_speed_mps(self, state: TrainState, target: AtoTarget) -> float:
         profile = self._profile_for(state, target)
         if profile is not None:
@@ -143,8 +159,15 @@ class ATOController:
             cruise_speed_mps=self.config.target_cruise_speed_mps,
             expected_deceleration_mps2=self.config.expected_deceleration_mps2,
             stop_tolerance_m=self.config.stop_tolerance_m,
-            approach_margin_m=self.config.brake_margin_m if approach_margin_m is None else approach_margin_m,
+            # The fallback curve must hand over directly to creep control. Using
+            # brake_margin_m here creates a dead zone between creep_distance_m
+            # and brake_margin_m where the target speed is already zero.
+            approach_margin_m=self.config.creep_distance_m if approach_margin_m is None else approach_margin_m,
         )
+
+    def fallback_target_speed_mps(self, state: TrainState, target: AtoTarget) -> float:
+        """Return the safe lightweight target used while optimization is pending."""
+        return self._braking_curve_target_speed_mps(state, target)
 
     def _profile_for(self, state: TrainState, target: AtoTarget) -> OptimizedSpeedProfile | None:
         if not self.config.use_dynamic_programming_profile:
@@ -165,20 +188,15 @@ class ATOController:
             deceleration_mps2=self.config.expected_deceleration_mps2,
             runtime_margin_ratio=self.config.profile_runtime_margin_ratio,
         )
-        cache_key = (
-            state.train_id,
-            round(target_position_m, 3),
-            round(target.permitted_speed_mps, 3),
-            round(self.config.target_cruise_speed_mps, 3),
-            round(scheduled_run_time_s, 3),
-            round(self.config.profile_time_step_s, 3),
-            round(self.config.profile_position_step_m, 3),
-            round(self.config.profile_speed_step_mps, 3),
-            self.config.profile_max_states_per_stage,
-            target.path_plan.cache_key() if target.path_plan is not None else None,
+        cache_key = self._make_profile_cache_key(
+            state,
+            target,
+            scheduled_run_time_s=scheduled_run_time_s,
         )
         if self._profile_cache_key == cache_key and self._profile_cache is not None:
             return self._profile_cache
+        if not self.enable_synchronous_profile_optimization:
+            return None
 
         self._profile_cache = optimize_speed_profile_dcdp(
             target_position_m=target_position_m,
@@ -194,6 +212,41 @@ class ATOController:
         )
         self._profile_cache_key = cache_key
         return self._profile_cache
+
+    def _make_profile_cache_key(
+        self,
+        state: TrainState,
+        target: AtoTarget,
+        *,
+        scheduled_run_time_s: float | None = None,
+    ) -> tuple[object, ...]:
+        target_position_m = self._target_position_m(target)
+        if scheduled_run_time_s is None:
+            vehicle_config = VehicleConfig(train_id=state.train_id)
+            acceleration_mps2 = max(
+                0.05,
+                (vehicle_config.max_traction_force_n - vehicle_config.basic_resistance_n)
+                / vehicle_config.mass_kg,
+            )
+            scheduled_run_time_s = self.config.profile_run_time_s or estimate_scheduled_run_time_s(
+                target_position_m=target_position_m,
+                permitted_speed_mps=min(target.permitted_speed_mps, self.config.target_cruise_speed_mps),
+                acceleration_mps2=acceleration_mps2,
+                deceleration_mps2=self.config.expected_deceleration_mps2,
+                runtime_margin_ratio=self.config.profile_runtime_margin_ratio,
+            )
+        return (
+            state.train_id,
+            round(target_position_m, 3),
+            round(target.permitted_speed_mps, 3),
+            round(self.config.target_cruise_speed_mps, 3),
+            round(scheduled_run_time_s, 3),
+            round(self.config.profile_time_step_s, 3),
+            round(self.config.profile_position_step_m, 3),
+            round(self.config.profile_speed_step_mps, 3),
+            self.config.profile_max_states_per_stage,
+            target.path_plan.cache_key() if target.path_plan is not None else None,
+        )
 
     def _profile_lookup_position_m(self, state: TrainState, target: AtoTarget) -> float:
         target_position_m = self._target_position_m(target)
