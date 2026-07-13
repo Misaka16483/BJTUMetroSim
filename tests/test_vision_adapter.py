@@ -42,6 +42,40 @@ def _frame_state() -> VisionFrameState:
 
 
 class VisionFrameProtocolTests(unittest.TestCase):
+    def test_compact_layout_matches_captured_154_byte_payload(self) -> None:
+        captured_payload = bytes.fromhex(
+            """
+            ad 0d 00 00 5c
+            02 02 02 02 02 02 02 02 02 02 02 02 02 02 02 02
+            02 02 02 02 02 02 02 02 02 02 02 02 02 02 02 02
+            02 02 02 02 02 02 02 02 02 02 02 02 02 02 02 02
+            02 02 02 02 02 02 02 02 02 02 02 02 02 02 02 02
+            02 02 02 02 02 02 02 02 02 02 02 02 02 02 02 02
+            02 02 02 02 02 02 02 02 02 02 02 02
+            28
+            01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+            01 01 01 01 01 01 01 01 01 01 02 02 01 01 01 01
+            01 01 01 01 01 01 01 01
+            6a 5a 00 00 00 00 00 00 e5 0d e2 00 14 00 01 00
+            """
+        )
+        state = VisionFrameState(
+            live_counter=3501,
+            signal_states=(0x02,) * 92,
+            switch_states=(0x01,) * 26 + (0x02, 0x02) + (0x01,) * 12,
+            speed_mmps=23146,
+            dwell_time_s=0,
+            run_state=0,
+            acceleration_percent=0,
+            section_distance_mm=14814693,
+            edge_id=20,
+            direction=1,
+        )
+
+        self.assertEqual(len(captured_payload), 154)
+        self.assertEqual(VisionFrameBuilder().build(state), captured_payload)
+        self.assertEqual(VisionFrameParser().parse(captured_payload), state)
+
     def test_compact_v13_frame_round_trip(self) -> None:
         state = _frame_state()
         frame = VisionFrameBuilder().build(state)
@@ -98,8 +132,10 @@ class VisionSnapshotMapperTests(unittest.TestCase):
 
         self.assertEqual(state.signal_states[0], 0x02)
         self.assertTrue(all(value == 0x01 for value in state.signal_states[1:]))
+        self.assertEqual(len(state.signal_states), 92)
         self.assertEqual(state.switch_states[0], 0x02)
         self.assertTrue(all(value == 0x01 for value in state.switch_states[1:]))
+        self.assertEqual(len(state.switch_states), 40)
         self.assertEqual(state.speed_mmps, 12500)
         self.assertEqual(state.run_state, 0x11)
         self.assertEqual(state.acceleration_percent, 40)
@@ -149,6 +185,15 @@ class VisionUdpPublisherTests(unittest.TestCase):
         cleared = publisher.clear_logs()["status"]["logs"]
         self.assertEqual(len(cleared), 1)
         self.assertEqual(cleared[0]["event"], "LOGS_CLEARED")
+
+    def test_capture_confirmed_default_source_and_destination_ports_are_8303(self) -> None:
+        engine = _FakeEngine({"trains": [], "interlocking": {"signals": [], "switches": []}})
+        publisher = VisionUdpPublisher(engine)
+
+        status = publisher.status()["status"]
+
+        self.assertEqual(status["remotePort"], 8303)
+        self.assertEqual(status["localPort"], 8303)
 
     def test_udp_loopback_sends_a_parseable_snapshot_frame(self) -> None:
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

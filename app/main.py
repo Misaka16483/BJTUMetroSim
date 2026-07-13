@@ -28,6 +28,8 @@ from app.adapters.cab import (
 from app.adapters.hmi import NetworkScreenClient, NetworkScreenFrameBuilder, NetworkScreenState
 from app.adapters.mmi import SignalScreenClient, SignalScreenFrameBuilder, SignalScreenState
 from app.adapters.vision import (
+    LINE9_WIRE_SIGNAL_COUNT,
+    LINE9_WIRE_SWITCH_COUNT,
     UdpDatagramSender,
     VisionFrameBuilder,
     VisionFrameParser,
@@ -267,8 +269,8 @@ def mmi_send_demo(args: argparse.Namespace) -> None:
 def vision_send_demo(args: argparse.Namespace) -> None:
     state = VisionFrameState(
         live_counter=args.live_counter,
-        signal_states=(0x01,) * 77,
-        switch_states=(0x01,) * 29,
+        signal_states=(0x01,) * LINE9_WIRE_SIGNAL_COUNT,
+        switch_states=(0x01,) * LINE9_WIRE_SWITCH_COUNT,
         speed_mmps=round(args.speed_mps * 1000.0),
         dwell_time_s=args.dwell_time,
         run_state=args.run_state,
@@ -838,7 +840,7 @@ def build_parser() -> argparse.ArgumentParser:
     vision_parser.add_argument("--host", default="18.32.115.28", help="Vision controller IP address")
     vision_parser.add_argument("--port", type=int, default=8303, help="Vision controller receive port")
     vision_parser.add_argument("--local-host", default="0.0.0.0", help="Local bind address")
-    vision_parser.add_argument("--local-port", type=int, default=8302, help="Local source port; 0 chooses an ephemeral port")
+    vision_parser.add_argument("--local-port", type=int, default=8303, help="Local source port; capture-confirmed default is 8303; 0 chooses an ephemeral port")
     vision_parser.add_argument("--layout", choices=["compact", "fixed"], default="compact")
     vision_parser.add_argument("--live-counter", type=int, default=0)
     vision_parser.add_argument("--speed-mps", type=float, default=0.0)

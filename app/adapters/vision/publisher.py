@@ -19,7 +19,7 @@ class UdpDatagramSender:
         remote_host: str,
         remote_port: int,
         local_host: str = "0.0.0.0",
-        local_port: int = 8302,
+        local_port: int = 8303,
     ) -> None:
         if not remote_host:
             raise ValueError("remote_host must not be empty")
@@ -69,7 +69,7 @@ class VisionUdpPublisher:
         remote_host: str = "18.32.115.28",
         remote_port: int = 8303,
         local_host: str = "0.0.0.0",
-        local_port: int = 8302,
+        local_port: int = 8303,
         interval_s: float = 0.1,
         layout: str = COMPACT_LAYOUT,
         primary_train_id: str | None = None,

@@ -956,7 +956,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 remote_host=str(config.get("remoteHost", "18.32.115.28")),
                 remote_port=int(config.get("remotePort", 8303)),
                 local_host=str(config.get("localHost", "0.0.0.0")),
-                local_port=int(config.get("localPort", 8302)),
+                local_port=int(config.get("localPort", 8303)),
                 interval_s=float(config.get("intervalMs", 100.0)) / 1000.0,
                 layout=str(config.get("layout", COMPACT_LAYOUT)),
                 primary_train_id=(
@@ -1098,7 +1098,7 @@ def main() -> None:
     parser.add_argument("--vision-host", default="18.32.115.28", help="Vision controller IPv4 address")
     parser.add_argument("--vision-port", type=int, default=8303, help="Vision controller receive port")
     parser.add_argument("--vision-local-host", default="0.0.0.0", help="Local IPv4 address to bind")
-    parser.add_argument("--vision-local-port", type=int, default=8302, help="Local UDP source port; 0 chooses an ephemeral port")
+    parser.add_argument("--vision-local-port", type=int, default=8303, help="Local UDP source port; capture-confirmed default is 8303; 0 chooses an ephemeral port")
     parser.add_argument("--vision-layout", choices=["compact", "fixed"], default="compact")
     parser.add_argument("--vision-train-id", default=None, help="Train to publish as the cab-view train")
     args = parser.parse_args()
@@ -1142,8 +1142,8 @@ def main() -> None:
         print(
             "[vision] UDP publisher enabled: "
             f"{args.vision_local_host}:{args.vision_local_port} -> {args.vision_host}:{args.vision_port}, "
-            f"layout={args.vision_layout}, mapped signals={mapping['mappedSignalCount']}/77, "
-            f"switches={mapping['mappedSwitchCount']}/29"
+            f"layout={args.vision_layout}, mapped signals={mapping['mappedSignalCount']}/{mapping['protocolSignalCount']}, "
+            f"switches={mapping['mappedSwitchCount']}/{mapping['protocolSwitchCount']}"
         )
 
     # ── WebSocket ──

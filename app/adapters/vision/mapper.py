@@ -7,6 +7,8 @@ from app.adapters.vision.line9_v13 import (
     DOWN_MAINLINE_EDGES,
     LINE9_SIGNALS_V13,
     LINE9_SWITCHES_V13,
+    LINE9_WIRE_SIGNAL_COUNT,
+    LINE9_WIRE_SWITCH_COUNT,
     UP_MAINLINE_EDGES,
     ProtocolEdge,
 )
@@ -76,11 +78,13 @@ class VisionSnapshotMapper:
 
     def mapping_report(self) -> JsonDict:
         return {
-            "protocolSignalCount": len(LINE9_SIGNALS_V13),
+            "protocolSignalCount": LINE9_WIRE_SIGNAL_COUNT,
+            "identifiedSignalCount": len(LINE9_SIGNALS_V13),
             "mappedSignalCount": sum(
                 1 for item in LINE9_SIGNALS_V13 if item.protocol_id in self.signal_source_map
             ),
-            "protocolSwitchCount": len(LINE9_SWITCHES_V13),
+            "protocolSwitchCount": LINE9_WIRE_SWITCH_COUNT,
+            "identifiedSwitchCount": len(LINE9_SWITCHES_V13),
             "mappedSwitchCount": sum(
                 1 for item in LINE9_SWITCHES_V13 if item.protocol_id in self.switch_source_map
             ),
@@ -100,19 +104,25 @@ class VisionSnapshotMapper:
             str(item.get("switchId")): str(item.get("actualPosition", "NORMAL")).upper()
             for item in interlocking.get("switches", [])
         }
-        signal_states = tuple(
+        known_signal_states = tuple(
             SIGNAL_ASPECT_VALUES.get(
                 signal_by_id.get(str(self.signal_source_map.get(item.protocol_id)), "RED"),
                 SIGNAL_ASPECT_VALUES["RED"],
             )
             for item in LINE9_SIGNALS_V13
         )
-        switch_states = tuple(
+        known_switch_states = tuple(
             SWITCH_POSITION_VALUES.get(
                 switch_by_id.get(str(self.switch_source_map.get(item.protocol_id)), "NORMAL"),
                 SWITCH_POSITION_VALUES["NORMAL"],
             )
             for item in LINE9_SWITCHES_V13
+        )
+        signal_states = known_signal_states + (SIGNAL_ASPECT_VALUES["RED"],) * (
+            LINE9_WIRE_SIGNAL_COUNT - len(known_signal_states)
+        )
+        switch_states = known_switch_states + (SWITCH_POSITION_VALUES["NORMAL"],) * (
+            LINE9_WIRE_SWITCH_COUNT - len(known_switch_states)
         )
         primary_fields = self._train_fields(primary)
         other_trains = tuple(

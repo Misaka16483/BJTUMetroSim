@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# The laboratory capture uses 92 signal bytes and 40 switch bytes.  The
+# supplied Version 1.3 tables identify only 77/29 of them; the remaining wire
+# slots are reserved until their field ordering is confirmed on site.
+LINE9_WIRE_SIGNAL_COUNT = 92
+LINE9_WIRE_SWITCH_COUNT = 40
+
+
 @dataclass(frozen=True)
 class ProtocolSignal:
     name: str

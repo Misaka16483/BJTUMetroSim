@@ -14,7 +14,6 @@ import {
   type DriverCabEndpoint,
   type DriverCabHardwareStatus,
   type HardwareConnectionLog,
-  type VisionFrameLayout,
   type VisionHardwareStatus,
 } from '../data/backendApi';
 
@@ -66,7 +65,7 @@ const EMPTY_VISION_STATUS: VisionHardwareStatus = {
   remoteHost: '18.32.115.28',
   remotePort: 8303,
   localHost: '0.0.0.0',
-  localPort: 8302,
+  localPort: 8303,
   intervalMs: 100,
   layout: 'compact',
   framesSent: 0,
@@ -410,8 +409,7 @@ export default function DriverCabConnectionButton() {
   const [dialogSignalScreenHost, setDialogSignalScreenHost] = useState('192.168.100.121');
   const [dialogVisionHost, setDialogVisionHost] = useState('18.32.115.28');
   const [dialogVisionPort, setDialogVisionPort] = useState(8303);
-  const [dialogVisionLocalPort, setDialogVisionLocalPort] = useState(8302);
-  const [dialogVisionLayout, setDialogVisionLayout] = useState<VisionFrameLayout>('compact');
+  const [dialogVisionLocalPort, setDialogVisionLocalPort] = useState(8303);
 
   useEffect(() => {
     let active = true;
@@ -454,7 +452,6 @@ export default function DriverCabConnectionButton() {
     setDialogVisionHost(visionStatus.remoteHost || '18.32.115.28');
     setDialogVisionPort(visionStatus.remotePort);
     setDialogVisionLocalPort(visionStatus.localPort);
-    setDialogVisionLayout(visionStatus.layout);
     setActionError(null);
     setDialogOpen(true);
   }, [status, visionStatus]);
@@ -483,7 +480,7 @@ export default function DriverCabConnectionButton() {
           localHost: '0.0.0.0',
           localPort: dialogVisionLocalPort,
           intervalMs: 100,
-          layout: dialogVisionLayout,
+          layout: 'compact',
           primaryTrainId: 'T0901',
         }),
       ]);
@@ -496,7 +493,6 @@ export default function DriverCabConnectionButton() {
     dialogPort,
     dialogSignalScreenHost,
     dialogVisionHost,
-    dialogVisionLayout,
     dialogVisionLocalPort,
     dialogVisionPort,
     runAction,
@@ -530,12 +526,12 @@ export default function DriverCabConnectionButton() {
         localHost: '0.0.0.0',
         localPort: dialogVisionLocalPort,
         intervalMs: 100,
-        layout: dialogVisionLayout,
+        layout: 'compact',
         primaryTrainId: 'T0901',
       });
       if (response.ok) setVisionStatus(response.status);
     });
-  }, [dialogVisionHost, dialogVisionLayout, dialogVisionLocalPort, dialogVisionPort, runAction]);
+  }, [dialogVisionHost, dialogVisionLocalPort, dialogVisionPort, runAction]);
 
   const handleDisconnectVision = useCallback(() => {
     void runAction('vision-disconnect', async () => {
@@ -744,17 +740,12 @@ export default function DriverCabConnectionButton() {
                         onChange={(event) => setDialogVisionLocalPort(Number(event.target.value))}
                       />
                     </label>
-                    <label className="cab-dialog__field">
-                      <span className="cab-dialog__label">帧布局</span>
-                      <select
-                        className="cab-dialog__input cab-manager-card__port-select"
-                        value={dialogVisionLayout}
-                        onChange={(event) => setDialogVisionLayout(event.target.value as VisionFrameLayout)}
-                      >
-                        <option value="compact">compact · 128B</option>
-                        <option value="fixed">fixed · 1556B</option>
-                      </select>
-                    </label>
+                    <div className="cab-dialog__field">
+                      <span className="cab-dialog__label">数据包</span>
+                      <output className="cab-dialog__input cab-manager-card__port-select">
+                        现场帧 · 154B 基准
+                      </output>
+                    </div>
                   </>
                 )}
               />
