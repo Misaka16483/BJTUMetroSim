@@ -154,6 +154,7 @@ class RouteService:
             locked_sections=list(route_def.axle_section_ids) if route_def else [],
             locked_switches=dict(locked_switches),
             lock_time_ms=self._lock_counter,
+            approach_sections=list(route_def.approach_section_ids) if route_def else [],
         )
         return RouteResult(
             accepted=True,
@@ -165,75 +166,186 @@ class RouteService:
         )
 
     def release(self, route_id: str, release_type: str = "CANCEL") -> RouteResult:
-        """手动释放进路 —— 解锁道岔，清除进路锁闭状态。
+        """手动释放进路 —— 根据释放类型走不同的状态转换。
 
-        release_type 含义（与设计文档 9.3.3 节对齐）：
-        - "AUTO"：列车通过后自动释放（由 update() 内部调用）
-        - "CANCEL"：调度员取消进路（列车尚未接近）
-        - "APPROACH_RELEASE"：接近锁闭延时释放
-        - "EMERGENCY"：故障/人工强制释放
+        - "CANCEL"：调度员取消进路（LOCKED → RELEASING → IDLE），
+          如果已是 APPROACH_LOCKED 则拒绝（需延时）。
+        - "APPROACH_RELEASE"：接近锁闭延时释放（APPROACH_LOCKED → IDLE）
+        - "EMERGENCY"：故障/人工强制释放（任何状态 → IDLE）
+        - "AUTO"：列车通过后自动释放（RELEASING → IDLE）
         """
         state = self._routes.get(route_id)
-        if state is None or state.state in ("IDLE", "RELEASING"):
-            return RouteResult(
-                accepted=False,
-                route_id=route_id,
-                train_id=state.train_id if state else "",
-                state="FAILED",
-                failure_reason="ROUTE_NOT_FOUND",
-            )
+        if state is None:
+            return RouteResult(accepted=False, route_id=route_id,
+                              train_id="", state="FAILED",
+                              failure_reason="ROUTE_NOT_FOUND")
 
-        # 释放所有被锁闭的道岔（调 SwitchLockService.unlock()）
-        for sw_id in state.locked_switches:
-            self._switch_lock.unlock(sw_id, route_id)
+        if state.state == "IDLE":
+            return RouteResult(accepted=True, route_id=route_id,
+                              train_id="", state="IDLE")
 
-        state.state = "IDLE"
-        state.train_id = None
-        state.locked_sections.clear()
-        state.locked_switches.clear()
-        state.failure_reason = None
-        return RouteResult(
-            accepted=True,
-            route_id=route_id,
-            train_id=state.train_id or "",
-            state="IDLE",
-        )
+        # CANCEL：只允许 LOCKED 状态取消
+        if release_type == "CANCEL":
+            if state.state == "APPROACH_LOCKED":
+                return RouteResult(accepted=False, route_id=route_id,
+                                  train_id=state.train_id or "", state="FAILED",
+                                  failure_reason="APPROACH_LOCKED_CANNOT_CANCEL")
+            self._do_release(route_id, state, release_type)
+            return RouteResult(accepted=True, route_id=route_id,
+                              train_id=state.train_id or "", state="IDLE")
+
+        # EMERGENCY / AUTO / APPROACH_RELEASE：直接释放
+        self._do_release(route_id, state, release_type)
+        return RouteResult(accepted=True, route_id=route_id,
+                          train_id=state.train_id or "", state="IDLE")
 
     # -- main-loop interface ----------------------------------------------
 
     def update(self) -> None:
         """联锁扫描周期 —— 每 tick 被主循环调用一次。
 
-        相当于真实联锁 PLC 的一次 I/O 扫描：检查所有已锁闭进路，
-        对已离开区段的进路执行逐步释放。不依赖外部传入任何数据——
-        区段占用状态由 SectionOccupationService 自己维护。
-
-        调用顺序（主循环）：
-        1. SectionOccupationService.update(train_states, track_query)
-        2. RouteService.update()
+        对每条已锁闭/接近锁闭进路，按顺序推进状态机：
+        1. LOCKED + 列车进入接近区段 → APPROACH_LOCKED
+        2. APPROACH_LOCKED + 列车首次进入进路区段 → 开始监控释放
+        3. 已进入后每 tick 检查：车尾离开区段X → 释放X
+        4. 全部区段释放完 → RELEASING → IDLE
         """
         for route_id, state in list(self._routes.items()):
             if state.state not in ("LOCKED", "APPROACH_LOCKED"):
                 continue
+
+            train_id = state.train_id
+            if train_id is None:
+                self._do_release(route_id, state, "AUTO")
+                continue
+
+            # ── 状态1：LOCKED → 检查接近区段 → APPROACH_LOCKED ──
+            if state.state == "LOCKED":
+                in_approach = any(
+                    train_id in self._section_occ.axle_occupied_by(axle_section_id)
+                    for approach_id in state.approach_sections
+                    for axle_section_id in self._catalog.point_approach_axle_section_ids(approach_id)
+                )
+                if in_approach:
+                    state.state = "APPROACH_LOCKED"
+
+            # ── 状态2：APPROACH_LOCKED 或 LOCKED → 检查是否已进入进路区段 ──
+            if not state.has_entered:
+                entered = any(
+                    train_id in self._section_occ.axle_occupied_by(sid)
+                    for sid in state.locked_sections
+                )
+                if not entered:
+                    continue  # 列车尚未进入，不检查释放
+                state.has_entered = True
+
+            # ── 状态3：列车已在进路中 → 逐区段检查释放 ──
             self._release_cleared_sections(route_id, state)
 
+    def _do_release(self, route_id: str, state: RouteState, release_type: str) -> None:
+        """执行进路实际释放操作：解锁道岔，清除锁闭状态，转入 IDLE。"""
+        for sw_id in state.locked_switches:
+            self._switch_lock.unlock(sw_id, route_id)
+        state.state = "RELEASING"  # 短暂经过 RELEASING
+        state.train_id = None
+        state.locked_sections.clear()
+        state.locked_switches.clear()
+        state.approach_sections.clear()
+        state.failure_reason = None
+        state.has_entered = False
+        state.last_entered_section_id = None
+        state.state = "IDLE"
+
+    def _release_cleared_sections(self, route_id: str, state: RouteState) -> None:
+        """Release only sections cleared behind the assigned train.
+
+        ``locked_sections`` stays ordered as defined by the route table.  A
+        section which has not been reached yet must remain locked; only the
+        prefix behind the first currently occupied section may be released.
+        """
+        train_id = state.train_id
+        if train_id is None:
+            self._do_release(route_id, state, "AUTO")
+            return
+
+        occupied_indexes = [
+            index
+            for index, section_id in enumerate(state.locked_sections)
+            if train_id in self._section_occ.axle_occupied_by(section_id)
+        ]
+        if occupied_indexes:
+            first_occupied = occupied_indexes[0]
+            last_occupied = occupied_indexes[-1]
+            state.last_entered_section_id = state.locked_sections[last_occupied]
+            # Prefix sections are behind the train tail.  Keep the occupied
+            # section and every not-yet-reached section ahead of it locked.
+            del state.locked_sections[:first_occupied]
+            return
+
+        # A gap between route sections is normal.  Only after the assigned
+        # train has occupied and then cleared the final remaining section can
+        # the complete route be released.
+        if (
+            state.locked_sections
+            and state.last_entered_section_id == state.locked_sections[-1]
+        ):
+            self._do_release(route_id, state, "AUTO")
+
+    def release_routes_owned_by(self, train_id: str) -> list[str]:
+        """Emergency-release routes owned by a train that is being removed.
+
+        Removing a simulated train is equivalent to taking it out of service.
+        Its route locks must not survive the train, otherwise a later train can
+        wait forever on ``CONFLICT_ROUTE_LOCKED`` for an owner that no longer
+        exists.  Only locked routes with this exact owner are released.
+        """
+        released: list[str] = []
+        for route_id, state in list(self._routes.items()):
+            if state.train_id != train_id or state.state not in ("LOCKED", "APPROACH_LOCKED"):
+                continue
+            self.release(route_id, "EMERGENCY")
+            released.append(route_id)
+        return released
     # -- query interface --------------------------------------------------
 
     def state_of(self, route_id: str) -> str:
-        """Return the current state string, or ``"IDLE"`` if unknown."""
+        """返回进路当前状态，未知进路返回 ``"IDLE"``。"""
         rs = self._routes.get(route_id)
         return rs.state if rs else "IDLE"
 
     def is_locked(self, route_id: str) -> bool:
-        return self.state_of(route_id) == "LOCKED"
+        """进路是否处于已锁闭状态（LOCKED 或 APPROACH_LOCKED）。"""
+        return self.state_of(route_id) in ("LOCKED", "APPROACH_LOCKED")
+
+    def locked_by(self, route_id: str) -> str | None:
+        """Return the train currently owning a locked route, if any."""
+        state = self._routes.get(route_id)
+        if state is None or state.state not in ("LOCKED", "APPROACH_LOCKED"):
+            return None
+        return state.train_id
+
+    def has_entered(self, route_id: str) -> bool:
+        """Whether the owner has entered a currently locked route.
+
+        Signal control uses this to return the departure signal to red after
+        the train has passed it, while the route remains locked for tail clear.
+        """
+        state = self._routes.get(route_id)
+        return bool(
+            state is not None
+            and state.state in ("LOCKED", "APPROACH_LOCKED")
+            and state.has_entered
+        )
 
     def locked_routes(self) -> list[str]:
+        """返回所有已锁闭/接近锁闭的进路 ID 列表。"""
         return [
             rid for rid, rs in self._routes.items()
             if rs.state in ("LOCKED", "APPROACH_LOCKED")
         ]
 
     def snapshot(self) -> list[dict[str, Any]]:
+        """返回所有进路的运行时状态快照（前端 API 用）。"""
         return [
             {
                 "routeId": rs.route_id,
@@ -241,42 +353,10 @@ class RouteService:
                 "trainId": rs.train_id,
                 "lockedSections": list(rs.locked_sections),
                 "lockedSwitches": dict(rs.locked_switches),
+                "approachSections": list(rs.approach_sections),
+                "hasEntered": rs.has_entered,
+                "lastEnteredSectionId": rs.last_entered_section_id,
                 "failureReason": rs.failure_reason,
             }
             for rs in self._routes.values()
         ]
-
-    # -- internal ---------------------------------------------------------
-
-    def _release_cleared_sections(
-        self,
-        route_id: str,
-        state: RouteState,
-    ) -> None:
-        """释放进路中列车已离开的区段。
-
-        对进路锁闭的每个区段，调用 SectionOccupationService.occupied_by()
-        查询当前有哪些列车在上面。如果本进路的列车（state.train_id）不在
-        占用列表中，说明列车已离开该区段→从 locked_sections 中移除。
-
-        注意：其他列车仍可能占用同一区段（如追踪运行中后车覆盖了前车
-        刚离开的区段），这不影响本进路的释放——我们只看"本车是否已离开"。
-        锁释放后区段仍被其他车占用不影响安全（新进路办理时 RuleEngine
-        会检查 is_occupied()）。
-
-        全部区段离开后调用 self.release(route_id, "AUTO") 完全释放进路。
-        """
-        train_id = state.train_id
-        if train_id is None:
-            self.release(route_id, "AUTO")
-            return
-
-        new_locked: list[str] = []
-        for sid in state.locked_sections:
-            if train_id in self._section_occ.occupied_by(sid):
-                new_locked.append(sid)
-
-        state.locked_sections[:] = new_locked
-
-        if not new_locked:
-            self.release(route_id, "AUTO")

@@ -39,6 +39,8 @@ class TrainState:
     # Length for section-occupancy derivation (Phase 2).
     # Default 120 m ≈ 6-car B-type metro train.  A/B override per scenario.
     length_m: float = 120.0
+    # Route-specific topology for correct turnout rear-end tracing.
+    path_track: Any | None = field(default=None, repr=False, compare=False)
     # —— 成员B 需要的字段（与 B 的 SimpleVehicleModel 兼容）——
     # B 使用 segment_id（等价于 seg_id），默认与 seg_id 一致
     segment_id: int | None = None

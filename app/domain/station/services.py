@@ -471,5 +471,3 @@ class PassengerFlowGenerator(PoissonPassengerFlowGenerator):
         ]
         return sum(ratios) / len(ratios) if ratios else 0.12
 
-
-

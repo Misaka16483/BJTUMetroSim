@@ -477,6 +477,7 @@ export interface SimClock {
   tick: number;
   simTimeMs: number;
   speedMultiplier?: number;
+  tickIntervalMs?: number;
 }
 
 export interface InterlockingRuntimeState {
@@ -605,6 +606,17 @@ export function simResume(): Promise<unknown> {
 
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
+}
+
+export function simSetTickInterval(intervalMs: number): Promise<{ ok: boolean; tickIntervalMs: number }> {
+  return fetch('/api/sim/tick-interval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ intervalMs }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean; tickIntervalMs: number }>;
+  });
 }
 
 export function simSetSpeedMultiplier(multiplier: number): Promise<unknown> {

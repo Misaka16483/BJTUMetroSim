@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -80,6 +81,7 @@ class PowerExperimentTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
+                ssl_keylog = os.environ.pop("SSLKEYLOGFILE", None)
                 host, port = server.server_address
                 body = json.dumps({
                     "problem": "EFS_CAPACITY",
@@ -101,6 +103,8 @@ class PowerExperimentTests(unittest.TestCase):
                 self.assertTrue(created["ok"])
                 self.assertEqual(fetched["data"]["experimentId"], experiment_id)
             finally:
+                if ssl_keylog is not None:
+                    os.environ["SSLKEYLOGFILE"] = ssl_keylog
                 server.shutdown()
                 server.server_close()
                 registry.close()

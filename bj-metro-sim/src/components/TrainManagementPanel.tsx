@@ -77,8 +77,8 @@ export default function TrainManagementPanel() {
       payload.vehicleConfig = vehicleForm;
     }
     try {
-      const ok = await addTrain(payload);
-      if (ok) {
+      const result = await addTrain(payload);
+      if (result) {
         setShowForm(false);
         setForm((f) => ({
           ...f,

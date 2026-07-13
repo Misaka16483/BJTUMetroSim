@@ -25,6 +25,26 @@ def five_train_loads() -> list[TrainElectricalLoad]:
 
 
 class PowerAcceptanceTests(unittest.TestCase):
+    def _advance_until_any_train_moves(
+        self,
+        engine: SimulationEngine,
+        *,
+        min_speed_mps: float = 1.0,
+        max_ticks: int = 300,
+    ) -> int:
+        """Wait through the real dwell/interlocking startup before power checks.
+
+        The Member C integration makes initial trains obey platform dwell,
+        route locking, MA, and ATP before they draw meaningful traction power.
+        Power acceptance tests should therefore start voltage/delay assertions
+        from the first actual movement, not from the scenario clock zero.
+        """
+        for tick in range(1, max_ticks + 1):
+            engine._tick()
+            if any(item.speed_mps >= min_speed_mps for item in engine.trains):
+                return tick
+        self.fail("No train reached motion state before power acceptance timeout")
+
     def test_five_train_engine_runs_within_realtime_budget_after_warmup(self) -> None:
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_5train_power.json",
@@ -155,6 +175,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                     for key, value in network.substations.items()
                 }
                 stressed.clock.start()
+                self._advance_until_any_train_moves(stressed)
                 min_limit = 1.0
                 for _tick in range(200):
                     stressed._tick()
@@ -294,8 +315,7 @@ class PowerAcceptanceTests(unittest.TestCase):
             for key, value in network.substations.items()
         }
         engine.clock.start()
-        for _tick in range(math.ceil(45.0 / engine.clock.tick_seconds)):
-            engine._tick()
+        self._advance_until_any_train_moves(engine)
         delay_before = sum(item.power_constraint_delay_sec for item in engine.trains)
 
         engine.queue_power_command("SUBSTATION_OUTAGE", {"targetId": "TS-0905", "bigBilateral": True})

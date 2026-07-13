@@ -123,6 +123,18 @@ class MemberDPhase2Tests(unittest.TestCase):
         )
         self.assertEqual(release_decision.action, "RELEASE")
 
+    def test_terminal_turnback_dispatch_priority(self) -> None:
+        decision = RuleBasedDispatchService().decide(DispatchContext(
+            sim_time_ms=4000,
+            train_id="T0904",
+            station_id="GGZ",
+            terminal_turnback=True,
+            turnback_direction="UP",
+            power_traction_limit_ratio=0.5,
+            rear_headway_sec=10.0,
+        ))
+        self.assertEqual(decision.action, "TURNBACK")
+        self.assertEqual(decision.reason, "TERMINAL_REVERSAL_UP")
     def test_recorder_member_d_tables_and_power_source_guard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             recorder = RunRecorder(Path(tmp) / "run.sqlite")

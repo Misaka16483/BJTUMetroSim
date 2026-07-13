@@ -28,19 +28,27 @@ class MainlineScopeIntegrationTests(unittest.TestCase):
         self.assertEqual(len(scope.segment_ids), 77)
         self.assertEqual(self.engine.path_planner.allowed_segment_ids, scope.segment_ids)
 
-    def test_all_adjacent_station_paths_stay_inside_mainline_scope(self) -> None:
+    def test_adjacent_station_route_table_paths_are_not_clipped_to_mainline_scope(self) -> None:
         scope = self.engine.line_scope
         assert scope is not None
         station_count = len(self.engine._station_list)
+        paths_outside_scope: list[tuple[int, int]] = []
 
         for origin_idx in range(station_count - 1):
-            forward = self.engine._path_plan_for_station_pair(origin_idx, origin_idx + 1)
-            reverse = self.engine._path_plan_for_station_pair(origin_idx + 1, origin_idx)
-            self.assertIsNotNone(forward)
-            self.assertIsNotNone(reverse)
-            assert forward is not None and reverse is not None
-            self.assertTrue(set(forward.segment_ids) <= scope.segment_ids)
-            self.assertTrue(set(reverse.segment_ids) <= scope.segment_ids)
+            for origin, destination in (
+                (origin_idx, origin_idx + 1),
+                (origin_idx + 1, origin_idx),
+            ):
+                path = self.engine._path_plan_for_station_pair(origin, destination)
+                self.assertIsNotNone(path)
+                assert path is not None
+                if not set(path.segment_ids) <= scope.segment_ids:
+                    paths_outside_scope.append((origin, destination))
+
+        # The 77-Seg scope is a scenario/display filter.  Route-table planning
+        # and CI/MA use the full 319-Seg topology so both directions can follow
+        # the real station-table chain instead of a shortest-path whitelist.
+        self.assertTrue(paths_outside_scope)
 
     def test_vehicle_depot_segment_is_rejected(self) -> None:
         scope = self.engine.line_scope
