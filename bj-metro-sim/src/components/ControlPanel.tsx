@@ -92,7 +92,7 @@ export default function ControlPanel() {
 
   const isBackend = backendStatus === 'connected';
   const backendState = engineClockState;
-  const canChangeSpeed = isBackend ? backendState === 'RUNNING' : isRunning;
+  const canChangeSpeed = isBackend ? (backendState === 'RUNNING' || backendState === 'PAUSED') : isRunning;
   const stateColor = backendState === 'RUNNING' ? 'var(--green)'
     : starting ? 'var(--cyan)'
     : stopping ? 'var(--amber)'

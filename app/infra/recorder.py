@@ -341,6 +341,12 @@ class RunRecorder:
                 ON power_solver_records(run_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_power_command_records_time
                 ON power_command_records(run_id, sim_time_ms);
+            CREATE TABLE IF NOT EXISTS sim_reports (
+                run_id INTEGER PRIMARY KEY,
+                generated_at TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
             """
         )
         self.connection.commit()
@@ -1185,3 +1191,30 @@ class RunRecorder:
             ),
         )
         self.connection.commit()
+
+    def save_report(self, run_id: int, report: dict[str, Any]) -> None:
+        """保存（或覆盖）一次运行的仿真报告。"""
+        self.connection.execute(
+            """
+            INSERT INTO sim_reports(run_id, generated_at, report_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                generated_at=excluded.generated_at,
+                report_json=excluded.report_json
+            """,
+            (
+                run_id,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(report, ensure_ascii=False),
+            ),
+        )
+        self.connection.commit()
+
+    def get_report(self, run_id: int) -> dict[str, Any] | None:
+        """读取一次运行的仿真报告，不存在返回 None。"""
+        row = self.connection.execute(
+            "SELECT report_json FROM sim_reports WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])

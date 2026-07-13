@@ -489,6 +489,24 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json({"ok": True, "data": self.engine.export_current_run()})
+            elif path == "/api/sim/report":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    report = self.engine.get_report()
+                    if report is None:
+                        self._send_json({"ok": False, "error": "NO_REPORT_AVAILABLE"}, HTTPStatus.NOT_FOUND)
+                    else:
+                        self._send_json({"ok": True, "report": report})
+            elif match := re.fullmatch(r"/api/sim/report/(\d+)", path):
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    report = self.engine.get_report(int(match.group(1)))
+                    if report is None:
+                        self._send_json({"ok": False, "error": "REPORT_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
+                    else:
+                        self._send_json({"ok": True, "report": report})
             elif path == "/api/power/experiments":
                 self._send_json({"ok": True, "data": self._power_experiment_registry().list()})
             elif match := re.fullmatch(r"/api/power/experiments/([^/]+)/trials", path):

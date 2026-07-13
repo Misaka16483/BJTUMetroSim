@@ -868,3 +868,110 @@ export function disconnectDriverCabEndpoint(
     return response.json() as Promise<DriverCabHardwareResponse>;
   });
 }
+
+// ═══════════════════════════════════════════════════════════
+//  仿真报告 API
+// ═══════════════════════════════════════════════════════════
+
+export interface SimReportDynamics {
+  totalEnergyKwh: number;
+  tractionEnergyKwh: number;
+  auxiliaryEnergyKwh: number;
+  regenGeneratedKwh: number;
+  regenAcceptedKwh: number;
+  regenWastedKwh: number;
+  regenUtilizationRate: number | null;
+  maxSpeedKmh: number;
+  avgSpeedKmh: number;
+  totalDistanceKm: number;
+}
+
+export interface SimReportPassenger {
+  totalArrivals: number;
+  totalBoardings: number;
+  totalAlightings: number;
+  totalLeftBehind: number;
+  avgWaitingSec: number | null;
+  maxWaitingSec: number | null;
+  maxWaitingPax?: number;
+  peakCrowdingStation: string | null;
+  peakCrowdingLevel: string | null;
+}
+
+export interface SimReportPower {
+  totalPowerConsumedKwh: number;
+  totalRegenGeneratedKwh: number;
+  totalRegenAbsorbedKwh: number;
+  totalRegenWastedKwh: number;
+  totalLossesKwh: number | null;
+  avgVoltageV: number | null;
+  minVoltageV: number | null;
+  maxVoltageV: number | null;
+  overloadEvents: number;
+}
+
+export interface SimReportKpi {
+  available: boolean;
+  onTimeRate: number | null;
+  avgWaitSec: number | null;
+  avgLoadFactor: number | null;
+  maxLoadFactor: number | null;
+  overloadEvents: number | null;
+  headwayViolations: number | null;
+  recoveryTimeSec: number | null;
+}
+
+export interface SimReportSummary {
+  runId: number;
+  scenarioName: string;
+  startTime: string;
+  startSimMs: number;
+  endSimMs: number;
+  durationMs: number;
+  durationStr: string;
+  trainCount: number;
+  stationCount: number;
+  totalEvents: number;
+  totalTicks: number;
+}
+
+export interface SimReport {
+  runId: number;
+  scenarioName: string;
+  generatedAt: string;
+  summary: SimReportSummary;
+  dynamics: SimReportDynamics;
+  passenger: SimReportPassenger;
+  power: SimReportPower;
+  kpi: SimReportKpi;
+  charts: {
+    dynamics: {
+      speedTimeSeries: Array<Record<string, number | string>>;
+      energyCumulative: Array<Record<string, number | string>>;
+      trainEnergyComparison: Array<{ trainId: string; energyKwh: number }>;
+      trainIds: string[];
+    };
+    passenger: {
+      arrivalTimeSeries: Array<Record<string, number | string>>;
+      stationPassengerRanking: Array<{ station: string; total: number }>;
+      boardingAlightingComparison: Array<{ station: string; boarding: number; alighting: number }>;
+    };
+    power: {
+      voltageTimeSeries: Array<Record<string, number | string | null>>;
+      powerTimeSeries: Array<Record<string, number | string>>;
+      substationLoad: Array<{ substation: string; avgLoad: number }>;
+    };
+  };
+}
+
+export interface SimReportResponse {
+  ok: boolean;
+  report?: SimReport;
+  error?: string;
+}
+
+export async function fetchSimReport(runId?: number): Promise<SimReportResponse> {
+  const suffix = runId !== undefined ? `/${runId}` : '';
+  const response = await fetch(`/api/sim/report${suffix}`);
+  return response.json() as Promise<SimReportResponse>;
+}

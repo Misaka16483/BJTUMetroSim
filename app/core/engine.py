@@ -916,9 +916,38 @@ class SimulationEngine:
             self._power_command_results = []
             self._recorded_power_command_ids = set()
             self.speed_profile_service.shutdown()
+            # 在 KPI 跟踪器被重置前生成仿真报告（含图表数据）
+            self._generate_report()
             self.kpi_tracker.reset()
             self.trains = []
             self._snapshot = self._build_snapshot()
+
+    def _generate_report(self) -> None:
+        """在 stop() 中调用：于 KPI 跟踪器重置前生成并保存报告。"""
+        if self.recorder is None or self._run_id is None:
+            return
+        try:
+            from app.core.report_generator import ReportGenerator
+
+            kpi_snapshot = self.kpi_tracker.snapshot(self.clock.sim_time_seconds)
+            report = ReportGenerator(self.recorder).generate(
+                self._run_id, kpi_snapshot=kpi_snapshot
+            )
+            self.recorder.save_report(self._run_id, report)
+            self._last_report = report
+        except Exception as exc:  # 报告失败不应影响主流程
+            import logging
+
+            logging.getLogger(__name__).warning("仿真报告生成失败: %s", exc)
+
+    def get_report(self, run_id: int | None = None) -> dict | None:
+        """获取仿真报告；run_id 缺省时返回当前运行。"""
+        if self.recorder is None:
+            return None
+        rid = run_id if run_id is not None else self._run_id
+        if rid is None:
+            return None
+        return self.recorder.get_report(rid)
 
     def snapshot(self) -> TickSnapshot | None:
         """绾跨▼瀹夊叏璇诲彇褰撳墠蹇収."""

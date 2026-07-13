@@ -13,6 +13,7 @@ import StationPassengerView from './components/StationPassengerView';
 import TrainManagementPanel from './components/TrainManagementPanel';
 import FullLineTrainPanel from './components/FullLineTrainPanel';
 import SimulationLifecycleControls from './components/SimulationLifecycleControls';
+import SimulationReport from './components/SimulationReport';
 import DriverCabConnectionButton from './components/DriverCabConnectionButton';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
@@ -43,6 +44,7 @@ export default function App() {
   const trains = useSimStore((s) => s.trains);
   const [collapsed, setCollapsed] = useState(false);
   const [showTrainMgmt, setShowTrainMgmt] = useState(false);
+  const [showReport, setShowReport] = useState(false);
   const modeIndex = viewMode === 'macro'
     ? 0
     : viewMode === 'micro'
@@ -229,7 +231,21 @@ export default function App() {
         <div className="flex items-center gap-1.5">
           {/* ─── 仿真控制 ─── */}
           {backendStatus === 'connected' && (
-            <SimulationLifecycleControls />
+            <SimulationLifecycleControls onReportRequested={() => setShowReport(true)} />
+          )}
+          {backendStatus === 'connected' && (
+            <button
+              onClick={() => setShowReport(true)}
+              className="flex items-center gap-1.5 cursor-pointer label text-[10px] rounded-lg"
+              style={{
+                padding: '5px 10px',
+                color: '#58a6ff',
+                border: '1px solid rgba(88,166,255,0.2)',
+                background: 'rgba(88,166,255,0.06)',
+              }}
+            >
+              报告
+            </button>
           )}
         </div>
 
@@ -423,6 +439,10 @@ export default function App() {
             <TrainManagementPanel />
           </div>
         </div>
+      )}
+
+      {showReport && (
+        <SimulationReport open={showReport} onClose={() => setShowReport(false)} />
       )}
     </div>
   );
