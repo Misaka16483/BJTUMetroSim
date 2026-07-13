@@ -37,6 +37,7 @@ from app.domain.interlocking.rule_engine import InterlockingRuleEngine, RouteChe
 from app.domain.interlocking.section_occupation import SectionOccupationService
 from app.domain.interlocking.signal_resolver import SignalAspectResolver
 from app.domain.interlocking.switch_lock import SwitchLockService
+from app.domain.interlocking.train_track_trace import TrainTrackTrace
 
 __all__ = [
     "AxleSectionDef",
@@ -55,4 +56,5 @@ __all__ = [
     "SwitchDef",
     "SwitchLockService",
     "SwitchState",
+    "TrainTrackTrace",
 ]
