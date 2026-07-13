@@ -65,6 +65,7 @@ class TurnbackPhase:
     signal_ids: tuple[tuple[int, int], ...]
     route_switch_positions: tuple[tuple[str, tuple[tuple[str, str], ...]], ...]
     segment_ids: tuple[int, ...]
+    path_plan: PathPlan
 
 
 @dataclass(frozen=True)
@@ -318,8 +319,17 @@ class RouteChainPlanner:
             raise ValueError("TURNBACK_CONFIG_INVALID: unknown final platform")
 
         phases = tuple(
-            self._build_turnback_phase(phase.direction, phase.route_ids)
-            for phase in configuration.phases
+            self._build_turnback_phase(
+                phase.direction,
+                phase.route_ids,
+                start_platform_id=(configuration.origin_platform_id if index == 0 else None),
+                end_platform_id=(
+                    configuration.final_platform_id
+                    if index == len(configuration.phases) - 1
+                    else None
+                ),
+            )
+            for index, phase in enumerate(configuration.phases)
         )
         origin_segment = int(self._platforms[configuration.origin_platform_id]["segmentId"])
         final_segment = int(self._platforms[configuration.final_platform_id]["segmentId"])
@@ -349,6 +359,9 @@ class RouteChainPlanner:
         self,
         direction: str,
         route_ids: tuple[str, ...],
+        *,
+        start_platform_id: int | None = None,
+        end_platform_id: int | None = None,
     ) -> TurnbackPhase:
         if direction not in {"forward", "backward"} or not route_ids:
             raise ValueError("TURNBACK_CONFIG_INVALID: phase direction/routes")
@@ -382,13 +395,44 @@ class RouteChainPlanner:
             previous_end_signal_id = route.end_signal_id
 
         self._validate_segment_sequence(segment_ids, direction)
+        start_segment_length_m = self._segment_length_m(segment_ids[0])
+        end_segment_length_m = self._segment_length_m(segment_ids[-1])
+        if start_platform_id is None:
+            start_offset_m = 0.0 if direction == "forward" else start_segment_length_m
+        else:
+            platform = self._platforms[start_platform_id]
+            if int(platform["segmentId"]) != segment_ids[0]:
+                raise ValueError("TURNBACK_CONFIG_INVALID: start platform does not match phase")
+            start_offset_m = float(platform.get("offsetM") or 0.0)
+        if end_platform_id is None:
+            end_offset_m = end_segment_length_m if direction == "forward" else 0.0
+        else:
+            platform = self._platforms[end_platform_id]
+            if int(platform["segmentId"]) != segment_ids[-1]:
+                raise ValueError("TURNBACK_CONFIG_INVALID: end platform does not match phase")
+            end_offset_m = float(platform.get("offsetM") or 0.0)
+        path_plan = self._path_planner.plan_for_authorized_segment_sequence(
+            segment_ids,
+            direction,
+            start_offset_m=start_offset_m,
+            end_offset_m=end_offset_m,
+            origin_platform_id=start_platform_id if start_platform_id is not None else -1,
+            destination_platform_id=end_platform_id if end_platform_id is not None else -1,
+        )
         return TurnbackPhase(
             direction=direction,
             route_ids=route_ids,
             signal_ids=tuple(signal_ids),
             route_switch_positions=tuple(route_switch_positions),
             segment_ids=segment_ids,
+            path_plan=path_plan,
         )
+
+    def _segment_length_m(self, segment_id: int) -> float:
+        segment = self._track.get_segment(segment_id)
+        if segment is None or segment.get("lengthM") is None:
+            raise ValueError(f"TURNBACK_CONFIG_INVALID: segment {segment_id} has no length")
+        return float(segment["lengthM"])
 
     def _validate_segment_sequence(self, segment_ids: tuple[int, ...], direction: str) -> None:
         for current, following in zip(segment_ids, segment_ids[1:]):

@@ -242,6 +242,28 @@ class RouteService:
             # ── 状态3：列车已在进路中 → 逐区段检查释放 ──
             self._release_cleared_sections(route_id, state)
 
+    def release_terminal_arrival(self, route_id: str, train_id: str) -> bool:
+        """Release a route after a consist is wholly inside its terminal track.
+
+        A reversing movement cannot clear the destination detector before it
+        requests the opposing route out of that detector. Permit this special
+        release only after normal sequential release has removed every prior
+        detector and the sole remaining detector is occupied exclusively by
+        the assigned train.
+        """
+        state = self._routes.get(str(route_id))
+        if state is None or state.state not in {"LOCKED", "APPROACH_LOCKED"}:
+            return False
+        if state.train_id != train_id or not state.has_entered:
+            return False
+        if len(state.locked_sections) != 1:
+            return False
+        final_section_id = state.locked_sections[0]
+        if set(self._section_occ.axle_occupied_by(final_section_id)) != {train_id}:
+            return False
+        self._do_release(str(route_id), state, "TERMINAL_ARRIVAL")
+        return True
+
     def _do_release(self, route_id: str, state: RouteState, release_type: str) -> None:
         """执行进路实际释放操作：解锁道岔，清除锁闭状态，转入 IDLE。"""
         for sw_id in state.locked_switches:

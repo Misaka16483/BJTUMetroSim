@@ -90,9 +90,13 @@ class EngineStateContractTests(unittest.TestCase):
         self.assertEqual(middle_down["train"]["nextStationCode"], "FSP")
 
         engine.trains[0].station_index = len(engine._station_list) - 1
+        engine.trains[0].current_station_code = "GTG"
+        engine.trains[0].current_station_name = "国家图书馆"
         engine.trains[0].direction = "UP"
         engine._turn_train_at_terminal(engine.trains[0])
-        self.assertEqual(engine.trains[0].direction, "DOWN")
+        self.assertEqual(engine.trains[0].direction, "UP")
+        self.assertEqual(engine.trains[0].turnback_state, "RUNNING")
+        self.assertEqual(engine.trains[0].active_route_ids, ("90",))
         self.assertEqual(engine.trains[0].phase, "DWELLING")
 
     def test_interactive_scenario_starts_empty_without_external_server(self) -> None:
@@ -214,7 +218,7 @@ class EngineStateContractTests(unittest.TestCase):
         )
         self.assertIn("40", route_28["lockedSections"])
 
-    def test_terminal_turnback_reverses_on_same_platform(self) -> None:
+    def test_terminal_turnback_runs_through_reversing_routes_to_other_platform(self) -> None:
         engine = load_engine(INTERACTIVE_SCENARIO)
         engine.load()
         self.assertTrue(engine.add_train({
@@ -222,14 +226,15 @@ class EngineStateContractTests(unittest.TestCase):
             "initialSegmentId": 55, "direction": "DOWN", "operationMode": "ATO",
         })["ok"])
         engine.clock.start()
-        for _tick in range(1300):
+        for _tick in range(3000):
             engine._tick()
             if engine.trains[0].turnback_count == 1:
                 break
         train = engine.trains[0]
         self.assertEqual(train.turnback_count, 1)
         self.assertEqual(train.current_station_code, "GGZ")
-        self.assertEqual(train.current_segment_id, 13)
+        self.assertEqual(train.current_platform_id, 2)
+        self.assertEqual(train.current_segment_id, 39)
         self.assertEqual(train.direction, "UP")
         self.assertEqual(train.next_station_code, "FSP")
         self.assertTrue(any(

@@ -121,15 +121,15 @@ class InterlockingRuntimeCoordinator:
     def request_departure(self, train_id: str, path_plan: Any, route_chain_ids: tuple[str, ...] | None = None) -> DepartureAuthority:
         """Lock the non-overlapping mainline routes needed by one station interval."""
         path_key = tuple(path_plan.cache_key())
+        route_ids = tuple(route_chain_ids) if route_chain_ids is not None else self.routes_for_path(path_plan)
         assigned = self._train_route_ids.get(train_id, ())
         if self._train_path_keys.get(train_id) == path_key and assigned:
             active = self._active_routes_by_owner()
-            if all(active.get(route_id) == train_id for route_id in assigned):
+            if assigned == route_ids and all(active.get(route_id) == train_id for route_id in assigned):
                 authority = self._make_authority(train_id, assigned, granted=True)
                 self._last_authorities[train_id] = authority
                 return authority
 
-        route_ids = tuple(route_chain_ids) if route_chain_ids is not None else self.routes_for_path(path_plan)
         if not route_ids:
             authority = DepartureAuthority(
                 train_id=train_id,
@@ -222,6 +222,24 @@ class InterlockingRuntimeCoordinator:
                 )
         self._last_authorities[train_id] = authority
         return authority
+
+    def complete_terminal_arrival(
+        self,
+        train_id: str,
+        route_ids: tuple[str, ...],
+    ) -> bool:
+        """Ask RouteService to apply its guarded reversing-point release."""
+        active_before = self._active_routes_by_owner()
+        complete = True
+        for route_id in route_ids:
+            if active_before.get(route_id) != train_id:
+                continue
+            if not self.route_service.release_terminal_arrival(route_id, train_id):
+                complete = False
+        self._drop_released_assignments()
+        self._drop_cleared_reservations()
+        self.signal_resolver.refresh()
+        return complete
 
     def release_train(self, train_id: str) -> None:
         owned_route_ids = {

@@ -25,7 +25,12 @@ from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
 from app.domain.dispatch.timetable import HeadwayConfig, TimetableService
 from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
-from app.domain.interlocking.route_chain_planner import RouteChainPlan, RouteChainPlanner
+from app.domain.interlocking.route_chain_planner import (
+    RouteChainPlan,
+    RouteChainPlanner,
+    TurnbackPhase,
+    TurnbackPlan,
+)
 from app.domain.interlocking.train_track_trace import TrainTrackTrace
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
@@ -143,6 +148,8 @@ class SimTrainState:
     interlocking_hold_reason: str | None = None
     active_route_ids: tuple[str, ...] = ()
     turnback_count: int = 0
+    turnback_state: str | None = None
+    turnback_phase_index: int | None = None
     movement_authority_end_m: float = 0.0
     movement_authority_reason: str | None = None
     movement_authority_speed_mps: float = 0.0
@@ -155,6 +162,9 @@ class SimTrainState:
     _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
     _track_trace: TrainTrackTrace | None = field(default=None, repr=False, compare=False)
     _trace_path_start_index: int | None = field(default=None, repr=False, compare=False)
+    _turnback_plan: TurnbackPlan | None = field(default=None, repr=False, compare=False)
+    _turnback_authorized_route_count: int = field(default=0, repr=False, compare=False)
+    _terminal_arrival_release_route_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
     # 鈹€鈹€ 鎵嬪姩椹鹃┒ per-train 鎸囦护 鈹€鈹€
     _manual_command: ControlCommand | None = field(default=None, repr=False, compare=False)
     _passenger_service_pending: bool = field(default=False, repr=False, compare=False)
@@ -242,6 +252,8 @@ class SimTrainState:
             "activeRouteIds": list(self.active_route_ids),
             "routeChainIds": list(self.active_route_ids),
             "turnbackCount": self.turnback_count,
+            "turnbackState": self.turnback_state,
+            "turnbackPhaseIndex": self.turnback_phase_index,
             "movementAuthorityEndM": round(self.movement_authority_end_m, 1),
             "movementAuthorityReason": self.movement_authority_reason,
             "movementAuthoritySpeedMps": round(self.movement_authority_speed_mps, 2),
@@ -261,6 +273,7 @@ class PreparedTrainStep:
     demand: VehicleForceDemand
     power_demand: VehiclePowerDemand
     gradient_force_n: float
+    turnback_phase_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1459,15 +1472,36 @@ class SimulationEngine:
         """Prepare a PathPlan train without advancing physics; return whether the train was handled."""
         stations = self._station_list
         n = len(stations)
-        if (train.direction == "UP" and train.station_index >= n - 1) or (
-            train.direction == "DOWN" and train.station_index <= 0
-        ):
-            self._turn_train_at_terminal(train)
-
-        next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
-        if next_idx < 0 or next_idx >= n:
-            return True, None
-        path_plan = self._ensure_interval_path(train, next_idx)
+        if train._terminal_arrival_release_route_ids:
+            if not self.interlocking_runtime.complete_terminal_arrival(
+                train.train_id,
+                train._terminal_arrival_release_route_ids,
+            ):
+                train.speed_mps = 0.0
+                train.traction_percent = 0.0
+                train.brake_percent = 20.0
+                train.departure_authorized = False
+                train.interlocking_hold_reason = "TURNBACK_TERMINAL_RELEASE_PENDING"
+                return True, None
+            train._terminal_arrival_release_route_ids = ()
+            train.active_route_ids = ()
+            train.departure_authorized = False
+            train.movement_authority_locked_route_ids = ()
+            train.interlocking_hold_reason = None
+        turnback_phase = self._current_turnback_phase(train)
+        if turnback_phase is not None:
+            next_idx = train.station_index
+            path_plan = self._ensure_turnback_phase_path(train, turnback_phase)
+            self._extend_turnback_authority(train, turnback_phase)
+        else:
+            next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
+            if next_idx < 0 or next_idx >= n:
+                train.speed_mps = 0.0
+                train.traction_percent = 0.0
+                train.brake_percent = 20.0
+                train.interlocking_hold_reason = "TURNBACK_PLAN_REQUIRED"
+                return True, None
+            path_plan = self._ensure_interval_path(train, next_idx)
         if path_plan is None:
             # Ordinary passenger operation has no topology-distance fallback.
             # Keep the train at its real platform and retry on later ticks;
@@ -1489,11 +1523,16 @@ class SimulationEngine:
         dt = self.clock.tick_seconds
         if train.phase in (DWELLING, IDLE):
             train.speed_mps = 0.0
-            train.path_position_m = 0.0
+            if turnback_phase is None:
+                train.path_position_m = 0.0
             train.path_total_length_m = path_plan.total_length_m
-            train.distance_to_next_m = path_plan.total_length_m
+            train.distance_to_next_m = max(0.0, path_plan.total_length_m - train.path_position_m)
             train.target_distance_m = path_plan.total_length_m
-            train.segment_progress = 0.0
+            train.segment_progress = (
+                min(1.0, train.path_position_m / path_plan.total_length_m)
+                if path_plan.total_length_m > 0
+                else 1.0
+            )
             train.traction_percent = 0.0
             train.brake_percent = 0.0 if train.phase == IDLE else 20.0
             train.target_speed_mps = 0.0
@@ -1598,6 +1637,7 @@ class SimulationEngine:
             demand=demand,
             power_demand=power_demand,
             gradient_force_n=gradient_force_n,
+            turnback_phase_index=(train.turnback_phase_index if turnback_phase is not None else None),
         )
 
     def _apply_prepared_train_step(self, prepared: PreparedTrainStep, flow: Any, sim_time_ms: int) -> None:
@@ -1670,7 +1710,10 @@ class SimulationEngine:
 
             arrived = train.distance_to_next_m <= self._ato_config.stop_tolerance_m and train.speed_mps <= 0.2
             if arrived:
-                self._complete_path_arrival(train, prepared.next_idx, prepared.next_station, sim_time_ms)
+                if prepared.turnback_phase_index is None:
+                    self._complete_path_arrival(train, prepared.next_idx, prepared.next_station, sim_time_ms)
+                else:
+                    self._complete_turnback_phase(train, sim_time_ms)
                 return
 
             ato = self._ato_for_train(train.train_id)
@@ -2062,7 +2105,11 @@ class SimulationEngine:
         if (train.direction == "UP" and next_idx == len(stations) - 1) or (
             train.direction == "DOWN" and next_idx == 0
         ):
-            self._turn_train_at_terminal(train)
+            # The inbound route ends in the occupied terminal platform. It
+            # must pass the same guarded terminal-arrival release before an
+            # opposing turnback route can be requested.
+            train._terminal_arrival_release_route_ids = train._planned_route_ids
+            self._plan_terminal_turnback(train)
         elif completed_plan is None:
             # Legacy scenarios without a route-table path still need a best
             # effort platform anchor. Normal PathPlan arrivals never reselect
@@ -2092,14 +2139,269 @@ class SimulationEngine:
 
         self._begin_station_stop(train)
 
+    def _plan_terminal_turnback(self, train: SimTrainState) -> None:
+        """Create a physical route-table turnback without changing direction."""
+        if train.current_platform_id is None:
+            train.turnback_state = "BLOCKED"
+            train.interlocking_hold_reason = "TURNBACK_REQUIRES_PLATFORM"
+            return
+        try:
+            plan = self.route_chain_planner.plan_turnback(
+                train.current_station_code,
+                int(train.current_platform_id),
+            )
+        except ValueError as exc:
+            train.turnback_state = "BLOCKED"
+            train.interlocking_hold_reason = str(exc)
+            return
+        train._turnback_plan = plan
+        train.turnback_phase_index = 0
+        train._turnback_authorized_route_count = 0
+        train.turnback_state = "PLANNED"
+        train.departure_authorized = False
+        train.interlocking_hold_reason = None
+
     def _turn_train_at_terminal(self, train: SimTrainState) -> None:
-        """At either terminal, reverse service direction and continue after the dwell."""
+        """Compatibility entry point that now schedules, rather than teleports.
+
+        Older callers used this method as a synchronous terminal hook. Keep
+        that hook, but make it perform the first real planning/CI/MA boundary
+        while leaving the service direction unchanged.
+        """
+        station_platforms = self._station_platform_ids.get(train.station_index, ())
+        configured_origin = next(
+            (
+                platform_id
+                for platform_id in station_platforms
+                if self._has_terminal_turnback(
+                    train.current_station_code,
+                    platform_id,
+                )
+            ),
+            None,
+        )
+        externally_relocated = train.current_platform_id != configured_origin
+        if configured_origin is not None and externally_relocated:
+            self._anchor_train_at_platform(train, configured_origin)
+            # A legacy synchronous caller may relocate a train by changing
+            # only its station fields. Its old interval path is not physical
+            # evidence for a terminal reversal and must not enter the
+            # former-tail continuity check.
+            train._path_plan = None
+            train._planned_route_ids = ()
+            train._path_origin_station_index = None
+            train._path_destination_station_index = None
+            train._track_trace = None
+            train._trace_path_start_index = None
+        self._plan_terminal_turnback(train)
+        phase = self._current_turnback_phase(train)
+        if phase is None or self._ensure_turnback_phase_path(train, phase) is None:
+            return
+        authority = self.interlocking_runtime.request_departure(
+            train.train_id,
+            phase.path_plan,
+            phase.route_ids[:1],
+        )
+        train.departure_authorized = authority.granted
+        train.interlocking_hold_reason = authority.failure_reason
+        train.active_route_ids = authority.route_ids if authority.granted else ()
+        if not authority.granted:
+            return
+        train._turnback_authorized_route_count = 1
+        train.turnback_state = "RUNNING"
+        vehicle = self._make_vehicle_config(train.train_id, train.onboard_pax)
+        self._movement_authority_for_train(
+            train,
+            phase.path_plan,
+            train.path_position_m,
+            vehicle,
+        )
+
+    def _has_terminal_turnback(self, terminal_id: str, platform_id: int) -> bool:
+        try:
+            self.route_chain_planner.plan_turnback(terminal_id, platform_id)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _current_turnback_phase(train: SimTrainState) -> TurnbackPhase | None:
+        plan = train._turnback_plan
+        index = train.turnback_phase_index
+        if plan is None or index is None or not 0 <= index < len(plan.phases):
+            return None
+        return plan.phases[index]
+
+    def _ensure_turnback_phase_path(
+        self,
+        train: SimTrainState,
+        phase: TurnbackPhase,
+    ) -> PathPlan | None:
+        if train._path_plan is phase.path_plan:
+            self._update_train_path_context(train)
+            return phase.path_plan
+
+        start_position_m = 0.0
+        previous_path = train._path_plan
+        if previous_path is not None and previous_path.direction != phase.path_plan.direction:
+            try:
+                start_position_m = self._turnback_reversal_position(train, phase.path_plan)
+            except ValueError as exc:
+                train.turnback_state = "BLOCKED"
+                train.interlocking_hold_reason = str(exc)
+                return None
+
+        train._path_plan = phase.path_plan
+        train._planned_route_ids = phase.route_ids
+        train._path_origin_station_index = train.station_index
+        train._path_destination_station_index = train.station_index
+        self._activate_train_track_trace(train, phase.path_plan)
+        train.path_position_m = start_position_m
+        train.path_total_length_m = phase.path_plan.total_length_m
+        train.target_distance_m = phase.path_plan.total_length_m
+        train.distance_to_next_m = max(0.0, phase.path_plan.total_length_m - start_position_m)
+        train.path_segment_count = len(phase.path_plan.segment_ids)
+        train.path_constraint_count = len(phase.path_plan.constraints)
+        train.current_platform_id = (
+            phase.path_plan.origin_platform_id
+            if phase.path_plan.origin_platform_id >= 0 and start_position_m <= 1e-9
+            else None
+        )
+        train._profile_triggered = False
+        train._turnback_authorized_route_count = 0
+        train.turnback_state = "WAITING_ROUTE"
+        self._dcdp_curve_data.pop(train.train_id, None)
+        self._dcdp_curve_meta.pop(train.train_id, None)
+        self._profile_run_times.pop(train.train_id, None)
+        self._ato_for_train(train.train_id).reset()
+        self._update_train_path_context(train)
+        return phase.path_plan
+
+    def _turnback_reversal_position(self, train: SimTrainState, next_path: PathPlan) -> float:
+        """Move the positional reference from the old head to the physical tail."""
+        trace = train._track_trace
+        current_segment_id = train.current_segment_id
+        previous_path = train._path_plan
+        if trace is None or current_segment_id is None or previous_path is None:
+            raise ValueError("TURNBACK_TRACE_UNAVAILABLE")
+        if next_path.total_length_m + 1e-9 < train.train_length_m:
+            raise ValueError("TURNBACK_PATH_SHORTER_THAN_TRAIN")
+
+        previous_direction = "FORWARD" if previous_path.direction == "forward" else "BACKWARD"
+        old_rear_segments = list(trace.rear_segment_ids(current_segment_id, previous_direction))
+        reversal_position_m = min(train.train_length_m, next_path.total_length_m)
+        new_head_constraint = next_path.constraint_at(reversal_position_m)
+        if new_head_constraint is None:
+            raise ValueError("TURNBACK_PATH_HAS_NO_CONSTRAINT")
+        required_segments = list(
+            next_path.segment_ids[
+                : next_path.segment_ids.index(new_head_constraint.segment_id) + 1
+            ]
+        )
+        if old_rear_segments[: len(required_segments)] != required_segments:
+            raise ValueError("TURNBACK_PATH_DOES_NOT_FOLLOW_FORMER_TAIL")
+        return reversal_position_m
+
+    def _extend_turnback_authority(
+        self,
+        train: SimTrainState,
+        phase: TurnbackPhase,
+    ) -> None:
+        if train._path_plan is not phase.path_plan:
+            return
+        if (
+            train._turnback_authorized_route_count == 0
+            and train.phase == DWELLING
+            and (
+                train.dwell_remaining_sec > self.clock.tick_seconds
+                or train.door_state != "CLOSED"
+            )
+        ):
+            return
+        if train._turnback_authorized_route_count >= len(phase.route_ids):
+            return
+        requested_count = train._turnback_authorized_route_count + 1
+        authority = self.interlocking_runtime.request_departure(
+            train.train_id,
+            phase.path_plan,
+            phase.route_ids[:requested_count],
+        )
+        if authority.granted:
+            train._turnback_authorized_route_count = requested_count
+            train.departure_authorized = True
+            train.active_route_ids = authority.route_ids
+            train.interlocking_hold_reason = None
+            train.turnback_state = "RUNNING"
+        elif train._turnback_authorized_route_count == 0:
+            train.departure_authorized = False
+            train.active_route_ids = ()
+            train.interlocking_hold_reason = authority.failure_reason
+            train.turnback_state = "WAITING_ROUTE"
+            train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
+
+    def _complete_turnback_phase(self, train: SimTrainState, sim_time_ms: int) -> None:
+        plan = train._turnback_plan
+        index = train.turnback_phase_index
+        if plan is None or index is None:
+            train.interlocking_hold_reason = "TURNBACK_STATE_MISSING"
+            return
+        train.speed_mps = 0.0
+        train.traction_percent = 0.0
+        train.brake_percent = 20.0
+        train.target_speed_mps = 0.0
+        train.segment_progress = 1.0
+        train.path_position_m = train._path_plan.total_length_m if train._path_plan else 0.0
+        self._update_train_path_context(train)
+        completed_phase = plan.phases[index]
+        train._terminal_arrival_release_route_ids = completed_phase.route_ids
+
+        next_index = index + 1
+        if next_index < len(plan.phases):
+            train.turnback_phase_index = next_index
+            train._turnback_authorized_route_count = 0
+            train.turnback_state = "CHANGING_ENDS"
+            train.phase = DWELLING
+            train.dwell_remaining_sec = max(5.0, self.clock.tick_seconds)
+            train.door_state = "CLOSED"
+            train.door_notice = "CLOSED"
+            train.door_side = "NONE"
+            train.current_platform_id = None
+            train.departure_authorized = False
+            train._profile_triggered = False
+            self._ato_for_train(train.train_id).reset()
+            return
+
+        self._finish_terminal_turnback(train, plan, sim_time_ms)
+
+    def _finish_terminal_turnback(
+        self,
+        train: SimTrainState,
+        plan: TurnbackPlan,
+        sim_time_ms: int,
+    ) -> None:
         train.turnback_count += 1
         train.direction = "DOWN" if train.direction == "UP" else "UP"
+        train.turnback_state = "COMPLETED"
+        train.turnback_phase_index = None
+        train._turnback_plan = None
+        train._turnback_authorized_route_count = 0
+        train._planned_route_ids = ()
+        train._path_origin_station_index = None
+        train._path_destination_station_index = None
+        train.current_platform_id = plan.final_platform_id
+        self._anchor_train_at_platform(train, plan.final_platform_id)
+        train.phase = DWELLING
+        train.departure_authorized = False
+        train.interlocking_hold_reason = None
+        next_idx = train.station_index + (1 if train.direction == "UP" else -1)
+        if 0 <= next_idx < len(self._station_list):
+            next_station = self._station_list[next_idx]
+            train.next_station_code = str(next_station.get("code", ""))
+            train.next_station_name = str(next_station.get("name", ""))
         self._pending_dispatch_decisions.append(
             DispatchDecision(
                 decision_id=f"TURNBACK-{train.train_id}-{train.turnback_count}",
-                sim_time_ms=self._absolute_sim_time_ms(),
+                sim_time_ms=sim_time_ms,
                 train_id=train.train_id,
                 station_id=train.current_station_code,
                 action="TURNBACK",
@@ -2108,20 +2410,7 @@ class SimulationEngine:
                 applied=True,
             )
         )
-        train.phase = DWELLING
-        train.speed_mps = 0.0
-        train.traction_percent = 0.0
-        train.brake_percent = 20.0
-        train.target_speed_mps = 0.0
-        train.segment_progress = 0.0
-        train.path_position_m = 0.0
-        train.path_total_length_m = 0.0
-        train._path_plan = None
-        train._planned_route_ids = ()
-        train._path_origin_station_index = None
-        train._path_destination_station_index = None
-        train._profile_triggered = False
-        self._anchor_train_at_current_platform(train)
+        self._begin_station_stop(train)
 
     def _ato_for_train(self, train_id: str) -> ATOController:
         controller = self._ato_by_train.get(train_id)
@@ -2156,17 +2445,30 @@ class SimulationEngine:
         if route_plan is None:
             return None
         path_plan = route_plan.path_plan
+        start_position_m = 0.0
+        if (
+            train.turnback_state == "COMPLETED"
+            and train._path_plan is not None
+            and train._path_plan.direction != path_plan.direction
+        ):
+            try:
+                start_position_m = self._turnback_reversal_position(train, path_plan)
+            except ValueError as exc:
+                train.interlocking_hold_reason = str(exc)
+                return None
 
         train._path_plan = path_plan
-        train.current_platform_id = int(path_plan.origin_platform_id)
+        train.current_platform_id = (
+            int(path_plan.origin_platform_id) if start_position_m <= 1e-9 else None
+        )
         train._planned_route_ids = route_plan.route_ids
         train._path_origin_station_index = train.station_index
         train._path_destination_station_index = next_idx
         self._activate_train_track_trace(train, path_plan)
-        train.path_position_m = 0.0
+        train.path_position_m = start_position_m
         train.path_total_length_m = path_plan.total_length_m
         train.target_distance_m = path_plan.total_length_m
-        train.distance_to_next_m = path_plan.total_length_m
+        train.distance_to_next_m = max(0.0, path_plan.total_length_m - start_position_m)
         train.path_segment_count = len(path_plan.segment_ids)
         train.path_constraint_count = len(path_plan.constraints)
         train._profile_triggered = False
@@ -2174,6 +2476,7 @@ class SimulationEngine:
         self._dcdp_curve_meta.pop(train.train_id, None)
         self._profile_run_times.pop(train.train_id, None)
         self._ato_for_train(train.train_id).reset()
+        train.turnback_state = None
         self._update_train_path_context(train)
         return path_plan
 
@@ -2900,7 +3203,7 @@ class SimulationEngine:
                     offset_m=max(0.0, offset_m),
                     position_m=max(0.0, train.head_mileage_m),
                     speed_mps=max(0.0, train.speed_mps),
-                    direction="FORWARD" if train.direction == "UP" else "BACKWARD",
+                    direction=self._physical_train_direction(train),
                     operation_mode=train.operation_mode,
                     run_phase=train.phase,
                     length_m=train.train_length_m,
@@ -2909,6 +3212,13 @@ class SimulationEngine:
                 )
             )
         return states
+
+    @staticmethod
+    def _physical_train_direction(train: SimTrainState) -> str:
+        """Return the direction of the active movement leg, not service order."""
+        if train._path_plan is not None:
+            return "FORWARD" if train._path_plan.direction == "forward" else "BACKWARD"
+        return "FORWARD" if train.direction == "UP" else "BACKWARD"
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  蹇収鏋勫缓
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?

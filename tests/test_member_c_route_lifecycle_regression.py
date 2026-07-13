@@ -353,6 +353,43 @@ class TerminalTurnbackRegressionTests(unittest.TestCase):
             "the first TurnbackPlan phase must be published as movement authority",
         )
 
+    def test_gongzhuzhuang_turnback_runs_both_phases_and_releases_final_route(self) -> None:
+        engine, train = self._terminal_train(GGZ_INDEX, "DOWN")
+        engine._speed_multiplier = 10
+        engine._turn_train_at_terminal(train)
+        train._passenger_service_pending = False
+        train.door_state = "CLOSED"
+        train.door_notice = "CLOSED"
+        train.dwell_remaining_sec = 0.0
+        train.phase = "DWELLING"
+
+        visited_phases: set[int] = set()
+        for tick in range(1_000):
+            sim_time_ms = tick * 250
+            engine.interlocking_runtime.update(engine._interlocking_train_states(sim_time_ms))
+            _, prepared = engine._prepare_train_step(train, sim_time_ms)
+            if prepared is not None:
+                engine._apply_prepared_train_step(prepared, None, sim_time_ms)
+            engine.interlocking_runtime.update(engine._interlocking_train_states(sim_time_ms))
+            if train.turnback_phase_index is not None:
+                visited_phases.add(train.turnback_phase_index)
+            if train.turnback_state == "COMPLETED":
+                break
+
+        self.assertEqual(visited_phases, {0, 1})
+        self.assertEqual(train.turnback_state, "COMPLETED")
+        self.assertEqual(train.direction, "UP")
+        self.assertEqual(train.current_platform_id, 2)
+        self.assertEqual(train.current_segment_id, 39)
+
+        # The next CI scan applies the guarded terminal-arrival release for
+        # the final route before ordinary service planning resumes.
+        sim_time_ms = (tick + 1) * 250
+        engine.interlocking_runtime.update(engine._interlocking_train_states(sim_time_ms))
+        engine._prepare_train_step(train, sim_time_ms)
+        self.assertFalse({"10", "13", "12"} & set(engine.route_service.locked_routes()))
+        self.assertEqual(train.active_route_ids, ())
+
 
 if __name__ == "__main__":
     unittest.main()

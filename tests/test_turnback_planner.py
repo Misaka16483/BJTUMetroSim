@@ -115,6 +115,12 @@ class TerminalTurnbackTests(unittest.TestCase):
             ("backward", ("13", "12")),
         ])
         self.assertEqual(ggz.phases[0].segment_ids[-1], ggz.phases[1].segment_ids[0])
+        self.assertEqual(ggz.phases[0].path_plan.segment_ids, ggz.phases[0].segment_ids)
+        self.assertEqual(ggz.phases[1].path_plan.segment_ids, ggz.phases[1].segment_ids)
+        self.assertEqual(ggz.phases[0].path_plan.destination_platform_id, -1)
+        self.assertEqual(ggz.phases[1].path_plan.origin_platform_id, -1)
+        self.assertGreater(ggz.phases[0].path_plan.total_length_m, 0.0)
+        self.assertGreater(ggz.phases[1].path_plan.total_length_m, 0.0)
         self.assertEqual(ggz.phases[1].signal_ids, ((11, 10), (10, 57)))
         self.assertEqual(ggz.phases[0].route_switch_positions, (("10", (("12", "NORMAL"), ("8", "NORMAL"), ("9", "NORMAL"))),))
         self.assertEqual(ggz.phases[1].route_switch_positions, (
