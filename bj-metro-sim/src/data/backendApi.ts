@@ -777,8 +777,11 @@ export interface DriverCabDisplayStatus {
   host: string;
   port: number;
   framesSent: number;
+  framesReceived: number;
+  bytesReceived: number;
   connectedAt: string | null;
   lastFrameAt: string | null;
+  lastReceivedAt: string | null;
   lastError: string | null;
 }
 

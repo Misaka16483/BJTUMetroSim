@@ -15,7 +15,11 @@ from app.adapters.cab.mitsubishi_plc import (
     MitsubishiPlcCabOutputState,
     MitsubishiPlcTcpClient,
 )
-from app.adapters.hmi import NetworkScreenFrameBuilder, NetworkScreenState
+from app.adapters.hmi import (
+    NetworkScreenFrameBuilder,
+    NetworkScreenState,
+    TractionCutoffRequestParser,
+)
 from app.adapters.mmi import SignalScreenFrameBuilder, SignalScreenState
 from app.domain.control import CabControlService
 
@@ -54,8 +58,11 @@ def _utc_now_iso() -> str:
 class _DisplayEndpointRuntime:
     state: str = "DISCONNECTED"
     frames_sent: int = 0
+    frames_received: int = 0
+    bytes_received: int = 0
     connected_at: str | None = None
     last_frame_at: str | None = None
+    last_received_at: str | None = None
     last_error: str | None = None
 
     def to_dict(self, host: str, port: int) -> dict[str, Any]:
@@ -64,8 +71,11 @@ class _DisplayEndpointRuntime:
             "host": host,
             "port": port,
             "framesSent": self.frames_sent,
+            "framesReceived": self.frames_received,
+            "bytesReceived": self.bytes_received,
             "connectedAt": self.connected_at,
             "lastFrameAt": self.last_frame_at,
+            "lastReceivedAt": self.last_received_at,
             "lastError": self.last_error,
         }
 
@@ -155,6 +165,7 @@ class DriverCabHardwareController:
         self._control_service = CabControlService()
         self._network_screen_builder = NetworkScreenFrameBuilder()
         self._signal_screen_builder = SignalScreenFrameBuilder()
+        self._traction_cutoff_request_parser = TractionCutoffRequestParser()
         self._plc_output_builder = MitsubishiPlcCabOutputFrameBuilder()
         self._lock = threading.RLock()
         self._connection_log = ConnectionEventLog()
@@ -564,7 +575,12 @@ class DriverCabHardwareController:
                     )
                 previous_speed: float | None = None
                 previous_sample_at: float | None = None
+                receive_buffer = bytearray()
                 while not stop_event.is_set():
+                    incoming = client.receive_available()
+                    if incoming:
+                        receive_buffer.extend(incoming)
+                        self._consume_display_frames(endpoint, runtime, receive_buffer, len(incoming))
                     train = self._display_train_snapshot()
                     sample_at = time.monotonic()
                     speed_mps = float(train.get("speedMps", 0.0))
@@ -611,6 +627,48 @@ class DriverCabHardwareController:
                 break
         with self._lock:
             runtime.state = "DISCONNECTED"
+
+    def _consume_display_frames(
+        self,
+        endpoint: str,
+        runtime: _DisplayEndpointRuntime,
+        buffer: bytearray,
+        received_bytes: int,
+    ) -> None:
+        with self._lock:
+            runtime.bytes_received += received_bytes
+            runtime.last_received_at = _utc_now_iso()
+        while len(buffer) >= 8:
+            if buffer[:4] != b"\x55\xaa\x55\xaa":
+                next_header = buffer.find(b"\x55\xaa\x55\xaa", 1)
+                if next_header < 0:
+                    del buffer[:-3]
+                    return
+                del buffer[:next_header]
+                if len(buffer) < 8:
+                    return
+            frame_size = (
+                self._signal_screen_builder.frame_size_bytes
+                if endpoint == "signalScreen"
+                else int.from_bytes(buffer[4:6], "little")
+            )
+            if frame_size < 8 or frame_size > 4096:
+                del buffer[0]
+                continue
+            if len(buffer) < frame_size:
+                return
+            frame = bytes(buffer[:frame_size])
+            del buffer[:frame_size]
+            with self._lock:
+                runtime.frames_received += 1
+            if endpoint == "networkScreen" and frame_size == 26:
+                request = self._traction_cutoff_request_parser.parse(frame)
+                self._log(
+                    endpoint,
+                    "TRACTION_CUTOFF_REQUEST",
+                    "HMI 网络屏收到牵引切除请求",
+                    details={"requestedCars": request.requested_car_numbers},
+                )
 
     def _display_runtime(self, endpoint: str) -> _DisplayEndpointRuntime:
         if endpoint == "networkScreen":
@@ -675,7 +733,8 @@ class DriverCabHardwareController:
                 curr_station_id=common["current_station_id"],
                 next_station_id=common["next_station_id"],
                 end_station_id=common["end_station_id"],
-                speed_mps=common["speed_mps"],
+                run_dir=0 if common["direction"] == "UP" else 1,
+                speed_kmh=common["speed_mps"] * 3.6,
                 acceleration_mps2=acceleration_mps2,
                 speed_limit=common["speed_limit_kmh"],
                 mode=1 if common["operation_mode"] == "ATO" else 3,

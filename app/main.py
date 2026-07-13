@@ -248,7 +248,8 @@ def mmi_send_demo(args: argparse.Namespace) -> None:
         curr_station_id=args.curr_station,
         next_station_id=args.next_station,
         end_station_id=args.end_station,
-        speed_mps=args.speed_mps,
+        run_dir=args.run_dir,
+        speed_kmh=args.speed_mps * 3.6,
         acceleration_mps2=args.acceleration,
         speed_limit=args.speed_limit,
         mode=args.mode,
@@ -798,7 +799,7 @@ def build_parser() -> argparse.ArgumentParser:
     plc_send_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
     plc_send_parser.set_defaults(func=plc_cab_send_status)
 
-    hmi_parser = subparsers.add_parser("hmi-send-demo", help="Send one 572-byte network screen HMI frame")
+    hmi_parser = subparsers.add_parser("hmi-send-demo", help="Send one 570-byte network screen HMI frame")
     hmi_parser.add_argument("--host", default="192.168.100.122", help="HMI server IP address")
     hmi_parser.add_argument("--port", type=int, default=8888, help="HMI server TCP port")
     hmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
@@ -814,13 +815,14 @@ def build_parser() -> argparse.ArgumentParser:
     hmi_parser.add_argument("--dry-run", action="store_true", help="Print frame summary instead of connecting")
     hmi_parser.set_defaults(func=hmi_send_demo)
 
-    mmi_parser = subparsers.add_parser("mmi-send-demo", help="Send one 66-byte signal screen MMI frame")
+    mmi_parser = subparsers.add_parser("mmi-send-demo", help="Send one 68-byte signal screen MMI frame")
     mmi_parser.add_argument("--host", default="192.168.100.121", help="MMI server IP address")
     mmi_parser.add_argument("--port", type=int, default=9999, help="MMI server TCP port")
     mmi_parser.add_argument("--timeout", type=float, default=3.0, help="TCP connect/write timeout in seconds")
     mmi_parser.add_argument("--curr-station", type=int, default=0, help="Current station id")
     mmi_parser.add_argument("--next-station", type=int, default=0, help="Next station id")
     mmi_parser.add_argument("--end-station", type=int, default=0, help="End station id")
+    mmi_parser.add_argument("--run-dir", type=int, default=0, help="Run direction: 0 up, 1 down")
     mmi_parser.add_argument("--speed-mps", type=float, default=0.0, help="Speed in m/s")
     mmi_parser.add_argument("--acceleration", type=float, default=0.0, help="Acceleration in m/s^2")
     mmi_parser.add_argument("--speed-limit", type=int, default=0, help="Speed limit")

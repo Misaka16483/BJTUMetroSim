@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import select
 import socket
 import struct
 from dataclasses import dataclass
@@ -139,6 +140,25 @@ class TcpFrameClient:
         if self._socket is None:
             raise RuntimeError("TCP client is not connected")
         self._socket.sendall(frame)
+
+    def receive_available(self, max_bytes: int = 65536) -> bytes:
+        """Read all bytes currently waiting without blocking the send loop."""
+        if self._socket is None:
+            raise RuntimeError("TCP client is not connected")
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        chunks: list[bytes] = []
+        remaining = max_bytes
+        while remaining > 0:
+            readable, _, _ = select.select([self._socket], [], [], 0)
+            if not readable:
+                break
+            chunk = self._socket.recv(min(4096, remaining))
+            if not chunk:
+                raise ConnectionError("TCP peer closed the connection")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
 
 def _padded(values: list[T], count: int, default: T) -> list[T]:

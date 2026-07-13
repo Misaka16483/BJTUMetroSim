@@ -57,12 +57,19 @@ class _RecordingDisplayClient:
     def __init__(self, connected: threading.Event, frames: list[bytes]) -> None:
         self.connected = connected
         self.frames = frames
+        self.responses = bytearray()
 
     def connect(self) -> None:
         self.connected.set()
 
     def send_frame(self, frame: bytes) -> None:
         self.frames.append(frame)
+        self.responses.extend(frame)
+
+    def receive_available(self, max_bytes: int = 65536) -> bytes:
+        response = bytes(self.responses[:max_bytes])
+        del self.responses[:max_bytes]
+        return response
 
     def close(self) -> None:
         pass
@@ -363,8 +370,12 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertEqual(status["signalScreen"]["state"], "CONNECTED")
         self.assertGreaterEqual(status["networkScreen"]["framesSent"], 2)
         self.assertGreaterEqual(status["signalScreen"]["framesSent"], 2)
-        self.assertEqual(len(display_factory.frames[8888][0]), 572)
-        self.assertEqual(len(display_factory.frames[9999][0]), 66)
+        self.assertGreaterEqual(status["networkScreen"]["framesReceived"], 1)
+        self.assertGreaterEqual(status["signalScreen"]["framesReceived"], 1)
+        self.assertGreater(status["networkScreen"]["bytesReceived"], 0)
+        self.assertGreater(status["signalScreen"]["bytesReceived"], 0)
+        self.assertEqual(len(display_factory.frames[8888][0]), 570)
+        self.assertEqual(len(display_factory.frames[9999][0]), 68)
         self.assertEqual(display_factory.frames[8888][0][36:39], bytes((1, 2, 13)))
         self.assertEqual(display_factory.frames[9999][0][36:39], bytes((1, 2, 13)))
 
@@ -394,10 +405,11 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertAlmostEqual(struct.unpack_from("<f", hmi_frame, 44)[0], 0.75)
         self.assertEqual(int.from_bytes(hmi_frame[52:54], "little"), 80)
         self.assertEqual(hmi_frame[54], 1)
-        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 42)[0], 12.5)
-        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 62)[0], 321.5)
-        self.assertEqual(mmi_frame[54], 1)
-        self.assertEqual(mmi_frame[55], 1)
+        self.assertEqual(mmi_frame[42], 0)
+        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 44)[0], 45.0)
+        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 64)[0], 321.5)
+        self.assertEqual(mmi_frame[56], 1)
+        self.assertEqual(mmi_frame[57], 1)
 
     def test_each_hardware_endpoint_can_disconnect_and_reconnect_independently(self) -> None:
         plc_connected = threading.Event()

@@ -44,8 +44,11 @@ const EMPTY_STATUS: DriverCabHardwareStatus = {
     host: '192.168.100.122',
     port: 8888,
     framesSent: 0,
+    framesReceived: 0,
+    bytesReceived: 0,
     connectedAt: null,
     lastFrameAt: null,
+    lastReceivedAt: null,
     lastError: null,
   },
   signalScreen: {
@@ -53,8 +56,11 @@ const EMPTY_STATUS: DriverCabHardwareStatus = {
     host: '192.168.100.121',
     port: 9999,
     framesSent: 0,
+    framesReceived: 0,
+    bytesReceived: 0,
     connectedAt: null,
     lastFrameAt: null,
+    lastReceivedAt: null,
     lastError: null,
   },
   logs: [],
@@ -680,6 +686,7 @@ export default function DriverCabConnectionButton() {
                 frames={status.networkScreen.framesSent}
                 frameDirection="TX"
                 lastFrameAt={status.networkScreen.lastFrameAt}
+                telemetryNote={`RX ${status.networkScreen.framesReceived.toLocaleString()} 帧 · ${formatFrameTime(status.networkScreen.lastReceivedAt)}`}
                 lastError={status.networkScreen.lastError}
                 busy={busyAction !== null}
                 logSelected={logFilter === 'networkScreen'}
@@ -699,6 +706,7 @@ export default function DriverCabConnectionButton() {
                 frames={status.signalScreen.framesSent}
                 frameDirection="TX"
                 lastFrameAt={status.signalScreen.lastFrameAt}
+                telemetryNote={`RX ${status.signalScreen.framesReceived.toLocaleString()} 帧 · ${formatFrameTime(status.signalScreen.lastReceivedAt)}`}
                 lastError={status.signalScreen.lastError}
                 busy={busyAction !== null}
                 logSelected={logFilter === 'signalScreen'}
