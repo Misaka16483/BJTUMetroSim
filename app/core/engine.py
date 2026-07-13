@@ -147,6 +147,7 @@ class SimTrainState:
     departure_authorized: bool = False
     interlocking_hold_reason: str | None = None
     active_route_ids: tuple[str, ...] = ()
+    route_retry_at_ms: int | None = None
     turnback_count: int = 0
     turnback_state: str | None = None
     turnback_phase_index: int | None = None
@@ -251,6 +252,7 @@ class SimTrainState:
             "interlockingHoldReason": self.interlocking_hold_reason,
             "activeRouteIds": list(self.active_route_ids),
             "routeChainIds": list(self.active_route_ids),
+            "routeRetryAtMs": self.route_retry_at_ms,
             "turnbackCount": self.turnback_count,
             "turnbackState": self.turnback_state,
             "turnbackPhaseIndex": self.turnback_phase_index,
@@ -307,6 +309,7 @@ class SimulationEngine:
 
     # 鈹€鈹€ 閫熷害鏇茬嚎鍙傛暟 鈹€鈹€
     CRUISE_SPEED_MPS = 22.22  # 80 km/h 宸¤埅
+    ROUTE_REQUEST_RETRY_MS = 1_000
 
     def __init__(
         self,
@@ -1145,7 +1148,7 @@ class SimulationEngine:
         # CI scan before control: refresh real head/tail occupation and keep a
         # train at the platform until its interval authority is available.
         self.interlocking_runtime.update(self._interlocking_train_states(sim_time_ms))
-        self._authorize_ready_departures()
+        self._authorize_ready_departures(sim_time_ms)
 
         # 2a) KPI: 记录各列车满载率
         for train in self.trains:
@@ -1443,7 +1446,10 @@ class SimulationEngine:
         path_position_m: float,
         vehicle_config: VehicleConfig,
     ):
-        route_ids = tuple(train.active_route_ids)
+        # MA needs the complete planned chain so an unlocked next route forms
+        # a real boundary. Passing only active_route_ids would make a partial
+        # prefix look complete and incorrectly authorize the station stop.
+        route_ids = tuple(train._planned_route_ids)
         if not route_ids:
             train.movement_authority_end_m = path_position_m
             train.movement_authority_reason = "NO_ROUTE_AUTHORITY"
@@ -1519,6 +1525,9 @@ class SimulationEngine:
                     self.clock.tick_seconds,
                 )
             return True, None
+
+        if turnback_phase is None:
+            self._extend_interval_authority(train, path_plan, sim_time_ms)
 
         dt = self.clock.tick_seconds
         if train.phase in (DWELLING, IDLE):
@@ -3130,11 +3139,92 @@ class SimulationEngine:
             decisions.append(decision)
         return decisions
 
-    def _authorize_ready_departures(self) -> None:
+    def _continuous_locked_route_prefix(
+        self,
+        train: SimTrainState,
+        path_plan: PathPlan,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Return remaining planned routes and their owner-continuous prefix."""
+        remaining = self.movement_authority.remaining_route_ids(
+            path_plan,
+            train._planned_route_ids,
+            train.path_position_m,
+        )
+        locked: list[str] = []
+        for route_id in remaining:
+            if self.route_service.locked_by(route_id) != train.train_id:
+                break
+            locked.append(route_id)
+        return remaining, tuple(locked)
+
+    def _extend_interval_authority(
+        self,
+        train: SimTrainState,
+        path_plan: PathPlan,
+        sim_time_ms: int,
+    ) -> None:
+        """Pre-request one additional route without invalidating usable MA."""
+        if not train._planned_route_ids:
+            return
+        if not train.departure_authorized and not train.active_route_ids:
+            return
+        remaining, locked_prefix = self._continuous_locked_route_prefix(train, path_plan)
+        train.active_route_ids = locked_prefix
+        if not remaining or len(locked_prefix) >= len(remaining):
+            train.route_retry_at_ms = None
+            return
+        if train.route_retry_at_ms is not None and sim_time_ms < train.route_retry_at_ms:
+            return
+
+        requested_routes = remaining[: len(locked_prefix) + 1]
+        authority = self.interlocking_runtime.request_departure(
+            train.train_id,
+            path_plan,
+            requested_routes,
+        )
+        train.route_retry_at_ms = sim_time_ms + self.ROUTE_REQUEST_RETRY_MS
+        if authority.granted:
+            train.active_route_ids = authority.route_ids
+            train.departure_authorized = True
+            train.interlocking_hold_reason = None
+            return
+
+        # Preserve the routes that remain locked. MA and ATP will stop at the
+        # end of that continuous prefix while this method retries the next one.
+        _, retained_prefix = self._continuous_locked_route_prefix(train, path_plan)
+        train.active_route_ids = retained_prefix
+        train.departure_authorized = bool(retained_prefix)
+        reason = authority.failure_reason or "ROUTE_NOT_LOCKABLE"
+        train.interlocking_hold_reason = (
+            f"NEXT_ROUTE_PENDING:{reason}" if retained_prefix else reason
+        )
+
+    def _authorize_ready_departures(self, sim_time_ms: int) -> None:
         """Apply CI authority at the dwell/departure boundary without owning dwell logic."""
         station_count = len(self._station_list)
         for train in self.trains:
             if train.phase != DWELLING or train.dwell_remaining_sec > self.clock.tick_seconds:
+                continue
+            if train.departure_authorized and train.active_route_ids:
+                continue
+            front_headway_sec, _ = self.dispatch_runtime.headways_for(
+                train.train_id,
+                train.station_index,
+                train.direction,
+                self.clock.sim_time_seconds,
+            )
+            if (
+                front_headway_sec is not None
+                and front_headway_sec < self.dispatch_service.config.min_headway_sec
+            ):
+                # ATS owns the operational headway.  CI may already consider
+                # the first route safe after the leading train clears it, but
+                # that must not silently weaken the configured service gap.
+                train.departure_authorized = False
+                train.dwell_remaining_sec = max(
+                    train.dwell_remaining_sec,
+                    self.clock.tick_seconds,
+                )
                 continue
             next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
             if next_idx < 0 or next_idx >= station_count:
@@ -3154,12 +3244,19 @@ class SimulationEngine:
                 train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
                 continue
             self._update_train_path_context(train)
+            if train.route_retry_at_ms is not None and sim_time_ms < train.route_retry_at_ms:
+                train.dwell_remaining_sec = max(
+                    train.dwell_remaining_sec,
+                    self.clock.tick_seconds,
+                )
+                continue
             authority = self.interlocking_runtime.request_departure(
-                train.train_id, path_plan, route_chain_ids,
+                train.train_id, path_plan, route_chain_ids[:1],
             )
+            train.route_retry_at_ms = sim_time_ms + self.ROUTE_REQUEST_RETRY_MS
             train.departure_authorized = authority.granted
             train.interlocking_hold_reason = authority.failure_reason
-            train.active_route_ids = authority.route_ids
+            train.active_route_ids = authority.route_ids if authority.granted else ()
             if not authority.granted:
                 train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
 

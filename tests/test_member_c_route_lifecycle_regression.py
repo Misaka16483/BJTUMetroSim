@@ -84,6 +84,73 @@ class RouteLifecycleTopologyRegressionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.line_map: dict[str, Any] = json.loads(LINE_MAP.read_text(encoding="utf-8"))
 
+    def test_gtg_arrival_route_releases_with_own_train_across_jz184_and_jz185(self) -> None:
+        engine = _load_engine()
+        train_id = "T-GTG-ARRIVAL-RELEASE"
+        result = engine.route_service.request(RouteRequest("REQ-GTG-89", "89", train_id))
+        self.assertTrue(result.accepted)
+
+        # At S220+0 m the 118 m consist still covers S219.  These are GTG's
+        # adjacent terminal detectors JZ185 and JZ184, not evidence that the
+        # train has failed to arrive or that another train occupies route 89.
+        terminal_track = _Track({(220, "backward"): [219]}, (219, 220))
+        terminal_train = TrainState(
+            train_id=train_id,
+            seg_id=220,
+            offset_m=0.0,
+            length_m=118.0,
+            direction="FORWARD",
+            path_track=terminal_track,
+        )
+        engine.section_occupation.update([terminal_train], terminal_track)
+        engine.route_service.update()
+
+        route_state = next(
+            item for item in engine.route_service.snapshot() if item["routeId"] == "89"
+        )
+        self.assertEqual(route_state["lockedSections"], ["184", "185"])
+        self.assertEqual(route_state["lockedSwitches"], {})
+        self.assertTrue(engine.route_service.release_terminal_arrival("89", train_id))
+        self.assertFalse(engine.route_service.is_locked("89"))
+
+        # Ending the old arrival route must never falsify detector occupancy.
+        self.assertEqual(engine.section_occupation.axle_occupied_by("184"), [train_id])
+        self.assertEqual(engine.section_occupation.axle_occupied_by("185"), [train_id])
+
+    def test_gtg_multisection_terminal_release_rejects_foreign_occupation(self) -> None:
+        engine = _load_engine()
+        train_id = "T-GTG-ARRIVAL-OWNER"
+        other_train_id = "T-GTG-FOREIGN"
+        result = engine.route_service.request(RouteRequest("REQ-GTG-89", "89", train_id))
+        self.assertTrue(result.accepted)
+
+        terminal_track = _Track({(220, "backward"): [219]}, (219, 220))
+        engine.section_occupation.update(
+            [
+                TrainState(
+                    train_id=train_id,
+                    seg_id=220,
+                    offset_m=0.0,
+                    length_m=118.0,
+                    direction="FORWARD",
+                    path_track=terminal_track,
+                ),
+                TrainState(
+                    train_id=other_train_id,
+                    seg_id=219,
+                    offset_m=50.0,
+                    length_m=10.0,
+                    direction="FORWARD",
+                    path_track=terminal_track,
+                ),
+            ],
+            terminal_track,
+        )
+        engine.route_service.update()
+
+        self.assertFalse(engine.route_service.release_terminal_arrival("89", train_id))
+        self.assertTrue(engine.route_service.is_locked("89"))
+
     def test_qilizhuang_to_liuliqiaodong_uses_49_50_and_arrives_at_s103(self) -> None:
         engine = _load_engine()
 
@@ -389,6 +456,75 @@ class TerminalTurnbackRegressionTests(unittest.TestCase):
         engine._prepare_train_step(train, sim_time_ms)
         self.assertFalse({"10", "13", "12"} & set(engine.route_service.locked_routes()))
         self.assertEqual(train.active_route_ids, ())
+
+    def test_national_library_arrival_runs_89_then_turns_via_90_and_87(self) -> None:
+        engine, train = self._terminal_train(GTG_INDEX, "UP")
+        engine._anchor_train_at_platform(train, 26)
+        train._path_plan = None
+        train._planned_route_ids = ()
+        train._path_origin_station_index = None
+        train._path_destination_station_index = None
+        train._track_trace = None
+        train._trace_path_start_index = None
+
+        # Reproduce the live terminal boundary: inbound route 89 has been
+        # entered, while the stopped consist still occupies JZ184 and JZ185.
+        result = engine.route_service.request(
+            RouteRequest("REQ-GTG-DYNAMIC-89", "89", train.train_id)
+        )
+        self.assertTrue(result.accepted)
+        terminal_track = _Track({(220, "backward"): [219]}, (219, 220))
+        engine.section_occupation.update(
+            [
+                TrainState(
+                    train_id=train.train_id,
+                    seg_id=220,
+                    offset_m=0.0,
+                    length_m=train.train_length_m,
+                    direction="FORWARD",
+                    path_track=terminal_track,
+                )
+            ],
+            terminal_track,
+        )
+        engine.route_service.update()
+        train._terminal_arrival_release_route_ids = ("89",)
+        engine._plan_terminal_turnback(train)
+        train._passenger_service_pending = False
+        train.door_state = "CLOSED"
+        train.door_notice = "CLOSED"
+        train.dwell_remaining_sec = 0.0
+        train.phase = "DWELLING"
+
+        observed_routes: set[str] = {"89"}
+        self.assertEqual(engine.section_occupation.axle_occupied_by("184"), [train.train_id])
+        self.assertEqual(engine.section_occupation.axle_occupied_by("185"), [train.train_id])
+
+        # The first preparation call consumes the guarded arrival release
+        # before the normal runtime scan replaces the manually staged boundary.
+        _, prepared = engine._prepare_train_step(train, 0)
+        if prepared is not None:
+            engine._apply_prepared_train_step(prepared, None, 0)
+        self.assertFalse(engine.route_service.is_locked("89"))
+
+        for tick in range(1, 3_000):
+            sim_time_ms = tick * 250
+            engine.interlocking_runtime.update(engine._interlocking_train_states(sim_time_ms))
+            observed_routes.update(engine.route_service.locked_routes())
+            _, prepared = engine._prepare_train_step(train, sim_time_ms)
+            if prepared is not None:
+                engine._apply_prepared_train_step(prepared, None, sim_time_ms)
+            engine.interlocking_runtime.update(engine._interlocking_train_states(sim_time_ms))
+            observed_routes.update(engine.route_service.locked_routes())
+            if train.turnback_state == "COMPLETED":
+                break
+
+        self.assertTrue({"89", "90", "87"}.issubset(observed_routes))
+        self.assertNotIn("88", observed_routes)
+        self.assertEqual(train.turnback_state, "COMPLETED")
+        self.assertEqual(train.direction, "DOWN")
+        self.assertEqual(train.current_platform_id, 25)
+        self.assertEqual(train.current_segment_id, 207)
 
 
 if __name__ == "__main__":

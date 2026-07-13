@@ -123,8 +123,14 @@ class InterlockingRuntimeCoordinator:
         path_key = tuple(path_plan.cache_key())
         route_ids = tuple(route_chain_ids) if route_chain_ids is not None else self.routes_for_path(path_plan)
         assigned = self._train_route_ids.get(train_id, ())
+        active = self._active_routes_by_owner()
+        retained_assignment = tuple(
+            route_id for route_id in assigned if active.get(route_id) == train_id
+        )
+        extending_existing_authority = bool(
+            self._train_path_keys.get(train_id) == path_key and retained_assignment
+        )
         if self._train_path_keys.get(train_id) == path_key and assigned:
-            active = self._active_routes_by_owner()
             if assigned == route_ids and all(active.get(route_id) == train_id for route_id in assigned):
                 authority = self._make_authority(train_id, assigned, granted=True)
                 self._last_authorities[train_id] = authority
@@ -154,7 +160,6 @@ class InterlockingRuntimeCoordinator:
             return authority
 
         newly_locked: list[str] = []
-        active = self._active_routes_by_owner()
         for route_id in route_ids:
             if active.get(route_id) == train_id:
                 continue
@@ -183,14 +188,6 @@ class InterlockingRuntimeCoordinator:
             newly_locked.append(route_id)
 
         assigned_routes = tuple(route_ids)
-        self._train_route_ids[train_id] = assigned_routes
-        self._train_path_keys[train_id] = path_key
-        self._interval_reservations[path_key] = {
-            "trainId": train_id,
-            "routeIds": assigned_routes,
-            "sectionIds": frozenset(section_ids),
-            "entered": False,
-        }
         self.signal_resolver.refresh()
         authority = self._make_authority(
             train_id,
@@ -198,20 +195,27 @@ class InterlockingRuntimeCoordinator:
             granted=True,
             authority_mode="INTERLOCKING_ROUTE",
         )
-        if assigned_routes:
-            first_route = self.catalog.get(assigned_routes[0])
+        signal_check_route_id = (
+            newly_locked[0]
+            if newly_locked
+            else (None if extending_existing_authority else assigned_routes[0])
+        ) if assigned_routes else None
+        if signal_check_route_id is not None:
+            first_route = self.catalog.get(signal_check_route_id)
             first_aspect = (
                 authority.signal_aspects.get(str(first_route.start_signal_id))
                 if first_route is not None
                 else "RED"
             )
             if first_aspect == "RED":
-                for route_id in assigned_routes:
+                routes_to_cancel = (
+                    tuple(newly_locked)
+                    if extending_existing_authority
+                    else assigned_routes
+                )
+                for route_id in routes_to_cancel:
                     if self._active_routes_by_owner().get(route_id) == train_id:
                         self.route_service.release(route_id, "CANCEL")
-                self._train_route_ids.pop(train_id, None)
-                self._train_path_keys.pop(train_id, None)
-                self._interval_reservations.pop(path_key, None)
                 authority = DepartureAuthority(
                     train_id=train_id,
                     granted=False,
@@ -220,6 +224,17 @@ class InterlockingRuntimeCoordinator:
                     signal_aspects=authority.signal_aspects,
                     failure_reason="SIGNAL_AT_STOP",
                 )
+                self.signal_resolver.refresh()
+                self._last_authorities[train_id] = authority
+                return authority
+        self._train_route_ids[train_id] = assigned_routes
+        self._train_path_keys[train_id] = path_key
+        self._interval_reservations[path_key] = {
+            "trainId": train_id,
+            "routeIds": assigned_routes,
+            "sectionIds": frozenset(section_ids),
+            "entered": False,
+        }
         self._last_authorities[train_id] = authority
         return authority
 

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from app.core.engine import DWELLING, SimulationEngine
 from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import RuleBasedDispatchService
+from app.domain.interlocking.models import RouteRequest
 from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
 
 
@@ -217,6 +218,85 @@ class InterlockingRuntimeTests(unittest.TestCase):
 
         self.assertFalse(second.granted)
         self.assertEqual(second.failure_reason, "CONFLICT_ROUTE_LOCKED")
+
+    def test_blocked_second_route_does_not_revoke_an_existing_first_route(self) -> None:
+        engine = make_engine()
+        runtime = InterlockingRuntimeCoordinator(engine.line_map, engine.track_query)
+        path = engine._path_plan_for_station_pair(5, 6)
+        self.assertIsNotNone(path)
+        assert path is not None
+
+        self.assertTrue(
+            runtime.route_service.request(
+                RouteRequest("BLOCK-50", "50", "T-BLOCKER")
+            ).accepted
+        )
+        first = runtime.request_departure("T1", path, ("49",))
+        self.assertTrue(first.granted)
+
+        extension = runtime.request_departure("T1", path, ("49", "50"))
+        self.assertFalse(extension.granted)
+        self.assertEqual(runtime.route_service.locked_by("49"), "T1")
+        self.assertEqual(runtime.route_service.locked_by("50"), "T-BLOCKER")
+
+        # A passed signal correctly returns to red.  Extending authority must
+        # validate newly requested route 50, not cancel route 49 behind T1.
+        runtime.route_service._routes["49"].has_entered = True
+        runtime.signal_resolver.refresh()
+        runtime.route_service.release("50", "CANCEL")
+        extension = runtime.request_departure("T1", path, ("49", "50"))
+        self.assertTrue(extension.granted)
+        self.assertEqual(runtime.route_service.locked_by("49"), "T1")
+        self.assertEqual(runtime.route_service.locked_by("50"), "T1")
+
+    def test_engine_departs_on_first_route_and_retries_blocked_second_route(self) -> None:
+        engine = make_engine()
+        self.assertTrue(engine.add_train({
+            "trainId": "T-PROGRESSIVE",
+            "initialStationCode": "QLZ",
+            "initialSegmentId": 98,
+            "direction": "UP",
+        })["ok"])
+        train = engine.trains[0]
+        self.assertEqual(train._planned_route_ids, ("49", "50"))
+        self.assertTrue(
+            engine.route_service.request(
+                RouteRequest("BLOCK-50", "50", "T-BLOCKER")
+            ).accepted
+        )
+        train.dwell_remaining_sec = 0.0
+        train.door_state = "CLOSED"
+        train.door_notice = "CLOSED"
+        train.phase = DWELLING
+
+        engine._authorize_ready_departures(0)
+        self.assertTrue(train.departure_authorized)
+        self.assertEqual(train.active_route_ids, ("49",))
+        authority = engine._movement_authority_for_train(
+            train,
+            train._path_plan,
+            train.path_position_m,
+            engine._make_vehicle_config(train.train_id, train.onboard_pax),
+        )
+        self.assertIsNotNone(authority)
+        self.assertEqual(authority.end_reason, "ROUTE_ENDPOINT")
+        self.assertEqual(authority.locked_route_ids, ("49",))
+        self.assertLess(authority.end_position_m, train._path_plan.total_length_m)
+
+        train.route_retry_at_ms = 0
+        engine._extend_interval_authority(train, train._path_plan, 1_000)
+        self.assertTrue(train.departure_authorized)
+        self.assertEqual(train.active_route_ids, ("49",))
+        self.assertEqual(
+            train.interlocking_hold_reason,
+            "NEXT_ROUTE_PENDING:CONFLICT_ROUTE_LOCKED",
+        )
+
+        engine.route_service.release("50", "CANCEL")
+        train.route_retry_at_ms = 0
+        engine._extend_interval_authority(train, train._path_plan, 2_000)
+        self.assertEqual(train.active_route_ids, ("49", "50"))
+        self.assertIsNone(train.interlocking_hold_reason)
 
     def test_red_start_signal_revokes_departure_authority(self) -> None:
         engine = make_engine()
