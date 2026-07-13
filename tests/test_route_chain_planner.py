@@ -71,6 +71,18 @@ class RouteChainPlannerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "NO_ROUTE_CHAIN"):
             planner.plan_between_platform_sets((1,), (2,), "forward")
 
+    def test_centres_train_head_in_platform_segments_when_length_is_known(self) -> None:
+        line_map = _line_map()
+        planner = RouteChainPlanner(line_map, RouteCatalog(line_map))
+
+        result = planner.plan_between_platform_sets(
+            (1,), (2,), "forward", train_length_m=80.0
+        )
+
+        self.assertAlmostEqual(result.path_plan.start_offset_m, 90.0)
+        self.assertAlmostEqual(result.path_plan.end_offset_m, 90.0)
+        self.assertAlmostEqual(result.path_plan.total_length_m, 200.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,49 @@ class EngineStateContractTests(unittest.TestCase):
         self.assertEqual(engine.trains[0].direction, "DOWN")
         self.assertEqual(engine.trains[0].phase, "DWELLING")
 
+    def test_station_stop_reference_centres_both_directions_in_platform(self) -> None:
+        engine = load_engine(INTERACTIVE_SCENARIO)
+        engine.load()
+        self.assertTrue(engine.add_train({
+            "trainId": "T-UP-STOP", "initialStationCode": "GGZ", "direction": "UP",
+        })["ok"])
+        self.assertTrue(engine.add_train({
+            "trainId": "T-DOWN-STOP", "initialStationCode": "KYL", "direction": "DOWN",
+        })["ok"])
+
+        up, down = engine.trains
+        self.assertEqual(up.current_segment_id, up._path_plan.start_segment_id)
+        self.assertAlmostEqual(up.current_segment_offset_m, 123.5)
+        self.assertAlmostEqual(up.head_mileage_m, 436.5)
+        self.assertAlmostEqual(up.tail_mileage_m, 318.5)
+        self.assertGreaterEqual(up.tail_mileage_m, 313.0)
+        self.assertLessEqual(up.head_mileage_m, 313.0 + 129.0)
+        self.assertAlmostEqual(up._path_plan.start_offset_m, 123.5)
+        self.assertAlmostEqual(up._path_plan.end_offset_m, 123.5)
+
+        self.assertEqual(down.current_segment_id, down._path_plan.start_segment_id)
+        self.assertAlmostEqual(down.current_segment_offset_m, 5.5)
+        self.assertAlmostEqual(down.head_mileage_m, 2448.61 + 5.5)
+        self.assertAlmostEqual(down.tail_mileage_m, 2448.61 + 123.5)
+        self.assertGreaterEqual(down.head_mileage_m, 2448.61)
+        self.assertLessEqual(down.tail_mileage_m, 2448.61 + 129.0)
+        self.assertAlmostEqual(down._path_plan.start_offset_m, 5.5)
+        self.assertAlmostEqual(down._path_plan.end_offset_m, 5.5)
+
+        up_destination_segment = up._path_plan.end_segment_id
+        down_destination_segment = down._path_plan.end_segment_id
+        engine._complete_path_arrival(up, 1, engine._station_list[1], 0)
+        engine._complete_path_arrival(down, 1, engine._station_list[1], 0)
+        engine._train_power_geometry(up, engine._make_vehicle_config(up.train_id))
+        engine._train_power_geometry(down, engine._make_vehicle_config(down.train_id))
+
+        self.assertEqual(up.current_segment_id, up_destination_segment)
+        self.assertAlmostEqual(up.current_segment_offset_m, 123.5)
+        self.assertAlmostEqual(up.head_mileage_m, 1660.52 + 123.5)
+        self.assertEqual(down.current_segment_id, down_destination_segment)
+        self.assertAlmostEqual(down.current_segment_offset_m, 5.5)
+        self.assertAlmostEqual(down.head_mileage_m, 1660.52 + 5.5)
+
     def test_interactive_scenario_starts_empty_without_external_server(self) -> None:
         engine = load_engine(INTERACTIVE_SCENARIO)
         engine.load()

@@ -382,6 +382,7 @@ class PathPlanner:
         destination_platform_id: int,
         segment_ids: list[int],
         direction: str,
+        train_length_m: float | None = None,
     ) -> PathPlan:
         """Build a path plan from a caller-authorized ordered Seg sequence.
 
@@ -409,8 +410,12 @@ class PathPlanner:
             if following not in next_ids:
                 raise ValueError(f"non-contiguous authorized sequence: {current} -> {following}")
 
-        start_offset_m = float(origin.get("offsetM") or 0.0)
-        end_offset_m = float(destination.get("offsetM") or 0.0)
+        start_offset_m = self._platform_stop_offset_m(
+            origin, direction, train_length_m
+        )
+        end_offset_m = self._platform_stop_offset_m(
+            destination, direction, train_length_m
+        )
         portions = self._build_path_portions(segment_ids, start_offset_m, end_offset_m, direction)
         total_length_m = portions[-1].path_end_m if portions else 0.0
         if total_length_m <= 0:
@@ -428,6 +433,28 @@ class PathPlanner:
             end_segment_id=end_segment_id,
             end_offset_m=end_offset_m,
         )
+
+    def _platform_stop_offset_m(
+        self,
+        platform: JsonDict,
+        direction: str,
+        train_length_m: float | None,
+    ) -> float:
+        """Return the head position that centres a train in a platform Seg.
+
+        The source platform table associates a platform with the start of its
+        129 m Seg, rather than providing a stopping-board coordinate.  Without
+        a train length, retain that raw coordinate for compatibility.
+        """
+        raw_offset_m = float(platform.get("offsetM") or 0.0)
+        if train_length_m is None:
+            return raw_offset_m
+        segment_length_m = self._segment_length_m(int(platform["segmentId"]))
+        bounded_length_m = min(max(float(train_length_m), 0.0), segment_length_m)
+        end_clearance_m = (segment_length_m - bounded_length_m) / 2.0
+        if direction == "forward":
+            return end_clearance_m + bounded_length_m
+        return end_clearance_m
 
     def _plan_between_platforms(
         self,

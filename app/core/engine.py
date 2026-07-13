@@ -453,6 +453,12 @@ class SimulationEngine:
         for train in self.trains:
             if train.train_id == train_id:
                 train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
+                train.train_length_m = vcfg.train_length_m
+                if train.phase in {DWELLING, IDLE}:
+                    train._path_plan = None
+                    train._path_origin_station_index = None
+                    train._path_destination_station_index = None
+                    self._anchor_train_at_current_platform(train)
                 self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self._snapshot = self._build_snapshot()
         return vcfg
@@ -599,6 +605,14 @@ class SimulationEngine:
         if initial_load_pax < 0 or initial_load_pax > capacity_pax:
             return {"ok": False, "error": "INVALID_INITIAL_LOAD"}
 
+        vehicle_config: VehicleConfig | None = None
+        vehicle_data = payload.get("vehicleConfig")
+        if vehicle_data and isinstance(vehicle_data, dict):
+            try:
+                vehicle_config = VehicleConfig.from_user_config(train_id, vehicle_data)
+            except (TypeError, ValueError) as exc:
+                return {"ok": False, "error": "INVALID_VEHICLE_CONFIG", "message": str(exc)}
+
         cfg = TrainConfig(
             train_id=train_id,
             line_id=self.scenario.line_id,
@@ -607,7 +621,7 @@ class SimulationEngine:
             capacity_pax=capacity_pax,
             initial_load_pax=initial_load_pax,
         )
-        train = self._create_train(cfg)
+        train = self._create_train(cfg, vehicle_config)
         if initial_platform_id is not None:
             train._initial_platform_id = initial_platform_id
         next_index = station_index + (1 if direction == "UP" else -1)
@@ -624,11 +638,9 @@ class SimulationEngine:
             self._manual_mode_by_train[train_id] = True
 
         # 如有用户车辆参数，应用之
-        vehicle_data = payload.get("vehicleConfig")
-        if vehicle_data and isinstance(vehicle_data, dict):
-            vcfg = VehicleConfig.from_user_config(train_id, vehicle_data)
-            self._vehicle_config_by_train[train_id] = vcfg
-            train.mass_kg = vcfg.mass_kg
+        if vehicle_config is not None:
+            self._vehicle_config_by_train[train_id] = vehicle_config
+            train.mass_kg = vehicle_config.mass_kg
 
         self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self.trains.append(train)
@@ -2017,11 +2029,22 @@ class SimulationEngine:
         next_stn: JsonDict,
         sim_time_ms: int,
     ) -> None:
+        arrival_platform = (
+            self._platform_by_id.get(train._path_plan.destination_platform_id)
+            if train._path_plan is not None
+            else None
+        )
         train.speed_mps = 0.0
         train.segment_progress = 0.0
         train.path_position_m = 0.0
         train.path_total_length_m = 0.0
-        train.current_segment_id = None
+        if arrival_platform is not None:
+            train.current_segment_id = int(arrival_platform["segmentId"])
+            train.current_segment_offset_m = self._platform_head_stop_offset_m(
+                arrival_platform, train.direction, train.train_length_m
+            )
+        else:
+            train.current_segment_id = None
         train.local_speed_limit_mps = train.permitted_speed_mps
         train.grade_ratio = 0.0
         train.path_segment_count = 0
@@ -2055,7 +2078,9 @@ class SimulationEngine:
             new_next_stn = stations[new_next_idx]
             train.next_station_code = str(new_next_stn.get("code", ""))
             train.next_station_name = new_next_stn.get("name", "")
-            next_plan = self._path_plan_for_station_pair(next_idx, new_next_idx)
+            next_plan = self._path_plan_for_station_pair(
+                next_idx, new_next_idx, train_length_m=train.train_length_m
+            )
             if next_plan is not None:
                 train.target_distance_m = next_plan.total_length_m
                 train.distance_to_next_m = next_plan.total_length_m
@@ -2126,7 +2151,12 @@ class SimulationEngine:
             return train._path_plan
 
         initial_platform_id = getattr(train, "_initial_platform_id", None)
-        path_plan = self._path_plan_for_station_pair(train.station_index, next_idx, initial_platform_id)
+        path_plan = self._path_plan_for_station_pair(
+            train.station_index,
+            next_idx,
+            initial_platform_id,
+            train_length_m=train.train_length_m,
+        )
         if path_plan is None:
             return None
 
@@ -2149,7 +2179,13 @@ class SimulationEngine:
         self._update_train_path_context(train)
         return path_plan
 
-    def _path_plan_for_station_pair(self, origin_idx: int, destination_idx: int, origin_platform_id: int | None = None) -> PathPlan | None:
+    def _path_plan_for_station_pair(
+        self,
+        origin_idx: int,
+        destination_idx: int,
+        origin_platform_id: int | None = None,
+        train_length_m: float | None = None,
+    ) -> PathPlan | None:
         origin_platforms = self._station_platform_ids.get(origin_idx, ())
         destination_platforms = self._station_platform_ids.get(destination_idx, ())
         if origin_platform_id is not None:
@@ -2158,9 +2194,17 @@ class SimulationEngine:
             return None
 
         direction = "forward" if destination_idx > origin_idx else "backward"
+        effective_train_length_m = (
+            VehicleConfig().train_length_m
+            if train_length_m is None
+            else max(0.0, float(train_length_m))
+        )
         try:
             return self.route_chain_planner.plan_between_platform_sets(
-                origin_platforms, destination_platforms, direction,
+                origin_platforms,
+                destination_platforms,
+                direction,
+                train_length_m=effective_train_length_m,
             ).path_plan
         except ValueError:
             return None
@@ -2502,33 +2546,53 @@ class SimulationEngine:
         """Scenario convention pending authoritative Line 9 platform-side data."""
         return "LEFT" if direction == "UP" else "RIGHT"
 
-    def _platform_segment_for_direction(self, station_index: int, direction: str) -> tuple[int, float] | None:
-        """Return the platform Seg that matches the train's current service direction."""
+    def _platform_for_direction(self, station_index: int, direction: str) -> JsonDict | None:
         expected_code = "0x55" if direction == "UP" else "0xaa"
         platform_ids = self._station_platform_ids.get(station_index, ())
-        fallback: tuple[int, float] | None = None
+        fallback: JsonDict | None = None
         for platform_id in platform_ids:
             platform = self._platform_by_id.get(int(platform_id))
             if platform is None or platform.get("segmentId") is None:
                 continue
-            candidate = (
-                int(platform["segmentId"]),
-                float(platform.get("offsetM", 0.0)),
-            )
             if fallback is None:
-                fallback = candidate
+                fallback = platform
             if str(platform.get("direction", "")).lower() == expected_code:
-                return candidate
+                return platform
         return fallback
+
+    def _platform_head_stop_offset_m(
+        self,
+        platform: JsonDict,
+        direction: str,
+        train_length_m: float,
+    ) -> float:
+        segment_id = int(platform["segmentId"])
+        segment = self.track_query.segments.get(segment_id, {})
+        segment_length_m = float(segment.get("lengthM", 0.0))
+        if segment_length_m <= 0.0:
+            return float(platform.get("offsetM", 0.0))
+        bounded_length_m = min(max(float(train_length_m), 0.0), segment_length_m)
+        end_clearance_m = (segment_length_m - bounded_length_m) / 2.0
+        return end_clearance_m + bounded_length_m if direction == "UP" else end_clearance_m
 
     def _anchor_train_at_current_platform(self, train: SimTrainState) -> None:
         # Station dwell, turnback, and topology placement all need the same
         # logical head Seg; otherwise MA and occupation are computed from a
         # stale inter-station path segment after arrival.
-        anchor = self._platform_segment_for_direction(train.station_index, train.direction)
-        if anchor is None:
+        platform_id = self._platform_id_by_segment.get(train.current_segment_id)
+        platform = (
+            self._platform_by_id.get(platform_id)
+            if platform_id in self._station_platform_ids.get(train.station_index, ())
+            else None
+        )
+        if platform is None:
+            platform = self._platform_for_direction(train.station_index, train.direction)
+        if platform is None:
             return
-        train.current_segment_id, train.current_segment_offset_m = anchor
+        train.current_segment_id = int(platform["segmentId"])
+        train.current_segment_offset_m = self._platform_head_stop_offset_m(
+            platform, train.direction, train.train_length_m
+        )
 
     def _begin_station_stop(self, train: SimTrainState) -> None:
         train.phase = DWELLING
@@ -2721,7 +2785,10 @@ class SimulationEngine:
             direction = "forward" if train.direction == "UP" else "backward"
             try:
                 route_chain_ids = self.route_chain_planner.plan_between_platform_sets(
-                    origin_platforms, destination_platforms, direction,
+                    origin_platforms,
+                    destination_platforms,
+                    direction,
+                    train_length_m=train.train_length_m,
                 ).route_ids
             except ValueError:
                 train.departure_authorized = False
@@ -2893,7 +2960,11 @@ class SimulationEngine:
                 mapping[index] = tuple(sorted(platforms_by_mileage[nearest_key]))
         return mapping
 
-    def _create_train(self, cfg: TrainConfig) -> SimTrainState:
+    def _create_train(
+        self,
+        cfg: TrainConfig,
+        vehicle_config: VehicleConfig | None = None,
+    ) -> SimTrainState:
         """根据配置初始化一列列车."""
         # 查找起点站序号
         idx = next(
@@ -2910,7 +2981,16 @@ class SimulationEngine:
         dist = abs(
             self._station_distances[next_idx] - self._station_distances[idx]
         )
-        initial_path_plan = self._path_plan_for_station_pair(idx, next_idx) if idx != next_idx else None
+        vehicle = vehicle_config or self._vehicle_config_by_train.get(
+            cfg.train_id, VehicleConfig(train_id=cfg.train_id)
+        )
+        initial_path_plan = (
+            self._path_plan_for_station_pair(
+                idx, next_idx, train_length_m=vehicle.train_length_m
+            )
+            if idx != next_idx
+            else None
+        )
         if initial_path_plan is not None:
             dist = initial_path_plan.total_length_m
 
@@ -2934,6 +3014,7 @@ class SimulationEngine:
             capacity_pax=cfg.capacity_pax,
             load_factor=(cfg.initial_load_pax / cfg.capacity_pax) if cfg.capacity_pax > 0 else 0.0,
             mass_kg=225_000.0 + cfg.initial_load_pax * 65.0,
+            train_length_m=vehicle.train_length_m,
             current_station_name=stn.get("name", ""),
             next_station_name=next_stn.get("name", ""),
             _passenger_service_pending=True,
@@ -2950,7 +3031,8 @@ class SimulationEngine:
             capacity_pax=int(spec.get("capacityPax", 600)),
             initial_load_pax=int(spec.get("initialLoadPax", 0)),
         )
-        train = self._create_train(cfg)
+        vehicle_config = self._vehicle_config_by_train.get(train_id)
+        train = self._create_train(cfg, vehicle_config)
         initial_segment_id = spec.get("initialSegmentId")
         if initial_segment_id is not None:
             try:
@@ -2959,7 +3041,6 @@ class SimulationEngine:
                 train._initial_platform_id = None
         train.operation_mode = str(spec.get("operationMode", "ATO"))
         self._manual_mode_by_train[train_id] = train.operation_mode == "MANUAL"
-        vehicle_config = self._vehicle_config_by_train.get(train_id)
         if vehicle_config is not None:
             train.mass_kg = vehicle_config.mass_kg + cfg.initial_load_pax * 65.0
         return train
@@ -3041,12 +3122,52 @@ class SimulationEngine:
     def _train_mileage_m(self, train: SimTrainState) -> float:
         if not self._station_distances:
             return 0.0
-        current_m = self._station_distances[train.station_index]
+        path_plan = train._path_plan
+        origin_platform_id = path_plan.origin_platform_id if path_plan is not None else None
+        destination_platform_id = (
+            path_plan.destination_platform_id if path_plan is not None else None
+        )
+        if origin_platform_id is None:
+            origin_platform_id = self._platform_id_by_segment.get(train.current_segment_id)
+        current_m = self._station_head_mileage_m(
+            train.station_index,
+            train.direction,
+            train.train_length_m,
+            platform_id=origin_platform_id,
+        )
         next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
         if next_idx < 0 or next_idx >= len(self._station_distances):
             return current_m
-        next_m = self._station_distances[next_idx]
+        next_m = self._station_head_mileage_m(
+            next_idx,
+            train.direction,
+            train.train_length_m,
+            platform_id=destination_platform_id,
+        )
         return current_m + (next_m - current_m) * max(0.0, min(1.0, train.segment_progress))
+
+    def _station_head_mileage_m(
+        self,
+        station_index: int,
+        direction: str,
+        train_length_m: float,
+        platform_id: int | None = None,
+    ) -> float:
+        platform = self._platform_by_id.get(platform_id) if platform_id is not None else None
+        if platform_id not in self._station_platform_ids.get(station_index, ()):
+            platform = None
+        if platform is None:
+            platform = self._platform_for_direction(station_index, direction)
+        if platform is None:
+            return self._station_distances[station_index]
+        raw_offset_m = float(platform.get("offsetM", 0.0))
+        platform_mileage_m = float(
+            platform.get("mileageM", self._station_distances[station_index])
+        )
+        stop_offset_m = self._platform_head_stop_offset_m(
+            platform, direction, train_length_m
+        )
+        return platform_mileage_m + stop_offset_m - raw_offset_m
 
     def _train_power_geometry(
         self,

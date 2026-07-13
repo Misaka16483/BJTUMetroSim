@@ -108,6 +108,7 @@ class RouteChainPlanner:
         origin_platform_ids: tuple[int, ...],
         destination_platform_ids: tuple[int, ...],
         direction: str,
+        train_length_m: float | None = None,
     ) -> RouteChainPlan:
         """Return the policy-selected route-table plan for an adjacent station pair.
 
@@ -139,6 +140,7 @@ class RouteChainPlanner:
                     destination_platform_id,
                     list(candidate.segment_ids),
                     direction,
+                    train_length_m=train_length_m,
                 )
             except ValueError:
                 continue
