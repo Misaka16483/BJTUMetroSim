@@ -26,6 +26,7 @@ from app.domain.dispatch.services import DispatchContext, DispatchDecision, Disp
 from app.domain.dispatch.timetable import HeadwayConfig, TimetableService
 from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
 from app.domain.interlocking.route_chain_planner import RouteChainPlan, RouteChainPlanner
+from app.domain.interlocking.train_track_trace import TrainTrackTrace
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
@@ -152,6 +153,8 @@ class SimTrainState:
     _planned_route_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
     _path_origin_station_index: int | None = field(default=None, repr=False, compare=False)
     _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
+    _track_trace: TrainTrackTrace | None = field(default=None, repr=False, compare=False)
+    _trace_path_start_index: int | None = field(default=None, repr=False, compare=False)
     # 鈹€鈹€ 鎵嬪姩椹鹃┒ per-train 鎸囦护 鈹€鈹€
     _manual_command: ControlCommand | None = field(default=None, repr=False, compare=False)
     _passenger_service_pending: bool = field(default=False, repr=False, compare=False)
@@ -2159,6 +2162,7 @@ class SimulationEngine:
         train._planned_route_ids = route_plan.route_ids
         train._path_origin_station_index = train.station_index
         train._path_destination_station_index = next_idx
+        self._activate_train_track_trace(train, path_plan)
         train.path_position_m = 0.0
         train.path_total_length_m = path_plan.total_length_m
         train.target_distance_m = path_plan.total_length_m
@@ -2375,6 +2379,69 @@ class SimulationEngine:
             ) * ratio
         train.local_speed_limit_mps = path_plan.speed_limit_at(bounded_position_m, train.permitted_speed_mps)
         train.grade_ratio = path_plan.grade_ratio_at(bounded_position_m)
+        if train.current_segment_id is not None:
+            self._sync_train_track_trace_head(train, int(train.current_segment_id))
+
+    def _activate_train_track_trace(
+        self,
+        train: SimTrainState,
+        path_plan: PathPlan,
+    ) -> None:
+        """Attach a new approved path without dropping Segs still under the tail."""
+        new_segments = tuple(int(item) for item in path_plan.segment_ids)
+        if not new_segments:
+            train._track_trace = None
+            train._trace_path_start_index = None
+            return
+
+        trace_direction = "FORWARD" if path_plan.direction == "forward" else "BACKWARD"
+        previous = train._track_trace
+        if previous is None or previous.trace_direction != trace_direction:
+            merged = new_segments
+            path_start_index = 0
+        else:
+            overlap = 0
+            max_overlap = min(len(previous.segment_ids), len(new_segments))
+            for size in range(max_overlap, 0, -1):
+                if previous.segment_ids[-size:] == new_segments[:size]:
+                    overlap = size
+                    break
+            path_start_index = len(previous.segment_ids) - overlap
+            merged = previous.segment_ids + new_segments[overlap:]
+
+        train._trace_path_start_index = path_start_index
+        train._track_trace = TrainTrackTrace(
+            self.track_query,
+            merged,
+            head_index=path_start_index,
+            trace_direction=trace_direction,
+        )
+
+    def _sync_train_track_trace_head(
+        self,
+        train: SimTrainState,
+        segment_id: int,
+    ) -> None:
+        """Move the trace cursor to this occurrence in the active PathPlan."""
+        trace = train._track_trace
+        path_plan = train._path_plan
+        path_start_index = train._trace_path_start_index
+        if trace is None or path_plan is None or path_start_index is None:
+            return
+        matching_path_indexes = [
+            index
+            for index, candidate in enumerate(path_plan.segment_ids)
+            if int(candidate) == int(segment_id)
+        ]
+        if not matching_path_indexes:
+            return
+        # Normal route-table paths do not repeat a Seg. If a future loop does,
+        # select the occurrence nearest the current cursor without guessing a
+        # different topology branch.
+        candidates = [path_start_index + index for index in matching_path_indexes]
+        head_index = min(candidates, key=lambda item: abs(item - trace.head_index))
+        if 0 <= head_index < len(trace.segment_ids):
+            train._track_trace = trace.with_active_head(head_index)
 
 
     def _next_signal_ahead(self, train: SimTrainState, path_plan: PathPlan, path_position_m: float) -> JsonDict | None:
@@ -2587,6 +2654,7 @@ class SimulationEngine:
         train.current_platform_id = int(platform_id)
         train.current_segment_id = int(platform["segmentId"])
         train.current_segment_offset_m = float(platform.get("offsetM", 0.0))
+        self._sync_train_track_trace_head(train, train.current_segment_id)
         return True
 
     def _begin_station_stop(self, train: SimTrainState) -> None:
@@ -2836,6 +2904,7 @@ class SimulationEngine:
                     operation_mode=train.operation_mode,
                     run_phase=train.phase,
                     length_m=train.train_length_m,
+                    path_track=train._track_trace,
                     net_energy_kwh=train.energy_kwh,
                 )
             )

@@ -108,6 +108,8 @@ class InterlockingRuntimeTests(unittest.TestCase):
             self.assertEqual(train.current_platform_id, 14)
             self.assertEqual(train.current_segment_id, 103)
             self.assertEqual(train.current_segment_offset_m, 0.0)
+            self.assertIsNotNone(train._track_trace)
+            self.assertEqual(train._track_trace.head_segment_id, 103)
             self.assertEqual(route_50["lastEnteredSectionId"], "88")
             self.assertIn(route_50["state"], {"LOCKED", "APPROACH_LOCKED"})
 
@@ -118,6 +120,13 @@ class InterlockingRuntimeTests(unittest.TestCase):
             self.assertEqual(train._path_plan.start_segment_id, 103)
             self.assertEqual(train.current_platform_id, 14)
             self.assertEqual(train.current_segment_id, 103)
+            self.assertIn(102, train._track_trace.segment_ids)
+            self.assertIn(104, train._track_trace.segment_ids)
+            self.assertTrue(
+                {102, 103}.issubset(
+                    engine.section_occupation.covered_segments_for(train.train_id)
+                )
+            )
 
             for _ in range(1200):
                 engine._tick()
