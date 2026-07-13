@@ -2510,7 +2510,7 @@ class SimulationEngine:
             sim_time_ms=sim_time_ms,
             station_id=train.current_station_code,
             direction=train.direction,
-            arrivals=self._last_arrivals_by_platform.get((train.current_station_code, train.direction), 0),
+            arrivals=platform._total_arrived_pax,  # 累计进站人数，而非末 tick 的增量
             boarding=train.last_boarding,
             alighting=train.last_alighting,
             waiting=platform.waiting_pax,

@@ -290,17 +290,17 @@ class ReportGenerator:
     ) -> tuple[JsonDict, JsonDict]:
         rows = conn.execute(
             """
-            SELECT station_id,
-                   SUM(arrivals), SUM(boarding), SUM(alighting), SUM(left_behind),
+            SELECT station_id, direction,
+                   MAX(arrivals), SUM(boarding), SUM(alighting), SUM(left_behind),
                    MAX(waiting), MAX(platform_density_pax_per_m2)
-            FROM station_passenger_records WHERE run_id=? GROUP BY station_id
+            FROM station_passenger_records WHERE run_id=? GROUP BY station_id, direction
             """,
             (run_id,),
         ).fetchall()
 
         total_arr = total_board = total_alight = total_left = 0
         station_stats: dict[str, JsonDict] = {}
-        for sid, arr, board, alight, left, wait, dens in rows:
+        for sid, _direction, arr, board, alight, left, wait, dens in rows:
             arr = arr or 0
             board = board or 0
             alight = alight or 0
@@ -309,13 +309,20 @@ class ReportGenerator:
             total_board += board
             total_alight += alight
             total_left += left
-            station_stats[sid] = {
-                "arrivals": arr,
-                "boarding": board,
-                "alighting": alight,
-                "waiting": wait or 0,
-                "density": dens,
-            }
+            if sid not in station_stats:
+                station_stats[sid] = {
+                    "arrivals": 0,
+                    "boarding": 0,
+                    "alighting": 0,
+                    "waiting": 0,
+                    "density": None,
+                }
+            station_stats[sid]["arrivals"] += arr
+            station_stats[sid]["boarding"] += board
+            station_stats[sid]["alighting"] += alight
+            station_stats[sid]["waiting"] = max(station_stats[sid]["waiting"], wait or 0)
+            if dens is not None and (station_stats[sid]["density"] is None or dens > station_stats[sid]["density"]):
+                station_stats[sid]["density"] = dens
 
         peak_station = None
         peak_level = None
@@ -346,22 +353,35 @@ class ReportGenerator:
             "peakCrowdingLevel": peak_level,
         }
 
-        # 进站人数趋势：按仿真时间分桶，每站一列
+        # 进站人数趋势：arrivals 是累计值，按方向求相邻记录差值得到增量，再按站+时间分桶
         max_sim = conn.execute(
             "SELECT MAX(sim_time_ms) FROM station_passenger_records WHERE run_id=?", (run_id,)
         ).fetchone()[0] or 0
         edges = self._time_buckets(start_sim_ms, max_sim, tick_seconds)
         series_rows = conn.execute(
-            "SELECT sim_time_ms, station_id, arrivals FROM station_passenger_records WHERE run_id=? AND arrivals>0",
+            """
+            SELECT sim_time_ms, station_id, direction, arrivals
+            FROM station_passenger_records
+            WHERE run_id=? AND arrivals>0
+            ORDER BY sim_time_ms, station_id, direction, id
+            """,
             (run_id,),
         ).fetchall()
+        last_arrival_by_key: dict[tuple[str, str], int] = {}
         bucket_station: dict[int, dict[str, float]] = {}
-        for sim_ms, sid, arr in series_rows:
+        for sim_ms, sid, direction, arr in series_rows:
+            key = (sid, direction)
+            prev = last_arrival_by_key.get(key, 0)
+            delta = max(0, (arr or 0) - prev)
+            last_arrival_by_key[key] = arr or 0
+            if delta <= 0:
+                continue
             b = self._bucket_index(edges, sim_ms)
             if b < 0:
                 continue
             bucket_station.setdefault(b, {}).setdefault(sid, 0.0)
-            bucket_station[b][sid] += arr or 0
+            bucket_station[b][sid] += delta
+
 
         station_ids = sorted(station_stats.keys())
         arrival_series: list[JsonDict] = []

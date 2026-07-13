@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSimStore } from '../store/useSimStore';
+import type { ReactNode } from 'react';
 
 const START_STEPS = [
   '公共仿真内核与场景',
@@ -109,16 +110,26 @@ export default function SimulationLifecycleControls({ onReportRequested }: Props
   return (
     <div ref={anchorRef} className="relative flex items-center gap-1" style={{ minWidth: 72, minHeight: 32 }}>
       {engineClockState !== 'RUNNING' && engineClockState !== 'PAUSED' ? (
-        <ControlButton onClick={() => run('start')} color="#22c55e" label="▶" title="启动" />
+        <ControlButton onClick={() => run('start')} color="#22c55e" title="启动">
+          <PlayIcon />
+        </ControlButton>
       ) : engineClockState === 'RUNNING' ? (
         <>
-          <ControlButton onClick={pauseBackendSim} color="#eab308" label="⏸" title="暂停" />
-          <ControlButton onClick={() => run('stop')} color="#ef4444" label="⏹" title="停止" />
+          <ControlButton onClick={pauseBackendSim} color="#eab308" title="暂停">
+            <PauseIcon />
+          </ControlButton>
+          <ControlButton onClick={() => run('stop')} color="#ef4444" title="停止">
+            <StopIcon />
+          </ControlButton>
         </>
       ) : (
         <>
-          <ControlButton onClick={resumeBackendSim} color="#22c55e" label="▶" title="恢复" />
-          <ControlButton onClick={() => run('stop')} color="#ef4444" label="⏹" title="停止" />
+          <ControlButton onClick={resumeBackendSim} color="#22c55e" title="恢复">
+            <PlayIcon />
+          </ControlButton>
+          <ControlButton onClick={() => run('stop')} color="#ef4444" title="停止">
+            <StopIcon />
+          </ControlButton>
         </>
       )}
 
@@ -237,11 +248,37 @@ export default function SimulationLifecycleControls({ onReportRequested }: Props
   );
 }
 
-function ControlButton({ onClick, color, label, title }: { onClick: () => void | Promise<void>; color: string; label: string; title: string }) {
+function ControlButton({ onClick, color, title, children }: { onClick: () => void | Promise<void>; color: string; title: string; children: ReactNode }) {
   return (
     <button type="button" onClick={() => { void onClick(); }} title={title} style={{
       width: 30, height: 28, borderRadius: 6, cursor: 'pointer', color,
       background: `${color}14`, border: `1px solid ${color}44`, fontSize: 12,
-    }}>{label}</button>
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>{children}</button>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+      <path d="M2.5 1.5L8 5L2.5 8.5V1.5Z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+      <rect x="2.5" y="1.5" width="2" height="7" rx="0.5" />
+      <rect x="5.5" y="1.5" width="2" height="7" rx="0.5" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+      <rect x="2" y="2" width="6" height="6" rx="1" />
+    </svg>
   );
 }
