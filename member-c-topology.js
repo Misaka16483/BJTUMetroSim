@@ -15,18 +15,23 @@
     try { window.sessionStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(chineseEvents)); } catch (error) { /* session storage is optional */ }
   }
 
+  function applyStartOptions(data) {
+    stationStartBySegment = {};
+    (data.startOptions || []).forEach(function (option) {
+      stationStartBySegment[option.segmentId] = {
+        code: option.stationCode,
+        name: option.stationName,
+        directions: option.directions || []
+      };
+    });
+  }
+
   function loadStationStarts() {
     if (!window.ENGINE_MODE) return;
     fetch(A + '/api/sim/topology-state')
       .then(function (response) { return response.json(); })
       .then(function (data) {
-        (data.startOptions || []).forEach(function (option) {
-          stationStartBySegment[option.segmentId] = {
-            code: option.stationCode,
-            name: option.stationName,
-            directions: option.directions || []
-          };
-        });
+        applyStartOptions(data);
         updateRouteList(document.getElementById('route-filter').value);
       })
       .catch(function (error) { console.error('station start data load failed', error); });
@@ -42,7 +47,13 @@
   function refreshEngineTopology() {
     return fetch(A + '/api/sim/topology-state')
       .then(function (response) { return response.json(); })
-      .then(function (data) { prev = S; S = data; updateRouteList(document.getElementById('route-filter').value); draw(); });
+      .then(function (data) {
+        prev = S;
+        S = data;
+        applyStartOptions(data);
+        updateRouteList(document.getElementById('route-filter').value);
+        draw();
+      });
   }
 
   // The outer React header and this iframe can both start the engine.  Keep one
@@ -89,7 +100,13 @@
 
   function engineStartControls() {
     var start = stationStartBySegment[selectedSegmentId];
-    if (!start) return '<div class="empty-note">主引擎仅允许从站台 Seg 加车；区间 Seg 仅用于查询进路。</div>';
+    if (!start) {
+      var segment = (RD.segments || []).find(function (item) { return item.id === selectedSegmentId; });
+      if (segment && segment.platformIds && segment.platformIds.length) {
+        return '<div class="empty-note">该站台是到达或折返站台，当前没有可向相邻站发车的进路。</div>';
+      }
+      return '<div class="empty-note">主引擎仅允许从站台 Seg 加车；区间 Seg 仅用于查询进路。</div>';
+    }
     var buttons = '';
     if (start.directions.indexOf('UP') >= 0) buttons += '<button onclick="addEngineTrain(\'UP\')">在 ' + start.name + ' 上行加 ATO 车</button>';
     if (start.directions.indexOf('DOWN') >= 0) buttons += '<button onclick="addEngineTrain(\'DOWN\')">在 ' + start.name + ' 下行加 ATO 车</button>';
@@ -520,7 +537,9 @@
         cx.fillText('S' + segment.id, pos.x + pos.w / 2, pos.y + 13);
       }
       if (segment.platformIds && segment.platformIds.length) {
-        cx.fillStyle = 'rgba(143,195,31,0.32)';
+        cx.fillStyle = stationStartBySegment[segment.id]
+          ? 'rgba(143,195,31,0.38)'
+          : 'rgba(143,195,31,0.12)';
         cx.fillRect(pos.x, pos.y - 5, pos.w, 10);
       }
       var sw = switchByFrog[segment.id];
