@@ -18,6 +18,8 @@ uv pip install numpy flask
 
 后端启动后默认监听 `http://127.0.0.1:8000`。
 
+需要连接实验室三维视景控制机时，参见 [`docs/视景系统UDP接入说明.md`](docs/视景系统UDP接入说明.md)。
+
 ## 前端开发服务器
 
 ```bash

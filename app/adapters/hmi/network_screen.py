@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.adapters.binary import (
-    UdpFrameClient,
+    TcpFrameClient,
     read_u8,
     read_u16_le,
     read_u64_le,
@@ -131,7 +131,6 @@ class NetworkScreenState:
     tc6_devs_state: int = 0
     econn_dev_state: int = 0
     econn_dev_state2: int = 0
-    fault_code: int = 0
     train_no: int = 0
 
 
@@ -154,8 +153,14 @@ class TractionCutoffRequest:
 
 
 class NetworkScreenFrameBuilder:
-    frame_size_bytes = 572
-    data_size_bytes = 548
+    """Build the captured 570-byte HMI frame.
+
+    The working wire layout ends with train_no at bytes 568..569 and does not
+    contain the documented fault_code word that would extend it to 572 bytes.
+    """
+
+    frame_size_bytes = 570
+    data_size_bytes = 546
 
     def build(self, state: NetworkScreenState) -> bytes:
         now = datetime.now()
@@ -283,8 +288,7 @@ class NetworkScreenFrameBuilder:
         write_u8(frame, 565, state.tc6_devs_state)
         write_u8(frame, 566, state.econn_dev_state)
         write_u8(frame, 567, state.econn_dev_state2)
-        write_u16_le(frame, 568, state.fault_code)
-        write_u16_le(frame, 570, state.train_no)
+        write_u16_le(frame, 568, state.train_no)
 
 
 class TractionCutoffRequestParser:
@@ -317,5 +321,5 @@ class NetworkScreenClient:
 
     def send_state(self, state: NetworkScreenState) -> None:
         frame = self.builder.build(state)
-        with UdpFrameClient(self.host, self.port, self.timeout_s) as client:
+        with TcpFrameClient(self.host, self.port, self.timeout_s) as client:
             client.send_frame(frame)

@@ -39,9 +39,10 @@ class DepartureAuthority:
 class InterlockingRuntimeCoordinator:
     """Owns one coherent CI runtime and exposes interval departure authority.
 
-    Existing member-C services remain unchanged. This adapter supplies their
-    missing lifecycle semantics: a newly locked route is retained until its
-    train has entered it, and is released only after the train tail clears it.
+    Member C RouteService remains the only owner of route entry and release.
+    This coordinator only translates dispatch requests into route-table locks
+    and keeps short-lived interval reservations so queued departures do not
+    overlap while a preceding train is still occupying the same interval.
     """
 
     def __init__(
@@ -110,53 +111,17 @@ class InterlockingRuntimeCoordinator:
     def update(self, train_states: list[Any]) -> None:
         """Refresh occupation, release tail-cleared routes, and resolve signals."""
         self.section_occupation.update(train_states, self.track_query)
-        for path_key, reservation in list(self._interval_reservations.items()):
-            owner = str(reservation["trainId"])
-            owner_present = any(
-                owner in self.section_occupation.occupied_by(section_id)
-                for section_id in reservation["sectionIds"]
-            )
-            if owner_present:
-                reservation["entered"] = True
-            elif reservation["entered"]:
-                self._interval_reservations.pop(path_key, None)
-        for route in list(self.route_service.snapshot()):
-            route_id = str(route["routeId"])
-            if route.get("state") not in {"LOCKED", "APPROACH_LOCKED"}:
-                continue
-            train_id = str(route.get("trainId") or "")
-            section_ids = [str(item) for item in route.get("lockedSections", [])]
-            owner_present = any(
-                train_id in self.section_occupation.occupied_by(section_id)
-                for section_id in section_ids
-            )
-            if owner_present:
-                self._entered_route_ids.add(route_id)
-            elif route_id in self._entered_route_ids:
-                self.route_service.release(route_id, "AUTO")
-                self._entered_route_ids.discard(route_id)
+        # RouteService is the sole authority for approach locking, entry and
+        # tail-clear release. The coordinator only observes that lifecycle.
+        self.route_service.update()
         self._drop_released_assignments()
+        self._drop_cleared_reservations()
         self.signal_resolver.refresh()
 
-    def request_departure(self, train_id: str, path_plan: Any) -> DepartureAuthority:
+    def request_departure(self, train_id: str, path_plan: Any, route_chain_ids: tuple[str, ...] | None = None) -> DepartureAuthority:
         """Lock the non-overlapping mainline routes needed by one station interval."""
         path_key = tuple(path_plan.cache_key())
         assigned = self._train_route_ids.get(train_id, ())
-        reservation = self._interval_reservations.get(path_key)
-        if (
-            self._train_path_keys.get(train_id) == path_key
-            and reservation is not None
-            and reservation["trainId"] == train_id
-            and not assigned
-        ):
-            authority = self._make_authority(
-                train_id,
-                (),
-                granted=True,
-                authority_mode="CBTC_SECTION_AUTHORITY",
-            )
-            self._last_authorities[train_id] = authority
-            return authority
         if self._train_path_keys.get(train_id) == path_key and assigned:
             active = self._active_routes_by_owner()
             if all(active.get(route_id) == train_id for route_id in assigned):
@@ -179,7 +144,7 @@ class InterlockingRuntimeCoordinator:
                 authority = DepartureAuthority(
                     train_id=train_id,
                     granted=False,
-                    authority_mode="CBTC_SECTION_AUTHORITY",
+                    authority_mode="INTERLOCKING_ROUTE",
                     failure_reason="INTERVAL_RESERVED",
                 )
                 self._last_authorities[train_id] = authority
@@ -190,13 +155,22 @@ class InterlockingRuntimeCoordinator:
                 authority = DepartureAuthority(
                     train_id=train_id,
                     granted=False,
-                    authority_mode="CBTC_SECTION_AUTHORITY",
+                    authority_mode="INTERLOCKING_ROUTE",
                     failure_reason="SECTION_OCCUPIED",
                 )
                 self._last_authorities[train_id] = authority
                 return authority
 
-        route_ids = self.routes_for_path(path_plan)
+        route_ids = tuple(route_chain_ids) if route_chain_ids is not None else self.routes_for_path(path_plan)
+        if not route_ids:
+            authority = DepartureAuthority(
+                train_id=train_id,
+                granted=False,
+                authority_mode="INTERLOCKING_ROUTE",
+                failure_reason="NO_ROUTE_TABLE_MAPPING",
+            )
+            self._last_authorities[train_id] = authority
+            return authority
 
         newly_locked: list[str] = []
         active = self._active_routes_by_owner()
@@ -232,6 +206,7 @@ class InterlockingRuntimeCoordinator:
         self._train_path_keys[train_id] = path_key
         self._interval_reservations[path_key] = {
             "trainId": train_id,
+            "routeIds": assigned_routes,
             "sectionIds": frozenset(section_ids),
             "entered": False,
         }
@@ -240,7 +215,7 @@ class InterlockingRuntimeCoordinator:
             train_id,
             assigned_routes,
             granted=True,
-            authority_mode="INTERLOCKING_ROUTE" if assigned_routes else "CBTC_SECTION_AUTHORITY",
+            authority_mode="INTERLOCKING_ROUTE",
         )
         if assigned_routes:
             first_route = self.catalog.get(assigned_routes[0])
@@ -348,12 +323,14 @@ class InterlockingRuntimeCoordinator:
                 continue
             relevant_switch_ids.update(route.required_switches)
             state = route_states.get(route_id, {})
+            axle_section_ids = list(route.axle_section_ids)
             routes.append({
                 "routeId": route_id,
                 "name": route.name,
                 "startSignalId": route.start_signal_id,
                 "endSignalId": route.end_signal_id,
-                "axleSectionIds": list(route.axle_section_ids),
+                "axleSectionIds": axle_section_ids,
+                "lockedSections": list(state.get("lockedSections", axle_section_ids)),
                 "state": state.get("state", "IDLE"),
                 "trainId": state.get("trainId"),
                 "failureReason": state.get("failureReason"),
@@ -406,13 +383,6 @@ class InterlockingRuntimeCoordinator:
             end_signal = self._signals.get(route.end_signal_id)
             if not covered or start_signal is None or end_signal is None:
                 continue
-            if self.allowed_segment_ids is not None:
-                if not covered.issubset(self.allowed_segment_ids):
-                    continue
-                if int(start_signal.get("segmentId", -1)) not in self.allowed_segment_ids:
-                    continue
-                if int(end_signal.get("segmentId", -1)) not in self.allowed_segment_ids:
-                    continue
             route_ids.append(route_id)
         return tuple(sorted(route_ids, key=self._route_sort_key))
 
@@ -466,11 +436,30 @@ class InterlockingRuntimeCoordinator:
                 self._train_route_ids[train_id] = retained
             else:
                 self._train_route_ids.pop(train_id, None)
-                if not (
-                    self._train_path_keys.get(train_id) in self._interval_reservations
-                    and self._interval_reservations[self._train_path_keys[train_id]]["trainId"] == train_id
-                ):
-                    self._train_path_keys.pop(train_id, None)
+
+    def _drop_cleared_reservations(self) -> None:
+        """Release dispatch-only reservations after their train clears them.
+
+        RouteService owns the real interlocking lifecycle. Reservations only
+        prevent dispatch from launching another train into the same station
+        interval while the previous one is still physically there.
+        """
+        active = self._active_routes_by_owner()
+        for path_key, reservation in list(self._interval_reservations.items()):
+            train_id = str(reservation["trainId"])
+            owns_active_route = any(
+                active.get(route_id) == train_id
+                for route_id in reservation.get("routeIds", ())
+            )
+            occupies_reserved_section = any(
+                train_id in self.section_occupation.axle_occupied_by(section_id)
+                for section_id in reservation["sectionIds"]
+            )
+            if owns_active_route or occupies_reserved_section:
+                continue
+            self._interval_reservations.pop(path_key, None)
+            if self._train_path_keys.get(train_id) == path_key:
+                self._train_path_keys.pop(train_id, None)
 
     def _sections_for_path(self, path_plan: Any) -> frozenset[str]:
         path_segments = frozenset(int(item) for item in path_plan.segment_ids)
@@ -478,10 +467,6 @@ class InterlockingRuntimeCoordinator:
             section_id
             for section_id, segment_ids in self._axle_segments.items()
             if segment_ids.intersection(path_segments)
-            and (
-                self.allowed_segment_ids is None
-                or segment_ids.intersection(self.allowed_segment_ids)
-            )
         )
 
     @staticmethod

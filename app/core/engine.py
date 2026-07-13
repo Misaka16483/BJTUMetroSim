@@ -9,12 +9,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from app.core.clock import ClockState, SimulationClock
 from app.core.message_bus import Envelope, MessageBus
 from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
+from app.domain.control.movement_authority import MovementAuthorityService, TrainPosition
 from app.domain.control.services import ATOController
 from app.domain.control.profile_runtime import AsyncSpeedProfileService, build_speed_profile_request
 from app.domain.control.speed_profile import stopping_target_speed_mps
@@ -23,6 +25,7 @@ from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
 from app.domain.dispatch.timetable import HeadwayConfig, TimetableService
 from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
+from app.domain.interlocking.route_chain_planner import RouteChainPlanner
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
@@ -107,6 +110,7 @@ class SimTrainState:
     path_position_m: float = 0.0
     path_total_length_m: float = 0.0
     current_segment_id: int | None = None
+    current_segment_offset_m: float = 0.0
     local_speed_limit_mps: float = 22.22
     grade_ratio: float = 0.0
     path_segment_count: int = 0
@@ -136,6 +140,11 @@ class SimTrainState:
     departure_authorized: bool = False
     interlocking_hold_reason: str | None = None
     active_route_ids: tuple[str, ...] = ()
+    turnback_count: int = 0
+    movement_authority_end_m: float = 0.0
+    movement_authority_reason: str | None = None
+    movement_authority_speed_mps: float = 0.0
+    movement_authority_locked_route_ids: tuple[str, ...] = ()
     # ── profile 触发控制 ──
     _profile_triggered: bool = False
     _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
@@ -194,6 +203,7 @@ class SimTrainState:
             "pathPositionM": round(self.path_position_m, 1),
             "pathTotalLengthM": round(self.path_total_length_m, 1),
             "currentSegmentId": self.current_segment_id,
+            "currentSegmentOffsetM": round(self.current_segment_offset_m, 1),
             "localSpeedLimitMps": round(self.local_speed_limit_mps, 2),
             "gradeRatio": round(self.grade_ratio, 7),
             "pathSegmentCount": self.path_segment_count,
@@ -224,6 +234,12 @@ class SimTrainState:
             "departureAuthorized": self.departure_authorized,
             "interlockingHoldReason": self.interlocking_hold_reason,
             "activeRouteIds": list(self.active_route_ids),
+            "routeChainIds": list(self.active_route_ids),
+            "turnbackCount": self.turnback_count,
+            "movementAuthorityEndM": round(self.movement_authority_end_m, 1),
+            "movementAuthorityReason": self.movement_authority_reason,
+            "movementAuthoritySpeedMps": round(self.movement_authority_speed_mps, 2),
+            "movementAuthorityLockedRouteIds": list(self.movement_authority_locked_route_ids),
         }
 
 
@@ -297,6 +313,7 @@ class SimulationEngine:
         # Keep the physics timestep fixed; acceleration runs multiple complete
         # ticks instead of increasing dt and skipping station/power transitions.
         self._speed_multiplier = 1
+        self._tick_interval_seconds = scenario.tick_seconds
         self.bus = MessageBus()
         self.track_query = TrackQueryService(line_map)
         self.path_planner = PathPlanner(
@@ -308,6 +325,12 @@ class SimulationEngine:
         self._station_list: list[JsonDict] = self._build_station_list()
         self._station_distances: list[float] = self._build_station_distances()
         self._station_platform_ids: dict[int, tuple[int, ...]] = self._build_station_platform_ids()
+        self._platform_by_id = {
+            int(p["id"]): p
+            for p in line_map.get("platforms", [])
+            if p.get("id") is not None
+        }
+        self._platform_id_by_segment = {int(p["segmentId"]): int(p["id"]) for p in line_map.get("platforms", []) if p.get("segmentId") is not None and p.get("id") is not None}
 
         # 鈹€鈹€ 鍒楄溅鐘舵€?鈹€鈹€
         self.trains: list[SimTrainState] = []
@@ -342,6 +365,19 @@ class SimulationEngine:
             self.track_query,
             line_scope.segment_ids if line_scope is not None else None,
         )
+        self.route_chain_planner = RouteChainPlanner(line_map, self.interlocking_runtime.catalog)
+        # The main engine reads the same Member C services used by the runtime;
+        # it must not maintain a second route or occupation lifecycle.
+        self.route_service = self.interlocking_runtime.route_service
+        self.section_occupation = self.interlocking_runtime.section_occupation
+        self.signal_resolver = self.interlocking_runtime.signal_resolver
+        self.interlocking_rules = self.interlocking_runtime.rule_engine
+        self.movement_authority = MovementAuthorityService(
+            line_map,
+            self.interlocking_runtime.catalog,
+            self.route_service,
+            self.section_occupation,
+        )
         self.kpi_tracker = DispatchKpiTracker()
         self.timetable_service = TimetableService(
             headway_config=HeadwayConfig(min_headway_sec=90.0),
@@ -354,6 +390,7 @@ class SimulationEngine:
         self._last_power_states: dict[str, Any] = {}
         self._last_power_solve_sim_time_ms: int | None = None
         self._last_dispatch_decisions: list[DispatchDecision] = []
+        self._pending_dispatch_decisions: list[DispatchDecision] = []
         self._power_commands: deque[PowerCommand] = deque()
         self._power_command_sequence = 0
         self._power_command_results: list[JsonDict] = []
@@ -542,6 +579,15 @@ class SimulationEngine:
                 "destinationStationCode": station_codes[destination_index],
                 "direction": direction,
             }
+        initial_segment_id = payload.get("initialSegmentId")
+        initial_platform_id = None
+        if initial_segment_id is not None:
+            try:
+                initial_platform_id = self._platform_id_by_segment.get(int(initial_segment_id))
+            except (TypeError, ValueError):
+                initial_platform_id = None
+            if initial_platform_id not in self._station_platform_ids.get(station_index, ()):
+                return {"ok": False, "error": "INITIAL_SEGMENT_NOT_PLATFORM"}
         operation_mode = str(payload.get("operationMode", "ATO")).upper()
         if operation_mode not in ("ATO", "MANUAL"):
             return {"ok": False, "error": "INVALID_OPERATION_MODE"}
@@ -562,6 +608,17 @@ class SimulationEngine:
             initial_load_pax=initial_load_pax,
         )
         train = self._create_train(cfg)
+        if initial_platform_id is not None:
+            train._initial_platform_id = initial_platform_id
+        next_index = station_index + (1 if direction == "UP" else -1)
+        if not 0 <= next_index < len(self._station_list):
+            return {"ok": False, "error": "INITIAL_STATION_MUST_MATCH_DIRECTION_ORIGIN"}
+        if self._ensure_interval_path(train, next_index) is None:
+            return {"ok": False, "error": "INITIAL_ROUTE_UNAVAILABLE"}
+        if initial_segment_id is not None:
+            placement_conflict = self._explicit_initial_placement_conflict(train)
+            if placement_conflict is not None:
+                return placement_conflict
         train.operation_mode = operation_mode
         if operation_mode == "MANUAL":
             self._manual_mode_by_train[train_id] = True
@@ -575,10 +632,64 @@ class SimulationEngine:
 
         self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self.trains.append(train)
+        self._train_specs[train_id] = {
+            "trainId": train_id,
+            "initialStationCode": initial_station_code,
+            "direction": direction,
+            "operationMode": operation_mode,
+            "capacityPax": capacity_pax,
+            "initialLoadPax": initial_load_pax,
+        }
+        if initial_segment_id is not None:
+            self._train_specs[train_id]["initialSegmentId"] = int(initial_segment_id)
         self.dispatch_runtime.register_train(train)
         self._snapshot = self._build_snapshot()
         return {"ok": True, "train": train.to_dict()}
 
+    def _explicit_initial_placement_conflict(self, train: SimTrainState) -> JsonDict | None:
+        if train.current_segment_id is None:
+            return None
+        candidate = SimpleNamespace(
+            train_id=train.train_id,
+            seg_id=int(train.current_segment_id),
+            offset_m=float(train.current_segment_offset_m),
+            length_m=float(train.train_length_m),
+            direction="FORWARD" if train.direction == "UP" else "BACKWARD",
+        )
+        candidate_segments = self.section_occupation.physical_footprint(candidate, self.track_query)
+        candidate_sections = self.interlocking_runtime._sections_for_path(train._path_plan) if train._path_plan is not None else frozenset()
+        conflicting_route_ids = sorted(
+            str(item["routeId"])
+            for item in self.route_service.snapshot()
+            if item.get("state") in {"LOCKED", "APPROACH_LOCKED"}
+            and candidate_sections.intersection(str(section_id) for section_id in item.get("lockedSections", []))
+        )
+        if conflicting_route_ids:
+            return {
+                "ok": False,
+                "error": "INITIAL_PLACEMENT_ROUTE_LOCKED",
+                "conflictingRouteIds": conflicting_route_ids,
+            }
+        conflicting_train_ids: list[str] = []
+        for existing in self.trains:
+            existing_segments = self.section_occupation.covered_segments_for(existing.train_id)
+            if not existing_segments and existing.current_segment_id is not None:
+                existing_segments = {int(existing.current_segment_id)}
+            if candidate_segments.intersection(existing_segments):
+                conflicting_train_ids.append(existing.train_id)
+        if conflicting_train_ids:
+            return {
+                "ok": False,
+                "error": "INITIAL_PLACEMENT_OCCUPIED",
+                "conflictingTrainIds": sorted(conflicting_train_ids),
+            }
+        return None
+    def available_initial_directions(self, station_code: str, initial_segment_id: int) -> tuple[str, ...]:
+        station_index = next((i for i, station in enumerate(self._station_list) if station.get("code") == station_code), None)
+        platform_id = self._platform_id_by_segment.get(initial_segment_id)
+        if station_index is None or platform_id not in self._station_platform_ids.get(station_index, ()):
+            return ()
+        return tuple(direction for direction, offset in (("UP", 1), ("DOWN", -1)) if 0 <= station_index + offset < len(self._station_list) and self._path_plan_for_station_pair(station_index, station_index + offset, platform_id) is not None)
     def remove_train(self, train_id: str) -> JsonDict:
         """鍔ㄦ€佸垹闄や竴鍒楄溅."""
         before = len(self.trains)
@@ -605,6 +716,18 @@ class SimulationEngine:
         self._reset_station_history()
         self.power_service = self._build_power_service()
         self.interlocking_runtime.reset()
+        # reset() rebuilds the coordinator-owned services, so refresh the
+        # compatibility aliases instead of retaining stale pre-reset objects.
+        self.route_service = self.interlocking_runtime.route_service
+        self.section_occupation = self.interlocking_runtime.section_occupation
+        self.signal_resolver = self.interlocking_runtime.signal_resolver
+        self.interlocking_rules = self.interlocking_runtime.rule_engine
+        self.movement_authority = MovementAuthorityService(
+            self.line_map,
+            self.interlocking_runtime.catalog,
+            self.route_service,
+            self.section_occupation,
+        )
         self.dispatch_service = RuleBasedDispatchService(
             DispatchRuleConfig(
                 min_headway_sec=90.0,
@@ -618,6 +741,7 @@ class SimulationEngine:
         self._last_power_states = self._empty_power_states()
         self._last_power_solve_sim_time_ms = None
         self._last_dispatch_decisions = []
+        self._pending_dispatch_decisions = []
         self._ato_by_train = {}
         self._dcdp_curve_data = {}
         self._dcdp_curve_meta = {}
@@ -702,6 +826,31 @@ class SimulationEngine:
             self._speed_multiplier = value
             self._snapshot = self._build_snapshot()
         return value
+
+    def set_tick_interval_seconds(self, interval_seconds: float) -> float:
+        """Set wall-clock playback pacing without changing physical tick size."""
+        with self._lifecycle_lock:
+            self._tick_interval_seconds = min(2.0, max(0.06, float(interval_seconds)))
+            self._snapshot = self._build_snapshot()
+            return self._tick_interval_seconds
+
+    def step_once(self) -> None:
+        """Advance one full engine tick and leave continuous playback paused."""
+        with self._lifecycle_lock:
+            if self.clock.state.value in ("IDLE", "STOPPED"):
+                self.load()
+            if self.clock.state.value == "LOADED":
+                self.clock.start()
+            elif self.clock.state.value == "PAUSED":
+                self.clock.resume()
+            elif self.clock.state.value == "RUNNING":
+                raise RuntimeError("cannot single-step while simulation is running")
+            try:
+                self._tick()
+            finally:
+                if self.clock.state.value == "RUNNING":
+                    self.clock.pause()
+                self._snapshot = self._build_snapshot()
 
     def _should_solve_power(self, sim_time_ms: int) -> bool:
         """Keep electrical fidelity at 1×/10× and sample it once per sim second at 60×."""
@@ -903,11 +1052,24 @@ class SimulationEngine:
             self._reset_station_history()
             self.power_service = self._build_power_service()
             self.interlocking_runtime.reset()
+            # reset() rebuilds the coordinator-owned services, so refresh the
+            # compatibility aliases instead of retaining stale pre-reset objects.
+            self.route_service = self.interlocking_runtime.route_service
+            self.section_occupation = self.interlocking_runtime.section_occupation
+            self.signal_resolver = self.interlocking_runtime.signal_resolver
+            self.interlocking_rules = self.interlocking_runtime.rule_engine
+            self.movement_authority = MovementAuthorityService(
+                self.line_map,
+                self.interlocking_runtime.catalog,
+                self.route_service,
+                self.section_occupation,
+            )
             self.dispatch_runtime.reset()
             self._last_arrivals_by_platform = {}
             self._last_power_states = self._empty_power_states()
             self._last_power_solve_sim_time_ms = None
             self._last_dispatch_decisions = []
+            self._pending_dispatch_decisions = []
             self._ato_by_train = {}
             self._dcdp_curve_data = {}
             self._dcdp_curve_meta = {}
@@ -971,7 +1133,7 @@ class SimulationEngine:
                     break
                 self._tick()
             elapsed = time.perf_counter() - loop_start
-            sleep_sec = max(0.01, self.clock.tick_seconds - elapsed)
+            sleep_sec = max(0.01, self._tick_interval_seconds - elapsed)
             time.sleep(sleep_sec)
 
     def _tick(self) -> None:
@@ -1065,6 +1227,9 @@ class SimulationEngine:
 
         # 5) 璋冨害鍐崇瓥
         decisions = self._make_dispatch_decisions(sim_time_ms, power_states)
+        if self._pending_dispatch_decisions:
+            decisions = [*self._pending_dispatch_decisions, *decisions]
+            self._pending_dispatch_decisions = []
         self._last_dispatch_decisions = decisions
 
         # 6) 鍙戝竷浜嬩欢
@@ -1265,6 +1430,50 @@ class SimulationEngine:
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  鍒楄溅鎺ㄨ繘閫昏緫
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    def _other_train_positions(self, train: SimTrainState) -> tuple[TrainPosition, ...]:
+        positions: list[TrainPosition] = []
+        for other in self.trains:
+            if other.train_id == train.train_id or other._path_plan is None:
+                continue
+            positions.append(
+                TrainPosition(
+                    train_id=other.train_id,
+                    direction=other._path_plan.direction,
+                    path_plan=other._path_plan,
+                    head_position_m=other.path_position_m,
+                    length_m=other.train_length_m,
+                )
+            )
+        return tuple(positions)
+
+    def _movement_authority_for_train(
+        self,
+        train: SimTrainState,
+        path_plan: PathPlan,
+        path_position_m: float,
+        vehicle_config: VehicleConfig,
+    ):
+        route_ids = tuple(train.active_route_ids)
+        if not route_ids:
+            train.movement_authority_end_m = path_position_m
+            train.movement_authority_reason = "NO_ROUTE_AUTHORITY"
+            train.movement_authority_speed_mps = 0.0
+            train.movement_authority_locked_route_ids = ()
+            return None
+        authority = self.movement_authority.calculate(
+            train_id=train.train_id,
+            path_plan=path_plan,
+            route_chain_ids=route_ids,
+            position_m=path_position_m,
+            speed_mps=train.speed_mps,
+            vehicle=vehicle_config,
+            other_trains=self._other_train_positions(train),
+        )
+        train.movement_authority_end_m = authority.end_position_m
+        train.movement_authority_reason = authority.end_reason
+        train.movement_authority_speed_mps = authority.permitted_speed_mps
+        train.movement_authority_locked_route_ids = authority.locked_route_ids
+        return authority
     def _prepare_train_step(
         self,
         train: SimTrainState,
@@ -1359,27 +1568,26 @@ class SimulationEngine:
             net_energy_kwh=train.energy_kwh,
         )
 
-        # 检查前方信号灯色
-        emergency_brake = False
-        if train.phase != DWELLING and train.phase != IDLE:
-            next_sig = self._next_signal_ahead(train, path_plan, path_position_m)
-            if next_sig is not None:
-                aspect = self.interlocking_runtime.signal_resolver.resolve(
-                    int(next_sig.get("id", 0))
-                )
-                if aspect == "RED":
-                    emergency_brake = True
+        vehicle_config = self._make_vehicle_config(train.train_id, train.onboard_pax)
+        authority = self._movement_authority_for_train(train, path_plan, path_position_m, vehicle_config)
+        target_position_m = authority.end_position_m if authority is not None else path_position_m
+        permitted_speed_mps = authority.permitted_speed_mps if authority is not None else 0.05
 
         target = AtoTarget(
-            target_position_m=path_plan.total_length_m,
-            permitted_speed_mps=train.permitted_speed_mps,
+            target_position_m=target_position_m,
+            permitted_speed_mps=max(0.05, min(train.permitted_speed_mps, permitted_speed_mps)),
             path_plan=path_plan,
-            emergency_brake_required=emergency_brake,
         )
         ato = self._ato_for_train(train.train_id)
         command = ato.decide(state, target)
         command = self._manual_override(command, train.train_id)
-        vehicle_config = self._make_vehicle_config(train.train_id, train.onboard_pax)
+        if authority is not None:
+            command = self.movement_authority.supervise(
+                command,
+                authority,
+                position_m=path_position_m,
+                speed_mps=train.speed_mps,
+            )
         demand = TractionDriveModel(vehicle_config).demand(command, train.speed_mps)
         power_demand = TractionDriveModel(vehicle_config).electrical_power_demand(
             demand,
@@ -1841,6 +2049,7 @@ class SimulationEngine:
             train.direction == "DOWN" and next_idx == 0
         ):
             self._turn_train_at_terminal(train)
+        self._anchor_train_at_current_platform(train)
         new_next_idx = next_idx + 1 if train.direction == "UP" else next_idx - 1
         if 0 <= new_next_idx < len(stations):
             new_next_stn = stations[new_next_idx]
@@ -1863,7 +2072,20 @@ class SimulationEngine:
 
     def _turn_train_at_terminal(self, train: SimTrainState) -> None:
         """At either terminal, reverse service direction and continue after the dwell."""
+        train.turnback_count += 1
         train.direction = "DOWN" if train.direction == "UP" else "UP"
+        self._pending_dispatch_decisions.append(
+            DispatchDecision(
+                decision_id=f"TURNBACK-{train.train_id}-{train.turnback_count}",
+                sim_time_ms=self._absolute_sim_time_ms(),
+                train_id=train.train_id,
+                station_id=train.current_station_code,
+                action="TURNBACK",
+                duration_sec=0.0,
+                reason=f"TERMINAL_TURNBACK_TO_{train.direction}",
+                applied=True,
+            )
+        )
         train.phase = DWELLING
         train.speed_mps = 0.0
         train.traction_percent = 0.0
@@ -1876,6 +2098,7 @@ class SimulationEngine:
         train._path_origin_station_index = None
         train._path_destination_station_index = None
         train._profile_triggered = False
+        self._anchor_train_at_current_platform(train)
 
     def _ato_for_train(self, train_id: str) -> ATOController:
         controller = self._ato_by_train.get(train_id)
@@ -1902,10 +2125,13 @@ class SimulationEngine:
             self._update_train_path_context(train)
             return train._path_plan
 
-        path_plan = self._path_plan_for_station_pair(train.station_index, next_idx)
+        initial_platform_id = getattr(train, "_initial_platform_id", None)
+        path_plan = self._path_plan_for_station_pair(train.station_index, next_idx, initial_platform_id)
         if path_plan is None:
             return None
 
+        if initial_platform_id is not None:
+            train._initial_platform_id = None
         train._path_plan = path_plan
         train._path_origin_station_index = train.station_index
         train._path_destination_station_index = next_idx
@@ -1923,13 +2149,21 @@ class SimulationEngine:
         self._update_train_path_context(train)
         return path_plan
 
-    def _path_plan_for_station_pair(self, origin_idx: int, destination_idx: int) -> PathPlan | None:
+    def _path_plan_for_station_pair(self, origin_idx: int, destination_idx: int, origin_platform_id: int | None = None) -> PathPlan | None:
         origin_platforms = self._station_platform_ids.get(origin_idx, ())
         destination_platforms = self._station_platform_ids.get(destination_idx, ())
+        if origin_platform_id is not None:
+            origin_platforms = (origin_platform_id,) if origin_platform_id in origin_platforms else ()
         if not origin_platforms or not destination_platforms:
             return None
 
         direction = "forward" if destination_idx > origin_idx else "backward"
+        try:
+            return self.route_chain_planner.plan_between_platform_sets(
+                origin_platforms, destination_platforms, direction,
+            ).path_plan
+        except ValueError:
+            return None
         preferred_pairs = [(origin_platforms[0], destination_platforms[0])]
         all_pairs = [
             (origin_platform_id, destination_platform_id)
@@ -2077,6 +2311,7 @@ class SimulationEngine:
         if path_plan is None:
             train.path_total_length_m = 0.0
             train.current_segment_id = None
+            train.current_segment_offset_m = 0.0
             train.local_speed_limit_mps = train.permitted_speed_mps
             train.grade_ratio = 0.0
             train.path_segment_count = 0
@@ -2089,6 +2324,15 @@ class SimulationEngine:
         bounded_position_m = min(max(0.0, train.path_position_m), path_plan.total_length_m)
         constraint = path_plan.constraint_at(bounded_position_m)
         train.current_segment_id = constraint.segment_id if constraint is not None else None
+        if constraint is None or abs(constraint.path_end_m - constraint.path_start_m) < 1e-9:
+            train.current_segment_offset_m = 0.0
+        else:
+            ratio = (bounded_position_m - constraint.path_start_m) / (
+                constraint.path_end_m - constraint.path_start_m
+            )
+            train.current_segment_offset_m = constraint.start_offset_m + (
+                constraint.end_offset_m - constraint.start_offset_m
+            ) * ratio
         train.local_speed_limit_mps = path_plan.speed_limit_at(bounded_position_m, train.permitted_speed_mps)
         train.grade_ratio = path_plan.grade_ratio_at(bounded_position_m)
 
@@ -2257,6 +2501,34 @@ class SimulationEngine:
     def _door_side_for(direction: str) -> str:
         """Scenario convention pending authoritative Line 9 platform-side data."""
         return "LEFT" if direction == "UP" else "RIGHT"
+
+    def _platform_segment_for_direction(self, station_index: int, direction: str) -> tuple[int, float] | None:
+        """Return the platform Seg that matches the train's current service direction."""
+        expected_code = "0x55" if direction == "UP" else "0xaa"
+        platform_ids = self._station_platform_ids.get(station_index, ())
+        fallback: tuple[int, float] | None = None
+        for platform_id in platform_ids:
+            platform = self._platform_by_id.get(int(platform_id))
+            if platform is None or platform.get("segmentId") is None:
+                continue
+            candidate = (
+                int(platform["segmentId"]),
+                float(platform.get("offsetM", 0.0)),
+            )
+            if fallback is None:
+                fallback = candidate
+            if str(platform.get("direction", "")).lower() == expected_code:
+                return candidate
+        return fallback
+
+    def _anchor_train_at_current_platform(self, train: SimTrainState) -> None:
+        # Station dwell, turnback, and topology placement all need the same
+        # logical head Seg; otherwise MA and occupation are computed from a
+        # stale inter-station path segment after arrival.
+        anchor = self._platform_segment_for_direction(train.station_index, train.direction)
+        if anchor is None:
+            return
+        train.current_segment_id, train.current_segment_offset_m = anchor
 
     def _begin_station_stop(self, train: SimTrainState) -> None:
         train.phase = DWELLING
@@ -2444,8 +2716,23 @@ class SimulationEngine:
                 train.active_route_ids = ()
                 train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
                 continue
+            origin_platforms = self._station_platform_ids.get(train.station_index, ())
+            destination_platforms = self._station_platform_ids.get(next_idx, ())
+            direction = "forward" if train.direction == "UP" else "backward"
+            try:
+                route_chain_ids = self.route_chain_planner.plan_between_platform_sets(
+                    origin_platforms, destination_platforms, direction,
+                ).route_ids
+            except ValueError:
+                train.departure_authorized = False
+                train.interlocking_hold_reason = "NO_ROUTE_CHAIN"
+                train.active_route_ids = ()
+                train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
+                continue
             self._update_train_path_context(train)
-            authority = self.interlocking_runtime.request_departure(train.train_id, path_plan)
+            authority = self.interlocking_runtime.request_departure(
+                train.train_id, path_plan, route_chain_ids,
+            )
             train.departure_authorized = authority.granted
             train.interlocking_hold_reason = authority.failure_reason
             train.active_route_ids = authority.route_ids
@@ -2664,6 +2951,12 @@ class SimulationEngine:
             initial_load_pax=int(spec.get("initialLoadPax", 0)),
         )
         train = self._create_train(cfg)
+        initial_segment_id = spec.get("initialSegmentId")
+        if initial_segment_id is not None:
+            try:
+                train._initial_platform_id = self._platform_id_by_segment.get(int(initial_segment_id))
+            except (TypeError, ValueError):
+                train._initial_platform_id = None
         train.operation_mode = str(spec.get("operationMode", "ATO"))
         self._manual_mode_by_train[train_id] = train.operation_mode == "MANUAL"
         vehicle_config = self._vehicle_config_by_train.get(train_id)

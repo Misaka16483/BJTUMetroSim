@@ -45,16 +45,31 @@ class _BlockingPlcClient:
         self.closed.set()
 
 
+class _RecordingPlcOutputClient:
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+
+    def send_output_state(self, state: object, builder: object) -> None:
+        self.frames.append(builder.build(state))
+
+
 class _RecordingDisplayClient:
     def __init__(self, connected: threading.Event, frames: list[bytes]) -> None:
         self.connected = connected
         self.frames = frames
+        self.responses = bytearray()
 
     def connect(self) -> None:
         self.connected.set()
 
     def send_frame(self, frame: bytes) -> None:
         self.frames.append(frame)
+        self.responses.extend(frame)
+
+    def receive_available(self, max_bytes: int = 65536) -> bytes:
+        response = bytes(self.responses[:max_bytes])
+        del self.responses[:max_bytes]
+        return response
 
     def close(self) -> None:
         pass
@@ -162,6 +177,56 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertIsNone(status["lastCommand"])
         self.assertEqual(train.operation_mode, "ATO")
 
+    def test_ato_can_restart_after_manual_takeover_and_first_non_neutral_frame(self) -> None:
+        controller = DriverCabHardwareController(self.engine)
+        manual_frame = bytearray(46)
+        _write_word(manual_frame, 38, 1)
+        _write_word(manual_frame, 40, 40)
+
+        first_manual = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(manual_frame), train_id="T0901")
+        )
+
+        self.assertTrue(first_manual["ok"])
+        self.assertTrue(controller.status()["status"]["plcOutput"]["atoAvailable"])
+
+        ato_frame = bytearray(46)
+        ato_frame[34] = 0b1000_0000
+        activated = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(ato_frame), train_id="T0901")
+        )
+        self.assertEqual(activated["message"], "ATO_ACTIVATED")
+
+        takeover = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(manual_frame), train_id="T0901")
+        )
+        self.assertTrue(takeover["ok"])
+        status = controller.status()["status"]
+        self.assertTrue(status["plcOutput"]["atoAvailable"])
+        self.assertFalse(status["plcOutput"]["atoActive"])
+
+        restarted = controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(ato_frame), train_id="T0901")
+        )
+        self.assertEqual(restarted["message"], "ATO_ACTIVATED")
+
+    def test_plc_output_uses_documented_28_byte_frame_with_speed(self) -> None:
+        controller = DriverCabHardwareController(self.engine)
+        controller.process_input_state(
+            MitsubishiPlcCabParser().parse(bytes(46), train_id="T0901")
+        )
+        client = _RecordingPlcOutputClient()
+
+        controller._send_plc_output(client)
+
+        self.assertEqual(len(client.frames), 1)
+        frame = client.frames[0]
+        self.assertEqual(len(frame), 28)
+        self.assertEqual(int.from_bytes(frame[4:6], "little"), 28)
+        self.assertEqual(int.from_bytes(frame[6:8], "little"), 4)
+        self.assertEqual(frame[25] & 0b0000_0001, 1)
+        self.assertEqual(controller.status()["status"]["plcOutput"]["frameLength"], 28)
+
     def test_emergency_brake_overrides_ato_without_handle_movement(self) -> None:
         controller = DriverCabHardwareController(self.engine)
         ato_frame = bytearray(46)
@@ -209,6 +274,43 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         status = controller.status()["status"]
         self.assertEqual(status["state"], "ERROR")
         self.assertIn("PLC unreachable", status["lastError"])
+        plc_events = [entry["event"] for entry in status["logs"] if entry["endpoint"] == "plc"]
+        self.assertIn("CONNECTING", plc_events)
+        self.assertIn("CONNECTION_ERROR", plc_events)
+        controller.disconnect()
+
+    def test_connection_logs_cover_all_endpoints_and_can_be_cleared(self) -> None:
+        plc_connected = threading.Event()
+        display_factory = _DisplayClientFactory()
+        controller = DriverCabHardwareController(
+            self.engine,
+            client_factory=lambda _host, _port, _timeout: _BlockingPlcClient(plc_connected),
+            display_client_factory=display_factory,
+            display_interval_s=0.01,
+        )
+
+        controller.connect()
+        self.assertTrue(plc_connected.wait(timeout=1.0))
+        deadline = time.monotonic() + 1.0
+        status = controller.status()["status"]
+        while (
+            not {"plc", "networkScreen", "signalScreen"}.issubset(
+                {entry["endpoint"] for entry in status["logs"] if entry["event"] == "CONNECTED"}
+            )
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+            status = controller.status()["status"]
+
+        connected_endpoints = {
+            entry["endpoint"] for entry in status["logs"] if entry["event"] == "CONNECTED"
+        }
+        self.assertEqual(connected_endpoints, {"plc", "networkScreen", "signalScreen"})
+        self.assertTrue(all(entry["timestamp"] for entry in status["logs"]))
+        self.assertTrue(all(entry["message"] for entry in status["logs"]))
+
+        cleared = controller.clear_logs()["status"]["logs"]
+        self.assertIn("LOGS_CLEARED", {entry["event"] for entry in cleared})
         controller.disconnect()
 
     def test_display_screen_addresses_are_saved_and_reported(self) -> None:
@@ -268,8 +370,12 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertEqual(status["signalScreen"]["state"], "CONNECTED")
         self.assertGreaterEqual(status["networkScreen"]["framesSent"], 2)
         self.assertGreaterEqual(status["signalScreen"]["framesSent"], 2)
-        self.assertEqual(len(display_factory.frames[8888][0]), 572)
-        self.assertEqual(len(display_factory.frames[9999][0]), 66)
+        self.assertGreaterEqual(status["networkScreen"]["framesReceived"], 1)
+        self.assertGreaterEqual(status["signalScreen"]["framesReceived"], 1)
+        self.assertGreater(status["networkScreen"]["bytesReceived"], 0)
+        self.assertGreater(status["signalScreen"]["bytesReceived"], 0)
+        self.assertEqual(len(display_factory.frames[8888][0]), 570)
+        self.assertEqual(len(display_factory.frames[9999][0]), 68)
         self.assertEqual(display_factory.frames[8888][0][36:39], bytes((1, 2, 13)))
         self.assertEqual(display_factory.frames[9999][0][36:39], bytes((1, 2, 13)))
 
@@ -299,10 +405,11 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         self.assertAlmostEqual(struct.unpack_from("<f", hmi_frame, 44)[0], 0.75)
         self.assertEqual(int.from_bytes(hmi_frame[52:54], "little"), 80)
         self.assertEqual(hmi_frame[54], 1)
-        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 42)[0], 12.5)
-        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 62)[0], 321.5)
-        self.assertEqual(mmi_frame[54], 1)
-        self.assertEqual(mmi_frame[55], 1)
+        self.assertEqual(mmi_frame[42], 0)
+        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 44)[0], 45.0)
+        self.assertAlmostEqual(struct.unpack_from("<f", mmi_frame, 64)[0], 321.5)
+        self.assertEqual(mmi_frame[56], 1)
+        self.assertEqual(mmi_frame[57], 1)
 
     def test_each_hardware_endpoint_can_disconnect_and_reconnect_independently(self) -> None:
         plc_connected = threading.Event()

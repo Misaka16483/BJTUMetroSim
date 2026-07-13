@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -106,6 +107,22 @@ if not STATIONS_CSV.exists():
 # ═══════════════════════════════════════════════════════════
 #  Phase 1 — 引擎加载 + 场景解析
 # ═══════════════════════════════════════════════════════════
+def disable_dynamic_profiles(engine: SimulationEngine) -> SimulationEngine:
+    engine._ato_config = replace(engine._ato_config, use_dynamic_programming_profile=False)
+    return engine
+
+
+def make_loaded_engine() -> SimulationEngine:
+    engine = SimulationEngine.load_from_files(
+        scenario_path=SCENARIO,
+        line_map_path=CACHE,
+        stations_csv_path=STATIONS_CSV,
+    )
+    disable_dynamic_profiles(engine)
+    engine.load()
+    return engine
+
+
 print("\n" + "=" * 64)
 print("  Phase 1: Engine Load & Scenario Parsing")
 print("=" * 64)
@@ -115,6 +132,7 @@ eng = SimulationEngine.load_from_files(
     line_map_path=CACHE,
     stations_csv_path=STATIONS_CSV,
 )
+disable_dynamic_profiles(eng)
 check(eng is not None, "engine created")
 check(eng.clock.state.value == "IDLE", "clock IDLE after creation")
 
@@ -154,7 +172,7 @@ sample_station = eng.station_catalog[0]
 check("code" in sample_station or "stationCode" in sample_station, "station has code")
 check("name" in sample_station or "stationName" in sample_station, "station has name")
 
-eng.load()
+eng = make_loaded_engine()
 check(eng.clock.state.value == "LOADED", "clock LOADED after load()")
 
 # ── KPI 初始状态 ──
@@ -396,7 +414,7 @@ check(eng.clock.state.value == "STOPPED", "clock STOPPED")
 eq(eng.clock.current_tick, 0, "clock tick reset to 0 after stop")
 
 # 验证 stop → load → start 完整重启后 tick 正常推进
-eng.load()
+eng = make_loaded_engine()
 eq(eng.clock.state.value, "LOADED", "reload → LOADED")
 eq(len(eng.trains), 0, "trains cleared after reload")
 eng.add_train({"trainId": "RELOAD01", "direction": "UP", "capacityPax": 600,
@@ -417,7 +435,7 @@ print("  Phase 6: Multi-Train Management")
 print("=" * 64)
 
 # ── 6a. load 清零后加 3 辆车 ──
-eng.load()
+eng = make_loaded_engine()
 eq(len(eng.trains), 0, "6a: load → trains=0")
 for i in range(3):
     tid = f"T{i:04d}"
@@ -460,7 +478,7 @@ eq(len(eng.trains), 2, "still 2 trains")
 
 # ── 6f. stop → 重载后重新加车 ──
 eng.stop()
-eng.load()
+eng = make_loaded_engine()
 eq(len(eng.trains), 0, "trains cleared after load+stop")
 eng.add_train({"trainId": "T0101", "direction": "UP", "capacityPax": 600,
                "initialStationCode": "GGZ"})
@@ -648,7 +666,7 @@ print("\n" + "=" * 64)
 print("  Phase 10: KPI Accumulation Over Time")
 print("=" * 64)
 
-eng.load()
+eng = make_loaded_engine()
 eng.add_train({"trainId": "K01", "direction": "UP", "capacityPax": 600,
                "initialStationCode": "GGZ", "initialLoadPax": 100})
 
@@ -673,7 +691,7 @@ print("\n" + "=" * 64)
 print("  Phase 11: Vehicle Config Propagation")
 print("=" * 64)
 
-eng.load()
+eng = make_loaded_engine()
 
 # ── 11a. 设置车辆配置后加车 ──
 vcfg_result = eng.set_vehicle_config({
@@ -716,7 +734,7 @@ print("  Phase 12: Lifecycle Closed Loop (stop→add→start)")
 print("=" * 64)
 
 # ── 12a. stop 清空列车（预期行为）──
-eng.load()
+eng = make_loaded_engine()
 eq(len(eng.trains), 0, "12a: load → trains=0")
 eng.add_train({"trainId": "LC01", "direction": "UP", "capacityPax": 600,
                "initialStationCode": "GGZ"})
@@ -771,7 +789,7 @@ eq(len(snap12d.trains), 0, "12d: snapshot trains=0 (no crash)")
 eng.stop()
 
 # ── 12e. load→加车→start（第一次启动基准）──
-eng.load()
+eng = make_loaded_engine()
 eng.add_train({"trainId": "FIRST01", "direction": "UP", "capacityPax": 600,
                "initialStationCode": "GGZ"})
 eng.start()
@@ -782,7 +800,7 @@ check("FIRST01" in first_ids, "12e: FIRST01 present (1st start baseline)")
 eng.stop()
 
 # ── 12f. clock tick 生命周期正确性 ──
-eng.load()
+eng = make_loaded_engine()
 eng.add_train({"trainId": "TICK01", "direction": "UP", "capacityPax": 600,
                "initialStationCode": "GGZ"})
 eng.start()

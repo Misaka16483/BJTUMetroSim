@@ -12,6 +12,7 @@ import PowerSystemView from './components/PowerSystemView';
 import StationPassengerView from './components/StationPassengerView';
 import TrainManagementPanel from './components/TrainManagementPanel';
 import FullLineTrainPanel from './components/FullLineTrainPanel';
+import MemberCInterlockingDemo from './components/MemberCInterlockingDemo';
 import SimulationLifecycleControls from './components/SimulationLifecycleControls';
 import SimulationReport from './components/SimulationReport';
 import DriverCabConnectionButton from './components/DriverCabConnectionButton';
@@ -225,6 +226,7 @@ export default function App() {
           <button type="button" onClick={() => setViewMode('driver')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>驾驶</button>
           <button type="button" onClick={() => setViewMode('power')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'power' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>供电</button>
           <button type="button" onClick={() => setViewMode('stationFlow')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'stationFlow' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>客流</button>
+          <button type="button" onClick={() => setViewMode('memberCDemo')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'memberCDemo' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>??</button>
         </div>
         </div>
 
@@ -321,10 +323,23 @@ export default function App() {
             pointerEvents: viewMode !== 'macro' ? 'auto' : 'none',
             transition: 'opacity 200ms ease-out',
           }}>
+            {/* Keep the power view mounted so its rolling trend history keeps
+                sampling while the operator inspects another subsystem. */}
+            <div
+              aria-hidden={viewMode !== 'power'}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                visibility: viewMode === 'power' ? 'visible' : 'hidden',
+                pointerEvents: viewMode === 'power' ? 'auto' : 'none',
+              }}
+            >
+              <PowerSystemView />
+            </div>
             {viewMode === 'driver'
               ? <DriverConsole fullPage />
-              : viewMode === 'power'
-                ? <PowerSystemView />
+              : viewMode === 'memberCDemo'
+                ? <MemberCInterlockingDemo />
                 : viewMode === 'stationFlow'
                   ? <StationPassengerView />
                   : viewMode === 'interlocking'

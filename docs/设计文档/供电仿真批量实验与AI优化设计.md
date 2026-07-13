@@ -84,4 +84,3 @@ python tools/run_power_optimization.py --problem N1_ROBUST_TIMETABLE --populatio
 ## 6. 结果使用限制
 
 当前拓扑容量和部分设备位置为 `ENGINEERING_ESTIMATE`。在真实参数未校准前，优化结果用于算法比较、闭环演示和方案筛选，不得直接作为现场运行图、保护整定或设备投资决策。
-

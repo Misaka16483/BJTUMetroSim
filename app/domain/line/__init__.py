@@ -4,6 +4,7 @@ from app.domain.line.services import (
     PathPlan,
     PathPlanner,
     PathSegmentConstraint,
+    PathTrackQuery,
     TrackQueryService,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "PathPlan",
     "PathPlanner",
     "PathSegmentConstraint",
+    "PathTrackQuery",
     "TrackQueryService",
 ]

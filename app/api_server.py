@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from app.adapters.cab import DriverCabHardwareController
+from app.adapters.vision import COMPACT_LAYOUT, VisionUdpPublisher
 from app.core.engine import SimulationEngine
 from app.domain.line.services import LineMapRepository, LineScope, TrackQueryService
 from app.domain.power.line9_topology import load_line9_power_network
@@ -321,6 +322,393 @@ class Line9DataService:
         self._sim_runner = MemberCDemoRunner(self.cache_path)
         return self.sim_runner.state_snapshot()
 
+    def member_c_place_train(self, segment_id: int) -> JsonDict:
+        self._sim_runner = MemberCDemoRunner(self.cache_path)
+        return self._sim_runner.place_manual_train(segment_id)
+
+    def member_c_place_train_for_route(self, route_id: str) -> JsonDict:
+        self._sim_runner = MemberCDemoRunner(self.cache_path)
+        return self._sim_runner.place_train_for_route(route_id)
+
+    def member_c_request_manual_route(self, route_id: str | None = None) -> JsonDict:
+        return self.sim_runner.request_manual_route(route_id)
+
+    def member_c_static_routes(self) -> JsonDict:
+        """返回全部进路静态数据 + 完整拓扑图（基于原始 Segment 连接字段）。
+
+        不计算里程——直接用 Seg 的四向连接指针做 BFS，
+        分出主干（row=0）和侧枝（row=1,2,3...），
+        每个 Seg 返回行号和序号（col），前端按行画轨道。
+        """
+        from app.domain.interlocking.route_catalog import RouteCatalog
+        cat = RouteCatalog(self.line_map)
+
+        seg_by_id = {s["id"]: s for s in self.line_map.get("segments", [])}
+
+        # 1) 从郭公庄上行站台的 Seg 找主干入口 → 沿 endForwardSegId 走
+        up_platforms = sorted(
+            [p for p in self.line_map.get("platforms", [])
+             if p.get("direction") == "0x55"],
+            key=lambda p: p.get("mileageM", 0),
+        )
+        start_seg = int(up_platforms[0]["segmentId"]) if up_platforms else 13
+
+        # 2) BFS 分配 (row, col)：主干 row=0，分支 row+1
+        segs_out: list[dict] = []
+        assigned: dict[int, tuple[int, int]] = {}  # seg_id → (row, col)
+
+        def walk_chain(seg_id: int, row: int) -> int:
+            """沿 endForwardSegId 走一条链，返回分配的列数。
+            栈式处理：先走完当前链，再递归分支（不用Python递归栈以避免主干被分支抢占）。"""
+            chain_segs: list[tuple[int, int, bool, int | None]] = []  # (sid, col, has_div, div_seg)
+            sid = seg_id
+            col = 0
+            while sid is not None and sid not in assigned:
+                seg = seg_by_id.get(sid)
+                efd = seg.get("endForwardSegId") if seg else None
+                edv = seg.get("endDivergingSegId") if seg else None
+                edv_int = int(edv) if edv is not None else None
+                chain_segs.append((sid, col, edv_int is not None, edv_int))
+                col += 1
+                nxt = int(efd) if efd is not None else None
+                sid = nxt if nxt is not None and nxt not in assigned else None
+            # 先分配当前链所有Seg
+            for sid2, col2, has_div2, div2 in chain_segs:
+                assigned[sid2] = (row, col2)
+                seg = seg_by_id.get(sid2)
+                seg_len = float(seg.get("lengthM", 0)) if seg else 0
+                stn = None
+                for p in self.line_map.get("platforms", []):
+                    if p.get("segmentId") == sid2 and p.get("direction") == "0x55":
+                        stn = p.get("id"); break
+                segs_out.append({
+                    "id": sid2, "row": row, "col": col2,
+                    "len": seg_len, "sw": has_div2, "stn": stn,
+                    "endFwd": int(seg.get("endForwardSegId")) if seg and seg.get("endForwardSegId") is not None else None,
+                    "endDiv": div2,
+                })
+            # 然后递归分支（此时主干Seg已分配完毕，不会被分支抢占）
+            for sid2, col2, has_div2, div2 in chain_segs:
+                if div2 is not None and div2 not in assigned:
+                    walk_chain(div2, row + 1)
+            return col
+
+        walk_chain(start_seg, 0)
+
+        # 3) 处理独立岛屿（无法从郭公庄站台 BFS 到达的 Seg）—— 按连通分量分组
+        unassigned = [sid for sid in seg_by_id if sid not in assigned]
+        island_row = 10  # 孤岛从row=10开始
+        for root_sid in unassigned:
+            if root_sid in assigned:
+                continue
+            # 从这个根出发 BFS 一个连通分量
+            walk_chain(root_sid, island_row)
+            island_row += 1
+
+        # 4) 信号（assigned 的 Seg 上标注）
+        # The running demo only contains the train's current mainline chain.
+        # Rebuild the presentation topology from every imported Seg so depot,
+        # opposite-direction, and non-simulated branches stay visible.
+        seg_by_id = {
+            int(segment["id"]): segment
+            for segment in self.line_map.get("segments", [])
+            if segment.get("id") is not None
+        }
+        # The raw platform table contains non-operational placeholder records
+        # (for example S22 / platform 29 has mileage 1m and 0xff flags).  Keep
+        # those IDs for diagnostics, but only mapped passenger platforms may
+        # drive the green platform rendering or topology start controls.
+        raw_platform_by_seg: dict[int, list[int]] = {}
+        platform_by_seg: dict[int, list[int]] = {}
+        operational_platform_ids = {
+            int(platform_id)
+            for station in self.station_mappings()
+            for platform_id in station.get("platformIds", [])
+        }
+        for platform in self.line_map.get("platforms", []):
+            segment_id = platform.get("segmentId")
+            platform_id = platform.get("id")
+            if segment_id is None or platform_id is None:
+                continue
+            segment_key = int(segment_id)
+            platform_key = int(platform_id)
+            raw_platform_by_seg.setdefault(segment_key, []).append(platform_key)
+            if platform_key in operational_platform_ids:
+                platform_by_seg.setdefault(segment_key, []).append(platform_key)
+        def seg_ref(segment: JsonDict, field: str) -> int | None:
+            value = segment.get(field)
+            return int(value) if value is not None and int(value) in seg_by_id else None
+
+        # A row is a continuous normal path. Each diverging path starts on its
+        # own row beside the point that creates it, which produces a stable,
+        # complete schematic instead of a misleading single-line chain.
+        assigned = {}
+        pending: list[tuple[int, int, int]] = []
+        roots = sorted(
+            sid for sid, segment in seg_by_id.items()
+            if seg_ref(segment, "startForwardSegId") is None
+        )
+        for row, root_id in enumerate(roots):
+            pending.append((root_id, row, 0))
+
+        next_row = len(pending)
+        while pending:
+            start_id, row, start_col = pending.pop(0)
+            sid = start_id
+            col = start_col
+            while sid is not None and sid not in assigned:
+                segment = seg_by_id[sid]
+                assigned[sid] = (row, col)
+                diverging_id = seg_ref(segment, "endDivergingSegId")
+                if diverging_id is not None and diverging_id not in assigned:
+                    pending.append((diverging_id, next_row, col + 1))
+                    next_row += 1
+                sid = seg_ref(segment, "endForwardSegId")
+                col += 1
+            if not pending:
+                remaining = sorted(set(seg_by_id) - set(assigned))
+                if remaining:
+                    pending.append((remaining[0], next_row, 0))
+                    next_row += 1
+
+        # The first pass preserves every directed relation but gives each branch
+        # its own row.  Compact those row fragments into reusable side lanes.
+        # The two longest chains remain the main tracks; fragments with
+        # non-overlapping horizontal spans can share a lane without appearing
+        # connected.  Fully isolated fragments are grouped after a visible gap.
+        row_segments: dict[int, list[int]] = {}
+        for sid, (row, _) in assigned.items():
+            row_segments.setdefault(row, []).append(sid)
+        for segment_ids in row_segments.values():
+            segment_ids.sort(key=lambda item: assigned[item][1])
+
+        main_rows = {
+            row for row, _ in sorted(
+                row_segments.items(), key=lambda item: (-len(item[1]), item[0])
+            )[:2]
+        }
+        row_by_segment = {sid: row for sid, (row, _) in assigned.items()}
+        fragment_neighbors: dict[int, set[int]] = {
+            row: set() for row in row_segments
+        }
+        for sid, segment in seg_by_id.items():
+            source_row = row_by_segment[sid]
+            for field in (
+                "startForwardSegId", "startDivergingSegId",
+                "endForwardSegId", "endDivergingSegId",
+            ):
+                neighbor = seg_ref(segment, field)
+                if neighbor is None:
+                    continue
+                target_row = row_by_segment[neighbor]
+                if target_row != source_row:
+                    fragment_neighbors[source_row].add(target_row)
+
+        def fragment_span(row: int) -> tuple[int, int]:
+            columns = [assigned[sid][1] for sid in row_segments[row]]
+            return min(columns), max(columns)
+
+        side_rows = sorted(
+            row for row in row_segments
+            if row not in main_rows and fragment_neighbors[row]
+        )
+        side_rows.sort(key=lambda row: (*fragment_span(row), row))
+        lane_spans: list[list[tuple[int, int]]] = []
+        compact_row: dict[int, int] = {}
+        for row in side_rows:
+            start, end = fragment_span(row)
+            for lane_index, spans in enumerate(lane_spans):
+                if all(end + 2 < used_start or start - 2 > used_end for used_start, used_end in spans):
+                    spans.append((start, end))
+                    compact_row[row] = 2 + lane_index
+                    break
+            else:
+                lane_spans.append([(start, end)])
+                compact_row[row] = 2 + len(lane_spans) - 1
+
+        main_max_column = max(
+            assigned[sid][1]
+            for row in main_rows for sid in row_segments[row]
+        )
+        island_rows = sorted(
+            row for row in row_segments
+            if row not in main_rows and not fragment_neighbors[row]
+        )
+        island_row = 2 + len(lane_spans) + (1 if lane_spans else 0)
+        island_cursor = main_max_column + 6
+        compact_column: dict[int, int] = {}
+        for row in island_rows:
+            start, end = fragment_span(row)
+            compact_row[row] = island_row
+            for sid in row_segments[row]:
+                compact_column[sid] = island_cursor + assigned[sid][1] - start
+            island_cursor += end - start + 5
+
+        for sid, (row, column) in list(assigned.items()):
+            if row in main_rows:
+                assigned[sid] = (0 if row == min(main_rows) else 1, column)
+            else:
+                assigned[sid] = (compact_row[row], compact_column.get(sid, column))
+
+        segs_out = []
+        for sid, segment in sorted(seg_by_id.items()):
+            row, col = assigned[sid]
+            segs_out.append({
+                "id": sid,
+                "lengthM": float(segment.get("lengthM") or 0),
+                "row": row,
+                "col": col,
+                "platformIds": platform_by_seg.get(sid, []),
+                "rawPlatformIds": raw_platform_by_seg.get(sid, []),
+                "startForward": seg_ref(segment, "startForwardSegId"),
+                "startDiverging": seg_ref(segment, "startDivergingSegId"),
+                "endForward": seg_ref(segment, "endForwardSegId"),
+                "endDiverging": seg_ref(segment, "endDivergingSegId"),
+            })
+
+        signals = []
+        for s in self.line_map.get("signals", []):
+            sig_id = s.get("id")
+            seg_id = s.get("segmentId")
+            if sig_id is None or seg_id is None or int(seg_id) not in assigned:
+                continue
+            signals.append({
+                "id": int(sig_id), "name": str(s.get("name", "")),
+                "segId": int(seg_id),
+                "offsetM": float(s.get("offsetM") or 0),
+                "direction": str(s.get("direction", "")),
+                "type": s.get("type"),
+            })
+
+        # 5) 道岔
+        switches = []
+        for sw_id_str in cat.switch_ids:
+            sw = cat.get_switch(sw_id_str)
+            if sw is None: continue
+            in_assigned = sw.frog_seg_id is not None and sw.frog_seg_id in assigned
+            switches.append({
+                "id": sw.switch_id, "name": sw.name,
+                "frogSeg": sw.frog_seg_id, "normSeg": sw.normal_seg_id,
+                "revSeg": sw.reverse_seg_id,
+                "onMain": in_assigned,
+            })
+
+        # 6) 计轴区段→Seg 映射 + 进路
+        axle_segs = {}
+        for a in self.line_map.get("axleSections", []):
+            aid = a.get("id")
+            sl = [int(s) for s in a.get("segmentIds", []) if s is not None]
+            if aid is not None and sl: axle_segs[str(aid)] = sl
+
+        def _sig_seg(sig_id):
+            for s in self.line_map.get("signals", []):
+                if s.get("id") == sig_id:
+                    rs = s.get("segmentId")
+                    return int(rs) if rs is not None else 0
+            return 0
+
+        def _sig_name(sig_id):
+            for s in self.line_map.get("signals", []):
+                if s.get("id") == sig_id: return str(s.get("name", ""))
+            return ""
+
+        topology_neighbors: dict[int, set[int]] = {sid: set() for sid in seg_by_id}
+        for sid, segment in seg_by_id.items():
+            for field in (
+                "startForwardSegId", "startDivergingSegId",
+                "endForwardSegId", "endDivergingSegId",
+            ):
+                neighbor = seg_ref(segment, field)
+                if neighbor is not None:
+                    topology_neighbors[sid].add(neighbor)
+                    topology_neighbors[neighbor].add(sid)
+
+        def _ordered_route_segments(
+            segment_ids: list[int], start_signal_id: int, end_signal_id: int,
+        ) -> tuple[list[int], bool]:
+            """Order a route's Seg set from its entry signal to its exit signal.
+
+            Route rows identify axle sections, not a traversal sequence.  The
+            order must therefore be recovered from the imported Seg topology.
+            """
+            covered = list(dict.fromkeys(segment_ids))
+            if len(covered) < 2:
+                return covered, True
+            covered_set = set(covered)
+            start_seg = _sig_seg(start_signal_id)
+            end_seg = _sig_seg(end_signal_id)
+
+            def attached_to(signal_seg: int) -> list[int]:
+                if signal_seg in covered_set:
+                    return [signal_seg]
+                return [
+                    sid for sid in covered
+                    if signal_seg in topology_neighbors[sid]
+                ]
+
+            start_candidates = attached_to(start_seg)
+            end_candidates = attached_to(end_seg)
+            endpoints = [
+                sid for sid in covered
+                if len(topology_neighbors[sid] & covered_set) <= 1
+            ]
+            if not start_candidates:
+                start_candidates = endpoints or [covered[0]]
+            if not end_candidates:
+                end_candidates = endpoints or [covered[-1]]
+
+            best_path: list[int] | None = None
+            for source in start_candidates:
+                queue: list[list[int]] = [[source]]
+                visited = {source}
+                while queue:
+                    path = queue.pop(0)
+                    current = path[-1]
+                    if current in end_candidates:
+                        if best_path is None or len(path) > len(best_path):
+                            best_path = path
+                        continue
+                    for neighbor in sorted(topology_neighbors[current] & covered_set):
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            queue.append(path + [neighbor])
+
+            if best_path is not None and set(best_path) == covered_set:
+                return best_path, True
+            return covered, False
+
+        routes = []
+        for rid in cat.route_ids:
+            rd = cat.get(rid)
+            if rd is None: continue
+            raw_path_segs = []
+            for sec_id in rd.axle_section_ids:
+                for s in axle_segs.get(sec_id, []):
+                    if s not in raw_path_segs: raw_path_segs.append(s)
+            path_segs, path_order_complete = _ordered_route_segments(
+                raw_path_segs, rd.start_signal_id, rd.end_signal_id,
+            )
+            routes.append({
+                "id": rid, "name": rd.name,
+                "startSig": rd.start_signal_id, "startSigName": _sig_name(rd.start_signal_id),
+                "endSig": rd.end_signal_id, "endSigName": _sig_name(rd.end_signal_id),
+                "pathSegs": path_segs,
+                "rawPathSegs": raw_path_segs,
+                "pathOrderComplete": path_order_complete,
+                "switches": rd.required_switches,
+                "conflicts": sorted(cat.conflicts_with(rid)),
+                "axleSections": rd.axle_section_ids,
+            })
+
+        return {
+            "segments": segs_out, "signals": signals, "switches": switches,
+            "routes": routes,
+            "layout": {
+                "rows": max(row for row, _ in assigned.values()) + 1,
+                "segmentCount": len(segs_out),
+            },
+        }
+
     def _load_station_catalog(self) -> list[JsonDict]:
         with self.stations_path.open("r", encoding="utf-8-sig", newline="") as handle:
             rows = list(csv.DictReader(handle))
@@ -427,11 +815,14 @@ class ApiHandler(BaseHTTPRequestHandler):
     experiment_registry: PowerExperimentRegistry | None = None
     cab_hardware_controller: DriverCabHardwareController | None = None
     cab_hardware_lock = threading.RLock()
+    vision_publisher: VisionUdpPublisher | None = None
+    vision_hardware_lock = threading.RLock()
 
     def do_GET(self) -> None:
         try:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+
             if path == "/api/health":
                 self._send_json(self._health())
             elif path == "/api/lines/9/macro":
@@ -444,6 +835,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.power_topology())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
+            elif path == "/api/sim/topology-state":
+                self._send_json(self._main_engine_topology_state())
             elif path == "/api/sim/interlocking/state":
                 snap = self.engine.snapshot() if self.engine else None
                 self._send_json(snap.interlocking if snap else {
@@ -460,6 +853,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json(controller.status())
+            elif path == "/api/hardware/vision/status":
+                publisher = self._vision_publisher()
+                if publisher is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(publisher.status())
             elif match := re.fullmatch(r"/api/sim/passenger-history/([^/]+)", path):
                 if self.engine is None:
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
@@ -532,12 +931,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.member_d_phase2_full_demo())
             elif path == "/api/phase2/member-c/demo":
                 self._serve_html_file(ROOT / "member-c-demo.html")
+            elif path == "/api/phase2/member-c/member-c-topology.js":
+                self._serve_static_file(ROOT / "member-c-topology.js", "application/javascript; charset=utf-8")
             elif path == "/api/phase2/member-c/state":
                 self._send_json(self.service.member_c_state())
             elif path == "/api/phase2/member-c/step":
                 self._send_json(self.service.member_c_step())
             elif path == "/api/phase2/member-c/reset":
                 self._send_json(self.service.member_c_reset())
+            elif path == "/api/phase2/member-c/static-routes":
+                self._send_json(self.service.member_c_static_routes())
             elif match := re.fullmatch(r"/api/track/segments/(\d+)/context", path):
                 self._send_json(self.service.segment_context(int(match.group(1))))
             else:
@@ -549,6 +952,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+
+            if path == "/api/phase2/member-c/manual/place":
+                payload = self._read_json_body()
+                self._send_json(self.service.member_c_place_train(int(payload.get("segmentId", 0))))
+                return
+            if path == "/api/phase2/member-c/manual/place-route":
+                payload = self._read_json_body()
+                self._send_json(self.service.member_c_place_train_for_route(str(payload.get("routeId", ""))))
+                return
+            if path == "/api/phase2/member-c/manual/request-route":
+                payload = self._read_json_body()
+                self._send_json(self.service.member_c_request_manual_route(
+                    str(payload["routeId"]) if payload.get("routeId") is not None else None
+                ))
+                return
             if path.startswith("/api/passenger-sim/"):
                 payload = self._read_json_body()
                 sim = self.service.passenger_sim
@@ -564,7 +982,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "action": action, "state": sim.snapshot()})
                 return
 
-            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/speed"}:
+            if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/speed", "/api/sim/step", "/api/sim/tick-interval"}:
                 if not self.engine:
                     self._send_json(
                         {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
@@ -595,6 +1013,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/sim/stop":
                 self.engine.stop()
                 self._send_json({"ok": True, "action": "stop"})
+            elif path == "/api/sim/step":
+                self.engine.step_once()
+                self._send_json(self._main_engine_topology_state())
+            elif path == "/api/sim/tick-interval":
+                payload = self._read_json_body()
+                interval_ms = float(payload.get("intervalMs", self.engine._tick_interval_seconds * 1000))
+                applied_seconds = self.engine.set_tick_interval_seconds(interval_ms / 1000.0)
+                self._send_json({"ok": True, "tickIntervalMs": round(applied_seconds * 1000)})
             elif path == "/api/sim/speed":
                 payload = self._read_json_body()
                 try:
@@ -659,6 +1085,34 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json(controller.disconnect())
+            elif path == "/api/hardware/vision/connect":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    try:
+                        publisher = self._vision_publisher(self._read_json_body())
+                        if publisher is None:
+                            raise RuntimeError("vision publisher is unavailable")
+                        self._send_json(publisher.connect(), HTTPStatus.ACCEPTED)
+                    except (TypeError, ValueError) as exc:
+                        self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path == "/api/hardware/vision/disconnect":
+                publisher = self._vision_publisher()
+                if publisher is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json(publisher.disconnect())
+            elif path == "/api/hardware/logs/clear":
+                controller = self._driver_cab_controller()
+                publisher = self._vision_publisher()
+                if controller is None or publisher is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json({
+                        "ok": True,
+                        "driverCab": controller.clear_logs()["status"],
+                        "vision": publisher.clear_logs()["status"],
+                    })
             elif path == "/api/hardware/driver-cab/plc/connect":
                 controller = self._driver_cab_controller()
                 if controller is None:
@@ -761,9 +1215,102 @@ class ApiHandler(BaseHTTPRequestHandler):
             base["clockState"] = self.engine.clock.state.value
             base["simTimeStr"] = snap.sim_time_str if snap else "--:--:--"
             base["activeTrains"] = len([t for t in (snap.trains if snap else []) if t.get("phase") != "IDLE"])
+            if ApiHandler.vision_publisher is not None:
+                base["visionAdapter"] = ApiHandler.vision_publisher.status()["status"]["state"]
         else:
             base["simEngine"] = "not_attached"
         return base
+
+    def _topology_start_options(self) -> list[JsonDict]:
+        if self.engine is None:
+            return []
+        options: list[JsonDict] = []
+        for station in self.service.station_mappings():
+            for platform in station.get("platforms", []):
+                segment_id = platform.get("segmentId")
+                if segment_id is None:
+                    continue
+                directions = self.engine.available_initial_directions(str(station["stationCode"]), int(segment_id))
+                if directions:
+                    options.append({"segmentId": int(segment_id), "stationCode": station["stationCode"], "stationName": station["stationName"], "directions": list(directions)})
+        return options
+    def _main_engine_topology_state(self) -> JsonDict:
+        """Project the main engine onto the established Member C topology contract."""
+        static = self.service.member_c_static_routes()
+        if self.engine is None or self.engine.snapshot() is None:
+            return {
+                "tick": 0, "simTimeMs": 0, "clockState": "IDLE",
+                "segments": static.get("segments", []), "trains": [], "routes": [],
+                "signals": static.get("signals", []), "axleSections": [], "switches": [],
+                "segTrainColors": {}, "events": [], "startOptions": self._topology_start_options(),
+                "occupiedCount": 0, "totalAxleSections": len(self.service.line_map.get("axleSections", [])),
+                "lockedRouteCount": 0, "requestedRoutesCount": 0,
+            }
+        snap = self.engine.snapshot()
+        assert snap is not None
+        interlocking = snap.interlocking
+        sections = interlocking.get("sections", [])
+        aspect_by_signal = {str(item.get("signalId")): item.get("aspect", "RED") for item in interlocking.get("signals", [])}
+        colors = ("#58a6ff", "#f0c040", "#f778ba", "#39d0c8", "#8fc31f")
+        seg_train_colors: dict[int, str] = {}
+        trains = []
+        for index, train in enumerate(snap.trains):
+            color = colors[index % len(colors)]
+            segment_id = train.get("currentSegmentId")
+            covered_segments = sorted(
+                int(item)
+                for item in self.engine.section_occupation.covered_segments_for(str(train.get("trainId")))
+            ) if self.engine is not None else []
+            if segment_id is not None:
+                seg_train_colors[int(segment_id)] = color
+            for covered_segment_id in covered_segments:
+                seg_train_colors[covered_segment_id] = color
+            trains.append({
+                "id": train.get("trainId"), "segId": segment_id,
+                "offsetM": train.get("currentSegmentOffsetM", 0.0),
+                "coveredSegmentIds": covered_segments,
+                "positionM": train.get("pathPositionM", 0.0),
+                "speedMps": train.get("speedMps", 0.0),
+                "direction": "FORWARD" if train.get("direction") == "UP" else "BACKWARD",
+                "directionCode": train.get("direction"),
+                "lengthM": train.get("trainLengthM", 120.0), "phase": train.get("phase", "IDLE"),
+                "color": color, "routeFailureReason": train.get("routeFailureReason"),
+                "movementAuthorityReason": train.get("movementAuthorityReason"),
+                "routeIds": train.get("routeChainIds", []),
+                "currentStation": train.get("currentStation"),
+                "currentStationCode": train.get("currentStationCode"),
+                "nextStation": train.get("nextStation"),
+                "nextStationCode": train.get("nextStationCode"),
+                "dwellRemainingSec": train.get("dwellRemainingSec", 0.0),
+                "routeRetryAtMs": train.get("routeRetryAtMs"),
+            })
+        signals = [{**item, "aspect": aspect_by_signal.get(str(item.get("id")), "RED")} for item in static.get("signals", [])]
+        routes = interlocking.get("routes", [])
+        events = []
+        for decision in snap.dispatch_decisions:
+            action = decision.get("action")
+            if action == "TURNBACK":
+                events.append({
+                    "category": "折返",
+                    "message": f"列车 {decision.get('trainId')} 在 {decision.get('stationId')} 完成折返",
+                    "tick": snap.tick,
+                })
+            elif action in {"HOLD", "STAGGER_DEPARTURE", "DWELL_EXTEND"}:
+                events.append({
+                    "category": "等待",
+                    "message": f"列车 {decision.get('trainId')} 暂缓发车：{decision.get('reason')}",
+                    "tick": snap.tick,
+                })
+        return {
+            "tick": snap.tick, "simTimeMs": snap.sim_time_ms, "clockState": snap.clock_state,
+            "segments": static.get("segments", []), "startOptions": self._topology_start_options(), "trains": trains,
+            "routes": routes, "signals": signals, "axleSections": sections,
+            "switches": interlocking.get("switches", []), "segTrainColors": seg_train_colors,
+            "events": events, "occupiedCount": sum(1 for item in sections if item.get("occupied")),
+            "totalAxleSections": len(sections),
+            "lockedRouteCount": sum(1 for item in routes if item.get("state") in ("LOCKED", "APPROACH_LOCKED")),
+            "requestedRoutesCount": len(routes),
+        }
 
     def _sim_state(self) -> JsonDict:
         if self.engine is None:
@@ -783,6 +1330,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "tick": snap.tick,
                 "simTimeMs": snap.sim_time_ms,
                 "speedMultiplier": snap.speed_multiplier,
+                "tickIntervalMs": round(self.engine._tick_interval_seconds * 1000),
             },
             "trains": snap.trains,
             "stations": snap.stations,
@@ -913,6 +1461,42 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ApiHandler.cab_hardware_controller = controller
             return controller
 
+    def _vision_publisher(self, payload: JsonDict | None = None) -> VisionUdpPublisher | None:
+        if self.engine is None:
+            return None
+        with ApiHandler.vision_hardware_lock:
+            publisher = ApiHandler.vision_publisher
+            needs_rebuild = publisher is None or publisher.engine is not self.engine or payload is not None
+            if not needs_rebuild:
+                return publisher
+            if publisher is not None:
+                publisher.disconnect()
+            config = payload or {}
+            signal_source_map = config.get("signalSourceMap")
+            switch_source_map = config.get("switchSourceMap")
+            if signal_source_map is not None and not isinstance(signal_source_map, dict):
+                raise ValueError("signalSourceMap must be an object")
+            if switch_source_map is not None and not isinstance(switch_source_map, dict):
+                raise ValueError("switchSourceMap must be an object")
+            publisher = VisionUdpPublisher(
+                self.engine,
+                remote_host=str(config.get("remoteHost", "18.32.115.28")),
+                remote_port=int(config.get("remotePort", 8303)),
+                local_host=str(config.get("localHost", "0.0.0.0")),
+                local_port=int(config.get("localPort", 8303)),
+                interval_s=float(config.get("intervalMs", 100.0)) / 1000.0,
+                layout=str(config.get("layout", COMPACT_LAYOUT)),
+                primary_train_id=(
+                    str(config["primaryTrainId"])
+                    if config.get("primaryTrainId") is not None
+                    else None
+                ),
+                signal_source_map=signal_source_map,
+                switch_source_map=switch_source_map,
+            )
+            ApiHandler.vision_publisher = publisher
+            return publisher
+
     @classmethod
     def _power_experiment_registry(cls) -> PowerExperimentRegistry:
         if cls.experiment_registry is None:
@@ -1006,6 +1590,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+    def _serve_static_file(self, file_path: Path, content_type: str) -> None:
+        body = file_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self._send_cors_headers()
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_html_file(self, file_path: Path) -> None:
         body = file_path.read_bytes()
         self.send_response(HTTPStatus.OK)
@@ -1037,6 +1630,13 @@ def main() -> None:
     parser.add_argument("--run-dir", default=str(DEFAULT_RUN_DIR))
     parser.add_argument("--scenario", default=str(DEFAULT_SCENARIO))
     parser.add_argument("--ws-port", type=int, default=8001)
+    parser.add_argument("--vision-enabled", action="store_true", help="Start the Line 9 vision UDP publisher")
+    parser.add_argument("--vision-host", default="18.32.115.28", help="Vision controller IPv4 address")
+    parser.add_argument("--vision-port", type=int, default=8303, help="Vision controller receive port")
+    parser.add_argument("--vision-local-host", default="0.0.0.0", help="Local IPv4 address to bind")
+    parser.add_argument("--vision-local-port", type=int, default=8303, help="Local UDP source port; capture-confirmed default is 8303; 0 chooses an ephemeral port")
+    parser.add_argument("--vision-layout", choices=["compact", "fixed"], default="compact")
+    parser.add_argument("--vision-train-id", default=None, help="Train to publish as the cab-view train")
     args = parser.parse_args()
 
     service = Line9DataService(Path(args.cache), Path(args.stations), Path(args.run_dir))
@@ -1062,6 +1662,26 @@ def main() -> None:
         except Exception as exc:
             print(f"[engine] 初始化失败: {exc}")
 
+    if args.vision_enabled and ApiHandler.engine is not None:
+        vision = VisionUdpPublisher(
+            ApiHandler.engine,
+            remote_host=args.vision_host,
+            remote_port=args.vision_port,
+            local_host=args.vision_local_host,
+            local_port=args.vision_local_port,
+            layout=args.vision_layout,
+            primary_train_id=args.vision_train_id,
+        )
+        ApiHandler.vision_publisher = vision
+        vision.connect()
+        mapping = vision.status()["status"]["mapping"]
+        print(
+            "[vision] UDP publisher enabled: "
+            f"{args.vision_local_host}:{args.vision_local_port} -> {args.vision_host}:{args.vision_port}, "
+            f"layout={args.vision_layout}, mapped signals={mapping['mappedSignalCount']}/{mapping['protocolSignalCount']}, "
+            f"switches={mapping['mappedSwitchCount']}/{mapping['protocolSwitchCount']}"
+        )
+
     # ── WebSocket ──
     ws = WebSocketBroadcaster(args.host, args.ws_port)
     ws.start()
@@ -1078,15 +1698,21 @@ def main() -> None:
     print("  GET  /api/sim/state")
     print("  GET  /api/sim/interlocking/state")
     print("  GET  /api/sim/dispatch/state")
+    print("  GET  /api/hardware/vision/status")
     print("  POST /api/sim/start")
     print("  POST /api/sim/pause")
     print("  POST /api/sim/resume")
     print("  POST /api/sim/stop")
+    print("  POST /api/hardware/vision/connect")
+    print("  POST /api/hardware/vision/disconnect")
+    print("  POST /api/hardware/logs/clear")
     try:
         server.serve_forever()
     finally:
         if ApiHandler.cab_hardware_controller:
             ApiHandler.cab_hardware_controller.disconnect()
+        if ApiHandler.vision_publisher:
+            ApiHandler.vision_publisher.disconnect()
         if ApiHandler.engine:
             ApiHandler.engine.stop()
 

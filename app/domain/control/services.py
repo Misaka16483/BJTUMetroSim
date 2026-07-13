@@ -433,7 +433,7 @@ class ATOController:
     @staticmethod
     def _target_position_m(target: AtoTarget) -> float:
         if target.path_plan is not None:
-            return target.path_plan.total_length_m
+            return min(target.target_position_m, target.path_plan.total_length_m)
         return target.target_position_m
 
     @staticmethod

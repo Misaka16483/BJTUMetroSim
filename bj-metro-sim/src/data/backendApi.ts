@@ -477,6 +477,7 @@ export interface SimClock {
   tick: number;
   simTimeMs: number;
   speedMultiplier?: number;
+  tickIntervalMs?: number;
 }
 
 export interface InterlockingRuntimeState {
@@ -605,6 +606,17 @@ export function simResume(): Promise<unknown> {
 
 export function simStop(): Promise<unknown> {
   return postJson('/api/sim/stop');
+}
+
+export function simSetTickInterval(intervalMs: number): Promise<{ ok: boolean; tickIntervalMs: number }> {
+  return fetch('/api/sim/tick-interval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ intervalMs }),
+  }).then((resp) => {
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json() as Promise<{ ok: boolean; tickIntervalMs: number }>;
+  });
 }
 
 export function simSetSpeedMultiplier(multiplier: number): Promise<unknown> {
@@ -759,13 +771,29 @@ export function simSendTrainManualCommand(trainId: string, tractionPercent: numb
 export type DriverCabConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
 export type DisplayConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RETRYING';
 
+export type HardwareLogEndpoint = 'system' | 'plc' | 'networkScreen' | 'signalScreen' | 'vision';
+export type HardwareLogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+export interface HardwareConnectionLog {
+  sequence: number;
+  timestamp: string;
+  endpoint: HardwareLogEndpoint;
+  level: HardwareLogLevel;
+  event: string;
+  message: string;
+  details: Record<string, unknown>;
+}
+
 export interface DriverCabDisplayStatus {
   state: DisplayConnectionState;
   host: string;
   port: number;
   framesSent: number;
+  framesReceived: number;
+  bytesReceived: number;
   connectedAt: string | null;
   lastFrameAt: string | null;
+  lastReceivedAt: string | null;
   lastError: string | null;
 }
 
@@ -774,7 +802,7 @@ export interface DriverCabHardwareStatus {
   host: string;
   port: number;
   trainId: string;
-  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'FAIL_SAFE_BRAKE';
+  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'ATO_ACTIVE' | 'FAIL_SAFE_BRAKE';
   framesReceived: number;
   connectedAt: string | null;
   lastFrameAt: string | null;
@@ -788,6 +816,8 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     keyActive: boolean;
     atoStart: boolean;
+    atoAvailableEcho: boolean;
+    atoActiveEcho: boolean;
   } | null;
   lastCommand: {
     tractionPercent: number;
@@ -795,12 +825,19 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     handleMode: string;
   } | null;
+  plcOutput: {
+    atoAvailable: boolean;
+    atoActive: boolean;
+    frameLength: number;
+    speedCmps: number | null;
+  };
   networkScreenHost: string;
   networkScreenPort: number;
   signalScreenHost: string;
   signalScreenPort: number;
   networkScreen: DriverCabDisplayStatus;
   signalScreen: DriverCabDisplayStatus;
+  logs: HardwareConnectionLog[];
 }
 
 export interface DriverCabHardwareResponse {
@@ -974,4 +1011,88 @@ export async function fetchSimReport(runId?: number): Promise<SimReportResponse>
   const suffix = runId !== undefined ? `/${runId}` : '';
   const response = await fetch(`/api/sim/report${suffix}`);
   return response.json() as Promise<SimReportResponse>;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Vision 硬件 API
+// ═══════════════════════════════════════════════════════════
+
+export type VisionConnectionState = 'DISCONNECTED' | 'STARTING' | 'CONNECTED' | 'RETRYING';
+export type VisionFrameLayout = 'compact' | 'fixed';
+
+export interface VisionHardwareStatus {
+  state: VisionConnectionState;
+  remoteHost: string;
+  remotePort: number;
+  localHost: string;
+  localPort: number;
+  intervalMs: number;
+  layout: VisionFrameLayout;
+  framesSent: number;
+  bytesSent: number;
+  lastFrameSize: number;
+  lastFrameAt: string | null;
+  lastError: string | null;
+  nextLiveCounter: number;
+  mapping: {
+    protocolSignalCount: number;
+    mappedSignalCount: number;
+    protocolSwitchCount: number;
+    mappedSwitchCount: number;
+    unmappedSignalsDefault: string;
+    unmappedSwitchesDefault: string;
+  };
+  logs: HardwareConnectionLog[];
+}
+
+export interface VisionHardwareResponse {
+  ok: boolean;
+  status: VisionHardwareStatus;
+  error?: string;
+}
+
+export interface VisionConnectOptions {
+  remoteHost: string;
+  remotePort: number;
+  localHost?: string;
+  localPort: number;
+  intervalMs?: number;
+  layout: VisionFrameLayout;
+  primaryTrainId?: string;
+}
+
+export function fetchVisionStatus(): Promise<VisionHardwareResponse> {
+  return getJson<VisionHardwareResponse>('/api/hardware/vision/status');
+}
+
+export function connectVision(options: VisionConnectOptions): Promise<VisionHardwareResponse> {
+  return fetch('/api/hardware/vision/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<VisionHardwareResponse>;
+  });
+}
+
+export function disconnectVision(): Promise<VisionHardwareResponse> {
+  return fetch('/api/hardware/vision/disconnect', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<VisionHardwareResponse>;
+  });
+}
+
+export interface ClearHardwareLogsResponse {
+  ok: boolean;
+  driverCab: DriverCabHardwareStatus;
+  vision: VisionHardwareStatus;
+  error?: string;
+}
+
+export function clearHardwareLogs(): Promise<ClearHardwareLogsResponse> {
+  return fetch('/api/hardware/logs/clear', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<ClearHardwareLogsResponse>;
+  });
 }

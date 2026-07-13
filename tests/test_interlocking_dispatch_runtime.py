@@ -63,7 +63,7 @@ class InterlockingRuntimeTests(unittest.TestCase):
             ):
                 path = engine._path_plan_for_station_pair(origin, destination)
                 self.assertIsNotNone(path)
-                self.assertTrue(runtime._sections_for_path(path))
+                self.assertTrue(engine.route_chain_planner.plan_between_platform_sets(engine._station_platform_ids[origin], engine._station_platform_ids[destination], "forward" if destination > origin else "backward").route_ids)
 
     def test_two_train_departure_is_serialized_by_real_interval_occupation(self) -> None:
         engine = make_engine()

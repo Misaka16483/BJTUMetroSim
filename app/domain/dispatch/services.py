@@ -21,6 +21,8 @@ class DispatchContext:
     power_traction_limit_ratio: float = 1.0
     disturbance_active: bool = False
     route_available: bool = True
+    terminal_turnback: bool = False
+    turnback_direction: str | None = None
     onboard_pax: int = 0
     capacity_pax: int = 600
 
@@ -129,6 +131,20 @@ class RuleBasedDispatchService:
     def decide(self, context: DispatchContext) -> DispatchDecision:
         self._sequence += 1
         decision_id = f"DD-{self._sequence:04d}"
+        # Terminal reversal is an operating-plan decision, not an ATO shortcut.
+        # The engine performs it only after confirming a legal reverse route.
+        if context.terminal_turnback:
+            return DispatchDecision(
+                decision_id,
+                context.sim_time_ms,
+                context.train_id,
+                context.station_id,
+                "TURNBACK",
+                0.0,
+                "TERMINAL_REVERSAL_" + (context.turnback_direction or "UNKNOWN"),
+                expected_impact={"direction": context.turnback_direction or "UNKNOWN"},
+            )
+
         cfg = self.config
 
         # 规则1：供电限流 → 错峰发车

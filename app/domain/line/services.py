@@ -301,6 +301,39 @@ class TrackQueryService:
         return low <= offset <= high
 
 
+class PathTrackQuery:
+    """Route-aware view of the immutable track topology.
+
+    A train's approved route is represented as an ordered Seg sequence.  This
+    adapter keeps static attributes in ``TrackQueryService`` while resolving
+    forward/backward neighbours only within that approved sequence.  It lets
+    consumers such as section-occupation detection follow the train's actual
+    path through a locked turnout instead of guessing from the global graph.
+    """
+
+    def __init__(self, track: TrackQueryService, segment_ids: list[int] | tuple[int, ...]) -> None:
+        self.track = track
+        self.segment_ids = tuple(int(segment_id) for segment_id in segment_ids)
+        if len(set(self.segment_ids)) != len(self.segment_ids):
+            raise ValueError("path segment IDs must be unique")
+        self._index_by_segment = {
+            segment_id: index for index, segment_id in enumerate(self.segment_ids)
+        }
+
+    def get_segment(self, seg_id: int) -> JsonDict | None:
+        return self.track.get_segment(seg_id)
+
+    def get_next_segments(self, seg_id: int, direction: str = "forward") -> list[JsonDict]:
+        index = self._index_by_segment.get(int(seg_id))
+        if index is None:
+            return []
+        next_index = index + 1 if direction == "forward" else index - 1
+        if next_index < 0 or next_index >= len(self.segment_ids):
+            return []
+        segment = self.track.get_segment(self.segment_ids[next_index])
+        return [segment] if segment is not None else []
+
+
 class PathPlanner:
     def __init__(
         self,
@@ -342,6 +375,59 @@ class PathPlanner:
         if not plans:
             raise ValueError(f"no segment path from platform {origin_platform_id} to {destination_platform_id}")
         return min(plans, key=lambda item: item.total_length_m)
+
+    def plan_for_segment_sequence(
+        self,
+        origin_platform_id: int,
+        destination_platform_id: int,
+        segment_ids: list[int],
+        direction: str,
+    ) -> PathPlan:
+        """Build a path plan from a caller-authorized ordered Seg sequence.
+
+        Unlike :meth:`plan_between_platforms`, this method never searches the
+        topology or chooses a shortest path.  It is used when an interlocking
+        route chain has already decided the physical path.
+        """
+        if direction not in {"forward", "backward"}:
+            raise ValueError("direction must be 'forward' or 'backward'")
+        if not segment_ids:
+            raise ValueError("authorized segment sequence is empty")
+
+        origin = self._platform(origin_platform_id)
+        destination = self._platform(destination_platform_id)
+        start_segment_id = int(origin["segmentId"])
+        end_segment_id = int(destination["segmentId"])
+        if segment_ids[0] != start_segment_id or segment_ids[-1] != end_segment_id:
+            raise ValueError("authorized sequence does not start/end at the requested platforms")
+
+        for current, following in zip(segment_ids, segment_ids[1:]):
+            next_ids = {
+                int(segment["id"])
+                for segment in self.track.get_next_segments(current, direction)
+            }
+            if following not in next_ids:
+                raise ValueError(f"non-contiguous authorized sequence: {current} -> {following}")
+
+        start_offset_m = float(origin.get("offsetM") or 0.0)
+        end_offset_m = float(destination.get("offsetM") or 0.0)
+        portions = self._build_path_portions(segment_ids, start_offset_m, end_offset_m, direction)
+        total_length_m = portions[-1].path_end_m if portions else 0.0
+        if total_length_m <= 0:
+            raise ValueError("authorized platform path has no travel distance")
+
+        return PathPlan(
+            origin_platform_id=origin_platform_id,
+            destination_platform_id=destination_platform_id,
+            direction=direction,
+            segment_ids=tuple(segment_ids),
+            constraints=self._build_constraints(portions, direction),
+            total_length_m=round(total_length_m, 6),
+            start_segment_id=start_segment_id,
+            start_offset_m=start_offset_m,
+            end_segment_id=end_segment_id,
+            end_offset_m=end_offset_m,
+        )
 
     def _plan_between_platforms(
         self,

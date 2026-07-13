@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.adapters.binary import (
-    UdpFrameClient,
+    TcpFrameClient,
     write_display_header,
     write_float_le,
     write_u8,
@@ -27,7 +27,9 @@ class SignalScreenState:
     cm_state: int = 0
     mm_state: int = 0
     ctc_state: int = 0
-    speed_mps: float = 0.0
+    run_dir: int = 0
+    reserve: int = 0
+    speed_kmh: float = 0.0
     acceleration_mps2: float = 0.0
     pull_switch: int = 0
     speed_limit: int = 0
@@ -42,21 +44,21 @@ class SignalScreenState:
 
 
 class SignalScreenFrameBuilder:
-    """Builder for the 66-byte MMI signal screen frame.
+    """Builder for the 68-byte MMI signal screen frame seen on the wire.
 
-    The source table overlaps _nRunDir/_nReserve with _nSpeed at byte 42. The
-    frame here follows the continuous numeric display layout from _nSpeed at 42,
-    because it matches the remaining offsets and total length.
+    Working traffic keeps _nRunDir/_nReserve at 42..43 and starts speed at 44.
+    Its _uTotalLen field is the legacy value 62 despite a 68-byte TCP payload.
     """
 
-    frame_size_bytes = 66
+    frame_size_bytes = 68
+    header_total_size_bytes = 62
     data_size_bytes = 42
 
     def build(self, state: SignalScreenState) -> bytes:
         now = datetime.now()
         timestamp_ms = state.timestamp_ms if state.timestamp_ms is not None else int(now.timestamp() * 1000)
         frame = bytearray(self.frame_size_bytes)
-        write_display_header(frame, self.frame_size_bytes, self.data_size_bytes, timestamp_ms)
+        write_display_header(frame, self.header_total_size_bytes, self.data_size_bytes, timestamp_ms)
         self._write_time(frame, state, now)
         write_u8(frame, 36, state.curr_station_id)
         write_u8(frame, 37, state.next_station_id)
@@ -64,18 +66,20 @@ class SignalScreenFrameBuilder:
         write_u8(frame, 39, state.cm_state)
         write_u8(frame, 40, state.mm_state)
         write_u8(frame, 41, state.ctc_state)
-        write_float_le(frame, 42, state.speed_mps)
-        write_float_le(frame, 46, state.acceleration_mps2)
-        write_u16_le(frame, 50, state.pull_switch)
-        write_u16_le(frame, 52, state.speed_limit)
-        write_u8(frame, 54, state.mode)
-        write_u8(frame, 55, state.pull_state)
-        write_u8(frame, 56, state.brake_state)
-        write_u8(frame, 57, state.urgency_stop_state)
-        write_u8(frame, 58, state.event_id)
-        write_u8(frame, 59, state.sig_state)
-        write_u16_le(frame, 60, state.train_no)
-        write_float_le(frame, 62, state.next_station_distance_m)
+        write_u8(frame, 42, state.run_dir)
+        write_u8(frame, 43, state.reserve)
+        write_float_le(frame, 44, state.speed_kmh)
+        write_float_le(frame, 48, state.acceleration_mps2)
+        write_u16_le(frame, 52, state.pull_switch)
+        write_u16_le(frame, 54, state.speed_limit)
+        write_u8(frame, 56, state.mode)
+        write_u8(frame, 57, state.pull_state)
+        write_u8(frame, 58, state.brake_state)
+        write_u8(frame, 59, state.urgency_stop_state)
+        write_u8(frame, 60, state.event_id)
+        write_u8(frame, 61, state.sig_state)
+        write_u16_le(frame, 62, state.train_no)
+        write_float_le(frame, 64, state.next_station_distance_m)
         return bytes(frame)
 
     @staticmethod
@@ -97,5 +101,5 @@ class SignalScreenClient:
 
     def send_state(self, state: SignalScreenState) -> None:
         frame = self.builder.build(state)
-        with UdpFrameClient(self.host, self.port, self.timeout_s) as client:
+        with TcpFrameClient(self.host, self.port, self.timeout_s) as client:
             client.send_frame(frame)
