@@ -163,6 +163,7 @@ class PowerService:
             )
             for request in requests
         ]
+        storage_checkpoint = self.solver.storage_checkpoint() if self.solver else None
         snapshot = self.solver.solve(loads, dt_sec=dt_sec, sim_time_ms=sim_time_ms) if self.solver else None
         if snapshot is None:
             return self._update_legacy(requests, dt_sec)
@@ -178,6 +179,8 @@ class PowerService:
             failure_reasons.append("POWER_BALANCE_EXCEEDED")
         accounting_dt_sec = dt_sec
         if failure_reasons:
+            if self.solver is not None and storage_checkpoint is not None:
+                self.solver.restore_storage_checkpoint(storage_checkpoint)
             self.last_failed_network_snapshot = snapshot
             self.last_solver_failure = {
                 "type": "POWER_SOLVER_FAILURE",

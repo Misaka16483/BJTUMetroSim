@@ -12,6 +12,7 @@ from app.domain.power.network_models import (
     PowerFlowSnapshot,
     RegenPathFlow,
     SubstationPowerFlow,
+    SupercapacitorPowerFlow,
     TrainElectricalLoad,
     TrainPowerFlow,
 )
@@ -33,6 +34,11 @@ class _RegenAllocation:
     source_voltages_v: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
     sink_currents_a: dict[str, float] = field(default_factory=lambda: defaultdict(float))
     sink_voltages_v: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
+    storage_charged_kw: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    storage_discharged_kw: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    storage_conversion_losses_kw: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    storage_supplied_by_train_kw: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    storage_transfer_losses_kw: float = 0.0
     paths: list[RegenPathFlow] = field(default_factory=list)
 
 
@@ -42,6 +48,29 @@ class DCTractionPowerFlowSolver:
     def __init__(self, network: TractionPowerNetwork) -> None:
         self.network = network
         self._substation_energy_kwh: dict[str, float] = defaultdict(float)
+        self._storage_energy_kwh = {
+            item.storage_id: item.rated_energy_kwh * item.initial_soc
+            for item in network.supercapacitor_storages.values()
+        }
+        self._storage_charged_kwh: dict[str, float] = defaultdict(float)
+        self._storage_discharged_kwh: dict[str, float] = defaultdict(float)
+
+    def storage_checkpoint(self) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+        storage_ids = tuple(self.network.supercapacitor_storages)
+        return (
+            {storage_id: self._storage_energy_kwh[storage_id] for storage_id in storage_ids},
+            {storage_id: self._storage_charged_kwh.get(storage_id, 0.0) for storage_id in storage_ids},
+            {storage_id: self._storage_discharged_kwh.get(storage_id, 0.0) for storage_id in storage_ids},
+        )
+
+    def restore_storage_checkpoint(
+        self,
+        checkpoint: tuple[dict[str, float], dict[str, float], dict[str, float]],
+    ) -> None:
+        energy, charged, discharged = checkpoint
+        self._storage_energy_kwh = dict(energy)
+        self._storage_charged_kwh = defaultdict(float, charged)
+        self._storage_discharged_kwh = defaultdict(float, discharged)
 
     def solve(
         self,
@@ -56,7 +85,8 @@ class DCTractionPowerFlowSolver:
             load.train_id: self._load_source_paths(load)
             for load in loads
         }
-        regen = self._allocate_regen(loads, source_paths_by_train)
+        self._apply_storage_standby_loss(dt_sec)
+        regen = self._allocate_regen(loads, source_paths_by_train, dt_sec)
         generated_regen_kw = sum(load.raw_regen_power_kw for load in loads)
         self_consumed_regen_kw = sum(load.self_consumed_regen_kw for load in loads)
         self_consumption_paths = [
@@ -80,7 +110,12 @@ class DCTractionPowerFlowSolver:
         feedback_regen_kw = regen.feedback_kw
         wasted_regen_kw = regen.wasted_kw
         effective_demand_kw = {
-            load.train_id: max(load.traction_demand_kw - regen.absorbed_by_train_kw[load.train_id], 0.0)
+            load.train_id: max(
+                load.traction_demand_kw
+                - regen.absorbed_by_train_kw[load.train_id]
+                - regen.storage_supplied_by_train_kw[load.train_id],
+                0.0,
+            )
             for load in loads
         }
 
@@ -227,6 +262,7 @@ class DCTractionPowerFlowSolver:
             substation_currents[substation_id] -= current_a
 
         contact_rail_flows = self._contact_rail_flows(feeder_currents)
+        storage_flows = self._storage_flows(regen)
         alerts = self._build_alerts(
             trains,
             substation_currents,
@@ -253,13 +289,16 @@ class DCTractionPowerFlowSolver:
             for sub_id, current in rectifier_substation_currents.items()
         )
         accepted_regen_kw = regen.generated_kw - wasted_regen_kw
-        actual_traction_kw = absorbed_regen_kw + delivered_demand_kw
-        total_losses_kw = losses_kw + regen.transfer_losses_kw
+        storage_charge_kw = sum(regen.storage_charged_kw.values())
+        storage_discharge_kw = sum(regen.storage_discharged_kw.values())
+        storage_delivered_kw = sum(regen.storage_supplied_by_train_kw.values())
+        actual_traction_kw = absorbed_regen_kw + storage_delivered_kw + delivered_demand_kw
+        total_losses_kw = losses_kw + regen.transfer_losses_kw + regen.storage_transfer_losses_kw
         balance_error_kw = abs(
-            rectifier_input_kw + accepted_regen_kw
-            - (actual_traction_kw + total_losses_kw + feedback_regen_kw)
+            rectifier_input_kw + accepted_regen_kw + storage_discharge_kw
+            - (actual_traction_kw + total_losses_kw + feedback_regen_kw + storage_charge_kw)
         )
-        balance_base_kw = max(rectifier_input_kw + accepted_regen_kw, 1.0)
+        balance_base_kw = max(rectifier_input_kw + accepted_regen_kw + storage_discharge_kw, 1.0)
         balance_error_ratio = balance_error_kw / balance_base_kw
         return PowerFlowSnapshot(
             sim_time_ms=sim_time_ms,
@@ -267,6 +306,7 @@ class DCTractionPowerFlowSolver:
             substations=substations,
             feeders=feeders,
             contact_rail_flows=contact_rail_flows,
+            supercapacitor_flows=storage_flows,
             generated_regen_kw=generated_regen_kw,
             self_consumed_regen_kw=self_consumed_regen_kw,
             absorbed_regen_kw=absorbed_regen_kw,
@@ -287,6 +327,7 @@ class DCTractionPowerFlowSolver:
         self,
         loads: list[TrainElectricalLoad],
         source_paths_by_train: dict[str, list[tuple[str, str, float]]] | None = None,
+        dt_sec: float = 0.0,
     ) -> _RegenAllocation:
         """Allocate regenerative energy only across electrically reachable paths."""
         allocation = _RegenAllocation(
@@ -302,9 +343,6 @@ class DCTractionPowerFlowSolver:
             for load in loads
             if load.traction_demand_kw > 1e-9
         }
-        if not regen_remaining:
-            return allocation
-
         path_by_train: dict[str, dict[str, tuple[str, float]]] = {}
         for load in loads:
             best_by_substation: dict[str, tuple[str, float]] = {}
@@ -382,6 +420,68 @@ class DCTractionPowerFlowSolver:
                 path_resistance_ohm=source_r + sink_r,
             ))
 
+        storage_modes: dict[str, str] = {}
+        storage_charge_capacity_kw = {
+            storage.storage_id: self._storage_charge_limit_kw(storage.storage_id, dt_sec)
+            for storage in self.network.supercapacitor_storages.values()
+            if self._storage_active(storage.storage_id)
+        }
+        for source_id in sorted(regen_remaining):
+            source_paths = path_by_train[source_id]
+            storage_paths = sorted(
+                (
+                    resistance,
+                    storage.storage_id,
+                    storage.substation_id,
+                    feeder_id,
+                )
+                for storage in self.network.supercapacitor_storages.values()
+                for substation_id, (feeder_id, resistance) in source_paths.items()
+                if substation_id == storage.substation_id
+                and self._storage_active(storage.storage_id)
+                and storage_charge_capacity_kw.get(storage.storage_id, 0.0) > 1e-9
+            )
+            for source_r, storage_id, substation_id, source_feeder in storage_paths:
+                available_kw = regen_remaining[source_id]
+                charge_limit_kw = storage_charge_capacity_kw.get(storage_id, 0.0)
+                if available_kw <= 1e-9 or charge_limit_kw <= 1e-9:
+                    continue
+                bus_voltage_v = self.network.substations[substation_id].no_load_voltage_v
+                current_a, generated_kw, delivered_kw, loss_kw = self._path_transfer(
+                    available_kw,
+                    charge_limit_kw,
+                    bus_voltage_v,
+                    source_r,
+                    0.0,
+                )
+                if current_a <= 1e-9:
+                    continue
+                storage = self.network.supercapacitor_storages[storage_id]
+                self._charge_storage(storage_id, delivered_kw, dt_sec)
+                storage_charge_capacity_kw[storage_id] = max(0.0, charge_limit_kw - delivered_kw)
+                regen_remaining[source_id] = max(0.0, available_kw - generated_kw)
+                storage_modes[storage_id] = "CHARGING"
+                allocation.storage_charged_kw[storage_id] += delivered_kw
+                allocation.storage_conversion_losses_kw[storage_id] += delivered_kw * (1.0 - storage.charge_efficiency)
+                allocation.transfer_losses_kw += loss_kw
+                allocation.accepted_by_source_kw[source_id] += generated_kw
+                allocation.source_currents_a[source_id] += current_a
+                allocation.source_voltages_v[source_id].append(bus_voltage_v + current_a * source_r)
+                allocation.feeder_currents_a[source_feeder] -= current_a
+                allocation.paths.append(RegenPathFlow(
+                    source_train_id=source_id,
+                    sink_type="SUPERCAPACITOR",
+                    sink_id=storage_id,
+                    via_substation_id=substation_id,
+                    source_feeder_id=source_feeder,
+                    sink_feeder_id=None,
+                    generated_kw=generated_kw,
+                    delivered_kw=delivered_kw,
+                    losses_kw=loss_kw,
+                    current_a=current_a,
+                    path_resistance_ohm=source_r,
+                ))
+
         feedback_capacity = {
             sub.substation_id: sub.efs_capacity_kw
             for sub in self.network.ordered_substations
@@ -436,6 +536,54 @@ class DCTractionPowerFlowSolver:
                     path_resistance_ohm=source_r,
                 ))
 
+        for storage in sorted(self.network.supercapacitor_storages.values(), key=lambda item: item.storage_id):
+            if storage_modes.get(storage.storage_id) == "CHARGING" or not self._storage_active(storage.storage_id):
+                continue
+            sink_paths = sorted(
+                (
+                    path_by_train[sink_id][storage.substation_id][1],
+                    sink_id,
+                    path_by_train[sink_id][storage.substation_id][0],
+                )
+                for sink_id in demand_remaining
+                if storage.substation_id in path_by_train[sink_id]
+            )
+            reachable_demand_kw = sum(demand_remaining[sink_id] for _sink_r, sink_id, _sink_feeder in sink_paths)
+            peak_support_remaining_kw = max(
+                reachable_demand_kw - storage.discharge_trigger_power_kw,
+                0.0,
+            )
+            discharge_remaining_kw = self._storage_discharge_limit_kw(storage.storage_id, dt_sec)
+            if discharge_remaining_kw <= 1e-9 or peak_support_remaining_kw <= 1e-9:
+                continue
+            for sink_r, sink_id, sink_feeder in sink_paths:
+                demand_kw = demand_remaining[sink_id]
+                if demand_kw <= 1e-9 or discharge_remaining_kw <= 1e-9 or peak_support_remaining_kw <= 1e-9:
+                    continue
+                bus_voltage_v = self.network.substations[storage.substation_id].no_load_voltage_v
+                current_a, generated_kw, delivered_kw, loss_kw = self._path_transfer(
+                    discharge_remaining_kw,
+                    min(demand_kw, peak_support_remaining_kw),
+                    bus_voltage_v,
+                    0.0,
+                    sink_r,
+                )
+                if current_a <= 1e-9:
+                    continue
+                self._discharge_storage(storage.storage_id, generated_kw, dt_sec)
+                discharge_remaining_kw = max(0.0, discharge_remaining_kw - generated_kw)
+                demand_remaining[sink_id] = max(0.0, demand_kw - delivered_kw)
+                peak_support_remaining_kw = max(0.0, peak_support_remaining_kw - delivered_kw)
+                allocation.storage_discharged_kw[storage.storage_id] += generated_kw
+                allocation.storage_conversion_losses_kw[storage.storage_id] += generated_kw * (
+                    1.0 / storage.discharge_efficiency - 1.0
+                )
+                allocation.storage_supplied_by_train_kw[sink_id] += delivered_kw
+                allocation.storage_transfer_losses_kw += loss_kw
+                allocation.sink_currents_a[sink_id] += current_a
+                allocation.sink_voltages_v[sink_id].append(bus_voltage_v - current_a * sink_r)
+                allocation.feeder_currents_a[sink_feeder] += current_a
+
         for source_id in sorted(regen_remaining):
             wasted_kw = regen_remaining[source_id]
             if wasted_kw <= 1e-9:
@@ -456,6 +604,105 @@ class DCTractionPowerFlowSolver:
                 path_resistance_ohm=0.0,
             ))
         return allocation
+
+    def _storage_active(self, storage_id: str) -> bool:
+        storage = self.network.supercapacitor_storages[storage_id]
+        host = self.network.substations[storage.substation_id]
+        return storage.in_service and host.in_service
+
+    def _storage_charge_limit_kw(self, storage_id: str, dt_sec: float) -> float:
+        storage = self.network.supercapacitor_storages[storage_id]
+        headroom_kwh = max(
+            storage.rated_energy_kwh * storage.max_soc - self._storage_energy_kwh[storage_id],
+            0.0,
+        )
+        energy_limit_kw = (
+            headroom_kwh * 3600.0 / (dt_sec * storage.charge_efficiency)
+            if dt_sec > 0 else storage.max_charge_power_kw
+        )
+        return min(storage.max_charge_power_kw, energy_limit_kw)
+
+    def _storage_discharge_limit_kw(self, storage_id: str, dt_sec: float) -> float:
+        storage = self.network.supercapacitor_storages[storage_id]
+        available_kwh = max(
+            self._storage_energy_kwh[storage_id] - storage.rated_energy_kwh * storage.min_soc,
+            0.0,
+        )
+        energy_limit_kw = (
+            available_kwh * 3600.0 * storage.discharge_efficiency / dt_sec
+            if dt_sec > 0 else storage.max_discharge_power_kw
+        )
+        return min(storage.max_discharge_power_kw, energy_limit_kw)
+
+    def _charge_storage(self, storage_id: str, bus_power_kw: float, dt_sec: float) -> None:
+        if dt_sec <= 0:
+            return
+        storage = self.network.supercapacitor_storages[storage_id]
+        bus_energy_kwh = bus_power_kw * dt_sec / 3600.0
+        self._storage_energy_kwh[storage_id] = min(
+            storage.rated_energy_kwh * storage.max_soc,
+            self._storage_energy_kwh[storage_id] + bus_energy_kwh * storage.charge_efficiency,
+        )
+        self._storage_charged_kwh[storage_id] += bus_energy_kwh
+
+    def _discharge_storage(self, storage_id: str, bus_power_kw: float, dt_sec: float) -> None:
+        if dt_sec <= 0:
+            return
+        storage = self.network.supercapacitor_storages[storage_id]
+        bus_energy_kwh = bus_power_kw * dt_sec / 3600.0
+        self._storage_energy_kwh[storage_id] = max(
+            storage.rated_energy_kwh * storage.min_soc,
+            self._storage_energy_kwh[storage_id] - bus_energy_kwh / storage.discharge_efficiency,
+        )
+        self._storage_discharged_kwh[storage_id] += bus_energy_kwh
+
+    def _apply_storage_standby_loss(self, dt_sec: float) -> None:
+        if dt_sec <= 0:
+            return
+        for storage in self.network.supercapacitor_storages.values():
+            if not self._storage_active(storage.storage_id):
+                continue
+            minimum = storage.rated_energy_kwh * storage.min_soc
+            self._storage_energy_kwh[storage.storage_id] = max(
+                minimum,
+                self._storage_energy_kwh[storage.storage_id] - storage.standby_power_kw * dt_sec / 3600.0,
+            )
+
+    def _storage_flows(self, allocation: _RegenAllocation) -> list[SupercapacitorPowerFlow]:
+        result: list[SupercapacitorPowerFlow] = []
+        for storage in sorted(self.network.supercapacitor_storages.values(), key=lambda item: item.storage_id):
+            energy_kwh = self._storage_energy_kwh[storage.storage_id]
+            charge_kw = allocation.storage_charged_kw[storage.storage_id]
+            discharge_kw = allocation.storage_discharged_kw[storage.storage_id]
+            active = self._storage_active(storage.storage_id)
+            if not active:
+                state = "OUT_OF_SERVICE"
+            elif energy_kwh >= storage.rated_energy_kwh * storage.max_soc - 1e-9:
+                state = "FULL"
+            elif energy_kwh <= storage.rated_energy_kwh * storage.min_soc + 1e-9:
+                state = "EMPTY"
+            elif charge_kw > 1e-9:
+                state = "CHARGING"
+            elif discharge_kw > 1e-9:
+                state = "DISCHARGING"
+            else:
+                state = "STANDBY"
+            result.append(SupercapacitorPowerFlow(
+                storage_id=storage.storage_id,
+                substation_id=storage.substation_id,
+                soc=energy_kwh / storage.rated_energy_kwh,
+                stored_energy_kwh=energy_kwh,
+                available_charge_energy_kwh=max(storage.rated_energy_kwh * storage.max_soc - energy_kwh, 0.0),
+                available_discharge_energy_kwh=max(energy_kwh - storage.rated_energy_kwh * storage.min_soc, 0.0),
+                charge_power_kw=charge_kw,
+                discharge_power_kw=discharge_kw,
+                conversion_losses_kw=allocation.storage_conversion_losses_kw[storage.storage_id],
+                cumulative_charged_kwh=self._storage_charged_kwh[storage.storage_id],
+                cumulative_discharged_kwh=self._storage_discharged_kwh[storage.storage_id],
+                state=state,
+                status=storage.status if active else "OUT_OF_SERVICE",
+            ))
+        return result
 
     @staticmethod
     def _path_transfer(

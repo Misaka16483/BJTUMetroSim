@@ -190,6 +190,24 @@ class RunRecorder:
                 quality TEXT NOT NULL DEFAULT 'ENGINEERING_ESTIMATE',
                 detail_json TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS supercapacitor_storage_systems (
+                storage_id TEXT PRIMARY KEY,
+                substation_id TEXT NOT NULL,
+                line_id TEXT NOT NULL,
+                rated_energy_kwh REAL NOT NULL,
+                max_charge_power_kw REAL NOT NULL,
+                max_discharge_power_kw REAL NOT NULL,
+                discharge_trigger_power_kw REAL NOT NULL,
+                min_soc REAL NOT NULL,
+                max_soc REAL NOT NULL,
+                charge_efficiency REAL NOT NULL,
+                discharge_efficiency REAL NOT NULL,
+                standby_power_kw REAL NOT NULL,
+                status TEXT NOT NULL,
+                quality TEXT NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(substation_id) REFERENCES traction_substations(substation_id)
+            );
             CREATE TABLE IF NOT EXISTS train_voltage_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id INTEGER NOT NULL,
@@ -219,6 +237,24 @@ class RunRecorder:
                 status TEXT NOT NULL,
                 detail_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
+            CREATE TABLE IF NOT EXISTS supercapacitor_power_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                storage_id TEXT NOT NULL,
+                soc REAL NOT NULL,
+                stored_energy_kwh REAL NOT NULL,
+                charge_power_kw REAL NOT NULL,
+                discharge_power_kw REAL NOT NULL,
+                conversion_losses_kw REAL NOT NULL,
+                cumulative_charged_kwh REAL NOT NULL,
+                cumulative_discharged_kwh REAL NOT NULL,
+                state TEXT NOT NULL,
+                status TEXT NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(run_id) REFERENCES runs(id),
+                FOREIGN KEY(storage_id) REFERENCES supercapacitor_storage_systems(storage_id)
             );
             CREATE TABLE IF NOT EXISTS regen_energy_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -289,10 +325,14 @@ class RunRecorder:
                 ON contact_rail_sections(line_id, direction, from_mileage_m, to_mileage_m);
             CREATE INDEX IF NOT EXISTS idx_power_switches_line_mileage
                 ON power_switches(line_id, mileage_m);
+            CREATE INDEX IF NOT EXISTS idx_supercapacitor_storage_substation
+                ON supercapacitor_storage_systems(substation_id);
             CREATE INDEX IF NOT EXISTS idx_train_voltage_records_train_time
                 ON train_voltage_records(run_id, train_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_substation_power_records_time
                 ON substation_power_records(run_id, substation_id, sim_time_ms);
+            CREATE INDEX IF NOT EXISTS idx_supercapacitor_power_records_time
+                ON supercapacitor_power_records(run_id, storage_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_regen_energy_records_time
                 ON regen_energy_records(run_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_regen_path_records_time
@@ -351,6 +391,49 @@ class RunRecorder:
                     item["ratedCurrentA"],
                     item["overloadCurrentA"],
                     item.get("efsCapacityKw", 0.0),
+                    item.get("status", "IN_SERVICE"),
+                    item.get("quality", quality),
+                    json.dumps(item, ensure_ascii=False),
+                ),
+            )
+        for item in topology.get("supercapacitorStorageSystems", []):
+            self.connection.execute(
+                """
+                INSERT INTO supercapacitor_storage_systems(
+                    storage_id, substation_id, line_id, rated_energy_kwh,
+                    max_charge_power_kw, max_discharge_power_kw,
+                    discharge_trigger_power_kw, min_soc, max_soc,
+                    charge_efficiency, discharge_efficiency, standby_power_kw,
+                    status, quality, detail_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(storage_id) DO UPDATE SET
+                    substation_id=excluded.substation_id,
+                    rated_energy_kwh=excluded.rated_energy_kwh,
+                    max_charge_power_kw=excluded.max_charge_power_kw,
+                    max_discharge_power_kw=excluded.max_discharge_power_kw,
+                    discharge_trigger_power_kw=excluded.discharge_trigger_power_kw,
+                    min_soc=excluded.min_soc,
+                    max_soc=excluded.max_soc,
+                    charge_efficiency=excluded.charge_efficiency,
+                    discharge_efficiency=excluded.discharge_efficiency,
+                    standby_power_kw=excluded.standby_power_kw,
+                    status=excluded.status,
+                    quality=excluded.quality,
+                    detail_json=excluded.detail_json
+                """,
+                (
+                    item["storageId"],
+                    item["substationId"],
+                    line_id,
+                    item["ratedEnergyKwh"],
+                    item["maxChargePowerKw"],
+                    item["maxDischargePowerKw"],
+                    item.get("dischargeTriggerPowerKw", 1000.0),
+                    item["minSoc"],
+                    item["maxSoc"],
+                    item["chargeEfficiency"],
+                    item["dischargeEfficiency"],
+                    item["standbyPowerKw"],
                     item.get("status", "IN_SERVICE"),
                     item.get("quality", quality),
                     json.dumps(item, ensure_ascii=False),
@@ -803,6 +886,50 @@ class RunRecorder:
         )
         self.connection.commit()
 
+    def record_supercapacitor_power(
+        self,
+        run_id: int,
+        *,
+        sim_time_ms: int,
+        storage_id: str,
+        soc: float,
+        stored_energy_kwh: float,
+        charge_power_kw: float,
+        discharge_power_kw: float,
+        conversion_losses_kw: float,
+        cumulative_charged_kwh: float,
+        cumulative_discharged_kwh: float,
+        state: str,
+        status: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO supercapacitor_power_records(
+                run_id, sim_time_ms, storage_id, soc, stored_energy_kwh,
+                charge_power_kw, discharge_power_kw, conversion_losses_kw,
+                cumulative_charged_kwh, cumulative_discharged_kwh,
+                state, status, detail_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                sim_time_ms,
+                storage_id,
+                soc,
+                stored_energy_kwh,
+                charge_power_kw,
+                discharge_power_kw,
+                conversion_losses_kw,
+                cumulative_charged_kwh,
+                cumulative_discharged_kwh,
+                state,
+                status,
+                json.dumps(detail or {}, ensure_ascii=False),
+            ),
+        )
+        self.connection.commit()
+
     def record_power_solver(
         self,
         run_id: int,
@@ -969,6 +1096,7 @@ class RunRecorder:
             "power_records",
             "train_voltage_records",
             "substation_power_records",
+            "supercapacitor_power_records",
             "regen_energy_records",
             "regen_path_records",
             "power_solver_records",

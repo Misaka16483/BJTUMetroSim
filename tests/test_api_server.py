@@ -58,6 +58,11 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(topology["modelVersion"], "LINE9-DC750-V1.0")
         self.assertTrue(topology["provenance"]["sources"])
         self.assertTrue(topology["substations"][0]["parameterSources"])
+        self.assertEqual(len(topology["supercapacitorStorageSystems"]), 1)
+        storage = topology["supercapacitorStorageSystems"][0]
+        self.assertEqual(storage["storageId"], "SCESS-0905")
+        self.assertEqual(storage["dischargeTriggerPowerKw"], 1000.0)
+        self.assertEqual(storage["quality"], "ENGINEERING_ESTIMATE")
 
     def test_member_c_static_topology_contains_full_line(self) -> None:
         topology = self.service.member_c_static_routes()

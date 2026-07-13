@@ -10,6 +10,7 @@ from app.domain.power.network_models import (
     FeederArm,
     PowerSwitch,
     ReturnRailSection,
+    SupercapacitorStorage,
     TractionSubstation,
 )
 
@@ -113,6 +114,27 @@ def build_line9_power_network(data: dict[str, Any]) -> TractionPowerNetwork:
         )
         for item in data.get("switches", [])
     ]
+    supercapacitor_storages = [
+        SupercapacitorStorage(
+            storage_id=str(item["storageId"]),
+            substation_id=str(item["substationId"]),
+            rated_energy_kwh=float(item["ratedEnergyKwh"]),
+            max_charge_power_kw=float(item["maxChargePowerKw"]),
+            max_discharge_power_kw=float(item["maxDischargePowerKw"]),
+            discharge_trigger_power_kw=float(item.get("dischargeTriggerPowerKw", 1000.0)),
+            initial_soc=float(item.get("initialSoc", 0.50)),
+            min_soc=float(item.get("minSoc", 0.20)),
+            max_soc=float(item.get("maxSoc", 0.90)),
+            charge_efficiency=float(item.get("chargeEfficiency", 0.95)),
+            discharge_efficiency=float(item.get("dischargeEfficiency", 0.95)),
+            standby_power_kw=float(item.get("standbyPowerKw", 3.0)),
+            status=str(item.get("status", "IN_SERVICE")),
+            source_id=str(item.get("sourceId", "UNSPECIFIED")),
+            quality=str(item.get("quality", data.get("quality", "ENGINEERING_ESTIMATE"))),
+            parameter_sources=dict(item.get("parameterSources", {})),
+        )
+        for item in data.get("supercapacitorStorageSystems", [])
+    ]
 
     if not strict and bool(data.get("allowGeneratedTopology", False)) and (not feeders or not contact_sections):
         generated_feed, generated_contact, generated_return, generated_switches = _generate_v0_sections(substations)
@@ -132,6 +154,7 @@ def build_line9_power_network(data: dict[str, Any]) -> TractionPowerNetwork:
         contact_sections=contact_sections,
         return_sections=return_sections,
         switches=switches,
+        supercapacitor_storages=supercapacitor_storages,
     )
     _validate_network(network, strict=strict)
     return network
@@ -160,6 +183,7 @@ def _require_unique_ids(data: dict[str, Any]) -> None:
         "contactRailSections": "sectionId",
         "returnRailSections": "sectionId",
         "switches": "switchId",
+        "supercapacitorStorageSystems": "storageId",
     }
     for collection, id_field in id_fields.items():
         identifiers = [str(item.get(id_field, "")) for item in data.get(collection, [])]
@@ -199,6 +223,17 @@ def _validate_network(network: TractionPowerNetwork, *, strict: bool) -> None:
             raise ValueError(f"Switch {switch.switch_id} references unknown node")
         if switch.normal_state not in {"OPEN", "CLOSED"} or switch.current_state not in {"OPEN", "CLOSED"}:
             raise ValueError(f"Switch {switch.switch_id} has invalid state")
+    for storage in network.supercapacitor_storages.values():
+        if storage.substation_id not in network.substations:
+            raise ValueError(f"Storage {storage.storage_id} references unknown substation")
+        if storage.rated_energy_kwh <= 0 or storage.max_charge_power_kw <= 0 or storage.max_discharge_power_kw <= 0:
+            raise ValueError(f"Storage {storage.storage_id} has non-positive rating")
+        if storage.discharge_trigger_power_kw < 0:
+            raise ValueError(f"Storage {storage.storage_id} has negative discharge trigger")
+        if not 0 <= storage.min_soc < storage.initial_soc < storage.max_soc <= 1:
+            raise ValueError(f"Storage {storage.storage_id} has invalid SOC limits")
+        if not 0 < storage.charge_efficiency <= 1 or not 0 < storage.discharge_efficiency <= 1:
+            raise ValueError(f"Storage {storage.storage_id} has invalid efficiency")
     if strict:
         expected_intervals = 2 * (len(ordered) - 1)
         if len(network.contact_sections) != expected_intervals or len(network.return_sections) != expected_intervals:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import unittest
 from dataclasses import replace
@@ -138,7 +139,8 @@ class PowerAcceptanceTests(unittest.TestCase):
                 peak_power_kw = 0.0
                 min_voltage_v = 1000.0
                 reach_tick = None
-                for tick in range(900):
+                max_ticks = math.ceil(180.0 / engine.clock.tick_seconds)
+                for tick in range(max_ticks):
                     engine._tick()
                     snapshot = engine.snapshot()
                     assert snapshot is not None
@@ -157,7 +159,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                     "peakPowerKw": peak_power_kw,
                     "minVoltageV": min_voltage_v,
                     "energyKwh": sum(item["energyKwh"] for item in snapshot.trains),
-                    "runtimeSec": reach_tick * 0.25,
+                    "runtimeSec": reach_tick * engine.clock.tick_seconds,
                 })
 
                 stressed = SimulationEngine.load_from_files(
@@ -317,16 +319,20 @@ class PowerAcceptanceTests(unittest.TestCase):
         delay_before = sum(item.power_constraint_delay_sec for item in engine.trains)
 
         engine.queue_power_command("SUBSTATION_OUTAGE", {"targetId": "TS-0905", "bigBilateral": True})
-        for _tick in range(80):
+        min_outage_limit = 1.0
+        for _tick in range(math.ceil(20.0 / engine.clock.tick_seconds)):
             engine._tick()
+            current = engine.snapshot()
+            assert current is not None
+            min_outage_limit = min(min_outage_limit, current.kpi["minTractionLimitRatio"])
         outage_snapshot = engine.snapshot()
         assert outage_snapshot is not None
         delay_during_outage = sum(item.power_constraint_delay_sec for item in engine.trains)
         self.assertGreater(delay_during_outage, delay_before)
-        self.assertLess(outage_snapshot.kpi["minTractionLimitRatio"], 1.0)
+        self.assertLess(min_outage_limit, 1.0)
 
         engine.queue_power_command("RESET_NETWORK", {})
-        for _tick in range(20):
+        for _tick in range(math.ceil(10.0 / engine.clock.tick_seconds)):
             engine._tick()
         recovered_snapshot = engine.snapshot()
         assert recovered_snapshot is not None

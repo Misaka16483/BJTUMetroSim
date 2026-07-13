@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 from dataclasses import dataclass
 
@@ -83,7 +84,9 @@ class InterlockingRuntimeTests(unittest.TestCase):
         })["ok"])
         engine.clock.start()
 
-        for _ in range(400):
+        # Advance beyond the 30 s dwell and door transitions regardless of
+        # the scenario's configured tick size.
+        for _ in range(math.ceil(40.0 / engine.clock.tick_seconds)):
             engine._tick()
 
         first, second = engine.snapshot().trains
@@ -165,15 +168,16 @@ class InterlockingRuntimeTests(unittest.TestCase):
             })
         engine.clock.start()
 
-        saw_locked_route = False
+        peak_locked_route_count = 0
         saw_route_released_while_interval_reserved = False
         for _ in range(1600):
             engine._tick()
             interlocking = engine.snapshot().interlocking
-            saw_locked_route = saw_locked_route or interlocking["lockedRouteCount"] > 0
+            locked_route_count = interlocking["lockedRouteCount"]
+            peak_locked_route_count = max(peak_locked_route_count, locked_route_count)
             if (
-                saw_locked_route
-                and interlocking["lockedRouteCount"] == 0
+                peak_locked_route_count > 0
+                and locked_route_count < peak_locked_route_count
                 and interlocking["reservedIntervalCount"] > 0
             ):
                 saw_route_released_while_interval_reserved = True
@@ -181,7 +185,8 @@ class InterlockingRuntimeTests(unittest.TestCase):
                 break
 
         departures = engine.snapshot().dispatch_runtime["recentDepartures"]
-        self.assertTrue(saw_locked_route)
+        self.assertGreater(peak_locked_route_count, 0)
+        self.assertTrue(saw_route_released_while_interval_reserved)
         self.assertGreaterEqual(len(departures), 2)
         self.assertGreaterEqual(departures[1]["simTimeS"] - departures[0]["simTimeS"], 90.0)
 

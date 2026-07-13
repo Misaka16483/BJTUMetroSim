@@ -251,6 +251,41 @@ export interface PowerTopologySubstation {
   parameterSources: Record<string, string>;
 }
 
+export interface PowerTopologySupercapacitorStorage {
+  storageId: string;
+  substationId: string;
+  ratedEnergyKwh: number;
+  maxChargePowerKw: number;
+  maxDischargePowerKw: number;
+  dischargeTriggerPowerKw: number;
+  initialSoc: number;
+  minSoc: number;
+  maxSoc: number;
+  chargeEfficiency: number;
+  dischargeEfficiency: number;
+  standbyPowerKw: number;
+  status: string;
+  sourceId: string;
+  quality: string;
+  parameterSources: Record<string, string>;
+}
+
+export interface SupercapacitorStorageState {
+  storageId: string;
+  substationId: string;
+  soc: number;
+  storedEnergyKwh: number;
+  availableChargeEnergyKwh: number;
+  availableDischargeEnergyKwh: number;
+  chargePowerKw: number;
+  dischargePowerKw: number;
+  conversionLossesKw: number;
+  cumulativeChargedKwh: number;
+  cumulativeDischargedKwh: number;
+  state: 'CHARGING' | 'DISCHARGING' | 'STANDBY' | 'FULL' | 'EMPTY' | 'OUT_OF_SERVICE';
+  status: string;
+}
+
 export interface PowerTopology {
   lineId: string;
   nominalVoltageV: number;
@@ -266,6 +301,7 @@ export interface PowerTopology {
     limitations: string[];
   };
   substations: PowerTopologySubstation[];
+  supercapacitorStorageSystems?: PowerTopologySupercapacitorStorage[];
   feeders: PowerTopologyFeeder[];
   contactRailSections: PowerTopologyContactRailSection[];
   returnRailSections?: unknown[];
@@ -345,17 +381,20 @@ export interface PowerNetworkState {
   substations: PowerSubstationState[];
   feeders: PowerFeederState[];
   contactRailFlows?: ContactRailPowerFlowState[];
+  supercapacitorStorageSystems?: SupercapacitorStorageState[];
   trainVoltages: TrainVoltageState[];
   regen: {
     generatedKw: number;
     selfConsumedKw: number;
     absorbedKw: number;
     feedbackKw: number;
+    storageChargedKw: number;
+    storageDischargedKw: number;
     wastedKw: number;
     transferLossesKw: number;
     paths: Array<{
       sourceTrainId: string;
-      sinkType: 'TRAIN' | 'TRAIN_AUXILIARY' | 'SUBSTATION_FEEDBACK' | 'WASTE';
+      sinkType: 'TRAIN' | 'TRAIN_AUXILIARY' | 'SUPERCAPACITOR' | 'SUBSTATION_FEEDBACK' | 'WASTE';
       sinkId: string;
       viaSubstationId: string | null;
       sourceFeederId: string | null;
@@ -730,13 +769,40 @@ export function simSendTrainManualCommand(trainId: string, tractionPercent: numb
 }
 
 export type DriverCabConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+export type DisplayConnectionState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RETRYING';
+
+export type HardwareLogEndpoint = 'system' | 'plc' | 'networkScreen' | 'signalScreen' | 'vision';
+export type HardwareLogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+export interface HardwareConnectionLog {
+  sequence: number;
+  timestamp: string;
+  endpoint: HardwareLogEndpoint;
+  level: HardwareLogLevel;
+  event: string;
+  message: string;
+  details: Record<string, unknown>;
+}
+
+export interface DriverCabDisplayStatus {
+  state: DisplayConnectionState;
+  host: string;
+  port: number;
+  framesSent: number;
+  framesReceived: number;
+  bytesReceived: number;
+  connectedAt: string | null;
+  lastFrameAt: string | null;
+  lastReceivedAt: string | null;
+  lastError: string | null;
+}
 
 export interface DriverCabHardwareStatus {
   state: DriverCabConnectionState;
   host: string;
   port: number;
   trainId: string;
-  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'FAIL_SAFE_BRAKE';
+  controlState: 'IDLE' | 'WAITING_FOR_CONNECTION' | 'WAITING_FOR_TRAIN' | 'ACTIVE' | 'ATO_ACTIVE' | 'FAIL_SAFE_BRAKE';
   framesReceived: number;
   connectedAt: string | null;
   lastFrameAt: string | null;
@@ -750,6 +816,8 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     keyActive: boolean;
     atoStart: boolean;
+    atoAvailableEcho: boolean;
+    atoActiveEcho: boolean;
   } | null;
   lastCommand: {
     tractionPercent: number;
@@ -757,6 +825,19 @@ export interface DriverCabHardwareStatus {
     emergencyBrake: boolean;
     handleMode: string;
   } | null;
+  plcOutput: {
+    atoAvailable: boolean;
+    atoActive: boolean;
+    frameLength: number;
+    speedCmps: number | null;
+  };
+  networkScreenHost: string;
+  networkScreenPort: number;
+  signalScreenHost: string;
+  signalScreenPort: number;
+  networkScreen: DriverCabDisplayStatus;
+  signalScreen: DriverCabDisplayStatus;
+  logs: HardwareConnectionLog[];
 }
 
 export interface DriverCabHardwareResponse {
@@ -769,10 +850,17 @@ export function fetchDriverCabStatus(): Promise<DriverCabHardwareResponse> {
   return getJson<DriverCabHardwareResponse>('/api/hardware/driver-cab/status');
 }
 
-export function connectDriverCab(host?: string, port?: number): Promise<DriverCabHardwareResponse> {
+export function connectDriverCab(
+  host?: string,
+  port?: number,
+  networkScreenHost?: string,
+  signalScreenHost?: string,
+): Promise<DriverCabHardwareResponse> {
   const body: Record<string, unknown> = {};
   if (host) body.host = host;
   if (port) body.port = port;
+  if (networkScreenHost) body.networkScreenHost = networkScreenHost;
+  if (signalScreenHost) body.signalScreenHost = signalScreenHost;
   return fetch('/api/hardware/driver-cab/connect', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -787,5 +875,113 @@ export function disconnectDriverCab(): Promise<DriverCabHardwareResponse> {
   return fetch('/api/hardware/driver-cab/disconnect', { method: 'POST' }).then((response) => {
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export type DriverCabEndpoint = 'plc' | 'network-screen' | 'signal-screen';
+
+export function connectDriverCabEndpoint(
+  endpoint: DriverCabEndpoint,
+  host: string,
+  port?: number,
+): Promise<DriverCabHardwareResponse> {
+  const body: Record<string, unknown> = { host };
+  if (port !== undefined) body.port = port;
+  return fetch(`/api/hardware/driver-cab/${endpoint}/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export function disconnectDriverCabEndpoint(
+  endpoint: DriverCabEndpoint,
+): Promise<DriverCabHardwareResponse> {
+  return fetch(`/api/hardware/driver-cab/${endpoint}/disconnect`, { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<DriverCabHardwareResponse>;
+  });
+}
+
+export type VisionConnectionState = 'DISCONNECTED' | 'STARTING' | 'CONNECTED' | 'RETRYING';
+export type VisionFrameLayout = 'compact' | 'fixed';
+
+export interface VisionHardwareStatus {
+  state: VisionConnectionState;
+  remoteHost: string;
+  remotePort: number;
+  localHost: string;
+  localPort: number;
+  intervalMs: number;
+  layout: VisionFrameLayout;
+  framesSent: number;
+  bytesSent: number;
+  lastFrameSize: number;
+  lastFrameAt: string | null;
+  lastError: string | null;
+  nextLiveCounter: number;
+  mapping: {
+    protocolSignalCount: number;
+    mappedSignalCount: number;
+    protocolSwitchCount: number;
+    mappedSwitchCount: number;
+    unmappedSignalsDefault: string;
+    unmappedSwitchesDefault: string;
+  };
+  logs: HardwareConnectionLog[];
+}
+
+export interface VisionHardwareResponse {
+  ok: boolean;
+  status: VisionHardwareStatus;
+  error?: string;
+}
+
+export interface VisionConnectOptions {
+  remoteHost: string;
+  remotePort: number;
+  localHost?: string;
+  localPort: number;
+  intervalMs?: number;
+  layout: VisionFrameLayout;
+  primaryTrainId?: string;
+}
+
+export function fetchVisionStatus(): Promise<VisionHardwareResponse> {
+  return getJson<VisionHardwareResponse>('/api/hardware/vision/status');
+}
+
+export function connectVision(options: VisionConnectOptions): Promise<VisionHardwareResponse> {
+  return fetch('/api/hardware/vision/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<VisionHardwareResponse>;
+  });
+}
+
+export function disconnectVision(): Promise<VisionHardwareResponse> {
+  return fetch('/api/hardware/vision/disconnect', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<VisionHardwareResponse>;
+  });
+}
+
+export interface ClearHardwareLogsResponse {
+  ok: boolean;
+  driverCab: DriverCabHardwareStatus;
+  vision: VisionHardwareStatus;
+  error?: string;
+}
+
+export function clearHardwareLogs(): Promise<ClearHardwareLogsResponse> {
+  return fetch('/api/hardware/logs/clear', { method: 'POST' }).then((response) => {
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<ClearHardwareLogsResponse>;
   });
 }

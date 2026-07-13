@@ -40,6 +40,35 @@
       "整流机组及可逆变流器使用戴维南等值和容量上限，不代表施工图设备"
     ]
   },
+  "supercapacitorStorageSystems": [
+    {
+      "storageId": "SCESS-0905",
+      "substationId": "TS-0905",
+      "ratedEnergyKwh": 20,
+      "maxChargePowerKw": 2000,
+      "maxDischargePowerKw": 2000,
+      "dischargeTriggerPowerKw": 1000,
+      "initialSoc": 0.5,
+      "minSoc": 0.2,
+      "maxSoc": 0.9,
+      "chargeEfficiency": 0.95,
+      "dischargeEfficiency": 0.95,
+      "standbyPowerKw": 3,
+      "status": "IN_SERVICE",
+      "sourceId": "SRC-SCESS-LITERATURE-V1",
+      "quality": "ENGINEERING_ESTIMATE",
+      "parameterSources": {
+        "ratedEnergyKwh": "ABB-ENVILINE-ESS-750+BJTUSCESS-2015",
+        "maxChargePowerKw": "ABB-ENVILINE-ESS-750",
+        "maxDischargePowerKw": "ABB-ENVILINE-ESS-750",
+        "dischargeTriggerPowerKw": "ENGINEERING-PEAK-SHAVING-ASSUMPTION-V1",
+        "initialSoc": "SCENARIO-SCESS-DEMO-V1",
+        "socLimits": "BJTUSCESS-2015-ADAPTED",
+        "efficiency": "ENGINEERING-ASSUMPTION-SCESS-V1",
+        "location": "SCENARIO-MIDLINE-DEMO-NOT-ASBUILT"
+      }
+    }
+  ],
   "substations": [
     {
       "substationId": "TS-0901",

@@ -268,7 +268,15 @@ class InterlockingRuntimeCoordinator:
                 continue
             start_position = self._signal_path_position(route.start_signal_id, path_plan)
             end_position = self._signal_path_position(route.end_signal_id, path_plan)
-            if start_position is None or end_position is None or end_position <= start_position + 1e-6:
+            if start_position is None:
+                continue
+            # A station-to-station path can end before the terminal signal of
+            # its final physical route. If the route starts on this path and
+            # every protected axle section belongs to the path, keep it as the
+            # terminal overlap so the last in-path signal can be cleared.
+            if end_position is None:
+                end_position = float(path_plan.total_length_m)
+            if end_position <= start_position + 1e-6:
                 continue
             signature = (route.start_signal_id, route.end_signal_id, section_ids)
             if signature in seen_signatures:

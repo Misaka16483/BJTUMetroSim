@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import socket
 import struct
 import unittest
 
+from app.adapters.binary import TcpFrameClient
 from app.adapters.hmi import NetworkScreenFrameBuilder, NetworkScreenState, TractionCutoffRequestParser
 from app.adapters.mmi import SignalScreenFrameBuilder, SignalScreenState
 
 
 class NetworkScreenAdapterTests(unittest.TestCase):
-    def test_network_screen_builder_writes_572_byte_frame(self) -> None:
+    def test_tcp_client_drains_available_response_without_blocking(self) -> None:
+        client_socket, peer_socket = socket.socketpair()
+        client = TcpFrameClient("unused", 8888)
+        client._socket = client_socket
+        try:
+            peer_socket.sendall(b"screen-response")
+            self.assertEqual(client.receive_available(), b"screen-response")
+            self.assertEqual(client.receive_available(), b"")
+        finally:
+            client.close()
+            peer_socket.close()
+
+    def test_network_screen_builder_writes_captured_570_byte_frame(self) -> None:
         frame = NetworkScreenFrameBuilder().build(
             NetworkScreenState(
                 timestamp_ms=123456789,
@@ -36,10 +50,10 @@ class NetworkScreenAdapterTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(len(frame), 572)
+        self.assertEqual(len(frame), 570)
         self.assertEqual(frame[0:4], b"\x55\xaa\x55\xaa")
-        self.assertEqual(int.from_bytes(frame[4:6], "little"), 572)
-        self.assertEqual(int.from_bytes(frame[6:8], "little"), 548)
+        self.assertEqual(int.from_bytes(frame[4:6], "little"), 570)
+        self.assertEqual(int.from_bytes(frame[6:8], "little"), 546)
         self.assertEqual(int.from_bytes(frame[8:16], "little"), 123456789)
         self.assertEqual(int.from_bytes(frame[24:26], "little"), 2025)
         self.assertEqual(frame[36], 1)
@@ -47,7 +61,7 @@ class NetworkScreenAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(struct.unpack_from("<f", frame, 44)[0], 0.75)
         self.assertEqual(int.from_bytes(frame[156:158], "little"), 101)
         self.assertEqual(frame[168], 10)
-        self.assertEqual(int.from_bytes(frame[570:572], "little"), 9)
+        self.assertEqual(int.from_bytes(frame[568:570], "little"), 9)
 
     def test_traction_cutoff_request_parser_reads_car_bits(self) -> None:
         frame = bytearray(26)
@@ -76,7 +90,7 @@ class NetworkScreenAdapterTests(unittest.TestCase):
 
 
 class SignalScreenAdapterTests(unittest.TestCase):
-    def test_signal_screen_builder_writes_66_byte_frame(self) -> None:
+    def test_signal_screen_builder_writes_captured_68_byte_layout(self) -> None:
         frame = SignalScreenFrameBuilder().build(
             SignalScreenState(
                 timestamp_ms=123456789,
@@ -92,7 +106,9 @@ class SignalScreenAdapterTests(unittest.TestCase):
                 cm_state=1,
                 mm_state=1,
                 ctc_state=0,
-                speed_mps=10.25,
+                run_dir=1,
+                reserve=0,
+                speed_kmh=10.25,
                 acceleration_mps2=-0.5,
                 pull_switch=3,
                 speed_limit=80,
@@ -107,17 +123,18 @@ class SignalScreenAdapterTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(len(frame), 66)
+        self.assertEqual(len(frame), 68)
         self.assertEqual(frame[0:4], b"\x55\xaa\x55\xaa")
-        self.assertEqual(int.from_bytes(frame[4:6], "little"), 66)
+        self.assertEqual(int.from_bytes(frame[4:6], "little"), 62)
         self.assertEqual(int.from_bytes(frame[6:8], "little"), 42)
         self.assertEqual(frame[36], 1)
-        self.assertAlmostEqual(struct.unpack_from("<f", frame, 42)[0], 10.25)
-        self.assertAlmostEqual(struct.unpack_from("<f", frame, 46)[0], -0.5)
-        self.assertEqual(int.from_bytes(frame[50:52], "little"), 3)
-        self.assertEqual(frame[54], 4)
-        self.assertEqual(int.from_bytes(frame[60:62], "little"), 9)
-        self.assertAlmostEqual(struct.unpack_from("<f", frame, 62)[0], 321.5)
+        self.assertEqual(frame[42:44], bytes((1, 0)))
+        self.assertAlmostEqual(struct.unpack_from("<f", frame, 44)[0], 10.25)
+        self.assertAlmostEqual(struct.unpack_from("<f", frame, 48)[0], -0.5)
+        self.assertEqual(int.from_bytes(frame[52:54], "little"), 3)
+        self.assertEqual(frame[56], 4)
+        self.assertEqual(int.from_bytes(frame[62:64], "little"), 9)
+        self.assertAlmostEqual(struct.unpack_from("<f", frame, 64)[0], 321.5)
 
 
 if __name__ == "__main__":

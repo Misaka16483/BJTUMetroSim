@@ -571,6 +571,15 @@ class SimulationEngine:
             return {"ok": False, "error": "INVALID_DIRECTION"}
         station_codes = [str(item.get("code", "")) for item in self._station_list]
         station_index = station_codes.index(initial_station_code)
+        destination_index = len(station_codes) - 1 if direction == "UP" else 0
+        if station_index == destination_index:
+            return {
+                "ok": False,
+                "error": "INITIAL_STATION_HAS_NO_FORWARD_ROUTE",
+                "stationCode": initial_station_code,
+                "destinationStationCode": station_codes[destination_index],
+                "direction": direction,
+            }
         initial_segment_id = payload.get("initialSegmentId")
         initial_platform_id = None
         if initial_segment_id is not None:
@@ -1301,6 +1310,22 @@ class SimulationEngine:
                         energy_kwh=substation_flow.energy_kwh,
                         load_ratio=substation_flow.load_ratio,
                         status=substation_flow.status,
+                        detail={"tick": tick},
+                    )
+                for storage_flow in network_snapshot.supercapacitor_flows:
+                    self.recorder.record_supercapacitor_power(
+                        self._run_id,
+                        sim_time_ms=sim_time_ms,
+                        storage_id=storage_flow.storage_id,
+                        soc=storage_flow.soc,
+                        stored_energy_kwh=storage_flow.stored_energy_kwh,
+                        charge_power_kw=storage_flow.charge_power_kw,
+                        discharge_power_kw=storage_flow.discharge_power_kw,
+                        conversion_losses_kw=storage_flow.conversion_losses_kw,
+                        cumulative_charged_kwh=storage_flow.cumulative_charged_kwh,
+                        cumulative_discharged_kwh=storage_flow.cumulative_discharged_kwh,
+                        state=storage_flow.state,
+                        status=storage_flow.status,
                         detail={"tick": tick},
                     )
                 self.recorder.record_regen_energy(
@@ -2321,7 +2346,11 @@ class SimulationEngine:
         #   forward  →  segment偏移递增方向 = path前进方向
         #   reverse  →  segment偏移递减方向 = path前进方向
         sig_dir = constraint.direction  # "forward" | "reverse"
-        return self.track_query.get_next_signal(constraint.segment_id, seg_offset, sig_dir)
+        # TrackQuery uses an inclusive comparison. Query immediately ahead so
+        # the signal at the train's exact position is not mistaken for the
+        # next signal after departure authority has already been granted.
+        query_offset = seg_offset + (0.01 if sig_dir == "forward" else -0.01)
+        return self.track_query.get_next_signal(constraint.segment_id, query_offset, sig_dir)
 
     def _lookup_profile_speed(self, train_id: str, position_m: float) -> tuple[float, str] | None:
         """浠庤鍒掓洸绾夸腑绾挎€ф彃鍊煎綋鍓嶄綅缃殑鐩爣閫熷害鍜岃繍琛屾ā寮?"""
