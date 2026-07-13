@@ -111,6 +111,47 @@ class InterlockingRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.snapshot()["lockedRouteCount"], 0)
         self.assertEqual(runtime.snapshot()["reservedIntervalCount"], 0)
 
+    def test_completed_interval_releases_terminal_overlap_authority(self) -> None:
+        engine = make_engine()
+        runtime = engine.interlocking_runtime
+        path = engine._path_plan_for_station_pair(0, 1)
+        self.assertIsNotNone(path)
+
+        authority = runtime.request_departure("T-ARRIVED", path)
+        self.assertTrue(authority.granted)
+        self.assertGreater(runtime.snapshot()["lockedRouteCount"], 0)
+        self.assertEqual(runtime.snapshot()["reservedIntervalCount"], 1)
+
+        runtime.complete_interval("T-ARRIVED")
+
+        self.assertEqual(runtime.snapshot()["lockedRouteCount"], 0)
+        self.assertEqual(runtime.snapshot()["reservedIntervalCount"], 0)
+        self.assertNotIn(
+            "T-ARRIVED",
+            {item["trainId"] for item in runtime.snapshot()["departureAuthorities"]},
+        )
+
+    def test_interlocking_wait_closes_doors_without_restarting_dwell(self) -> None:
+        engine = make_engine()
+        self.assertTrue(engine.add_train({
+            "trainId": "T-WAIT", "initialStationCode": "GGZ", "direction": "UP"
+        })["ok"])
+        path = engine._path_plan_for_station_pair(0, 1)
+        self.assertIsNotNone(path)
+        self.assertTrue(engine.interlocking_runtime.request_departure("T-BLOCK", path).granted)
+        engine.clock.start()
+
+        for _ in range(math.ceil(35.0 / engine.clock.tick_seconds)):
+            engine._tick()
+
+        waiting = engine.trains[0]
+        self.assertEqual(waiting.phase, DWELLING)
+        self.assertFalse(waiting.departure_authorized)
+        self.assertEqual(waiting.interlocking_hold_reason, "INTERVAL_RESERVED")
+        self.assertEqual(waiting.dwell_remaining_sec, 0.0)
+        self.assertEqual(waiting.door_state, "CLOSED")
+        self.assertEqual(waiting.door_transition_remaining_sec, 0.0)
+
     def test_tail_clear_releases_route_and_following_train_eventually_departs(self) -> None:
         engine = make_engine()
         for train_id in ("T1", "T2"):

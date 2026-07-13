@@ -243,6 +243,21 @@ class InterlockingRuntimeCoordinator:
         return authority
 
     def release_train(self, train_id: str) -> None:
+        self._release_owned_authority(train_id, release_type="EMERGENCY")
+
+    def complete_interval(self, train_id: str) -> None:
+        """Release the route authority for a train that reached its destination platform.
+
+        Some station-to-station route chains include a terminal overlap beyond
+        the platform stopping point.  The train therefore cannot physically
+        occupy and clear the final protected section.  Arrival at the planned
+        platform is the explicit lifecycle boundary that completes that route.
+        Section occupation remains authoritative and is refreshed separately,
+        so following trains still cannot enter an occupied platform.
+        """
+        self._release_owned_authority(train_id, release_type="AUTO")
+
+    def _release_owned_authority(self, train_id: str, *, release_type: str) -> None:
         owned_route_ids = {
             str(item["routeId"])
             for item in self.route_service.snapshot()
@@ -252,7 +267,7 @@ class InterlockingRuntimeCoordinator:
         owned_route_ids.update(self._train_route_ids.pop(train_id, ()))
         for route_id in owned_route_ids:
             if self._active_routes_by_owner().get(route_id) == train_id:
-                self.route_service.release(route_id, "EMERGENCY")
+                self.route_service.release(route_id, release_type)
             self._entered_route_ids.discard(route_id)
         self._train_path_keys.pop(train_id, None)
         for path_key, reservation in list(self._interval_reservations.items()):

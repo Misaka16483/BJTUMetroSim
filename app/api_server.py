@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from app.adapters.cab import DriverCabHardwareController
@@ -748,9 +748,10 @@ class Line9DataService:
 class WebSocketBroadcaster:
     """WebSocket 推送服务器 — 引擎每个 tick 向所有客户端广播状态."""
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, state_provider: Callable[[], JsonDict | None] | None = None) -> None:
         self.host = host
         self.port = port
+        self.state_provider = state_provider
         self._clients: set = set()
         self._server = None
         self._thread: threading.Thread | None = None
@@ -769,6 +770,10 @@ class WebSocketBroadcaster:
         async def handler(websocket):
             self._clients.add(websocket)
             try:
+                if self.state_provider is not None:
+                    initial = self.state_provider()
+                    if initial is not None:
+                        await websocket.send(json.dumps(initial, ensure_ascii=False))
                 async for _ in websocket:
                     pass  # 客户端发来的消息忽略
             finally:
@@ -777,7 +782,15 @@ class WebSocketBroadcaster:
         async def serve():
             self._server = await websockets.serve(handler, self.host, self.port)
             print(f"[ws] WebSocket server started on ws://{self.host}:{self.port}")
-            await self._server.wait_closed()
+            last_sequence = -1
+            while self._server is not None:
+                if self.state_provider is not None and self._clients:
+                    payload = self.state_provider()
+                    sequence = int(payload.get("snapshotSequence", -1)) if payload else -1
+                    if payload is not None and sequence != last_sequence:
+                        last_sequence = sequence
+                        await self.broadcast(json.dumps(payload, ensure_ascii=False))
+                await asyncio.sleep(0.05)
 
         try:
             asyncio.run(serve())
@@ -817,6 +830,9 @@ class ApiHandler(BaseHTTPRequestHandler):
     cab_hardware_lock = threading.RLock()
     vision_publisher: VisionUdpPublisher | None = None
     vision_hardware_lock = threading.RLock()
+    replay_lock = threading.RLock()
+    replay_run_id: int | None = None
+    replay_snapshot: JsonDict | None = None
 
     def do_GET(self) -> None:
         try:
@@ -835,6 +851,29 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self.service.power_topology())
             elif path == "/api/sim/state":
                 self._send_json(self._sim_state())
+            elif match := re.fullmatch(r"/api/sim/runs/(\d+)/snapshots", path):
+                if self.engine is None or self.engine.recorder is None:
+                    self._send_json({"ok": False, "error": "RECORDER_NOT_AVAILABLE"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    run_id = int(match.group(1))
+                    self._send_json({
+                        "ok": True,
+                        "runId": run_id,
+                        "snapshots": self.engine.recorder.list_world_snapshots(run_id),
+                    })
+            elif match := re.fullmatch(r"/api/sim/runs/(\d+)/snapshots/(\d+)", path):
+                if self.engine is None or self.engine.recorder is None:
+                    self._send_json({"ok": False, "error": "RECORDER_NOT_AVAILABLE"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    try:
+                        self._send_json({
+                            "ok": True,
+                            "data": self.engine.recorder.read_world_snapshot(
+                                int(match.group(1)), sequence=int(match.group(2)),
+                            ),
+                        })
+                    except KeyError:
+                        self._send_json({"ok": False, "error": "SNAPSHOT_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
             elif path == "/api/sim/topology-state":
                 self._send_json(self._main_engine_topology_state())
             elif path == "/api/sim/interlocking/state":
@@ -847,6 +886,28 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(snap.dispatch_runtime if snap else {
                     "registeredTrainCount": 0, "departureCount": 0, "recentDepartures": []
                 })
+            elif path == "/api/sim/timetable":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    state = self.engine.operation_plan_state()
+                    self._send_json({
+                        "ok": True,
+                        "enabled": state["enabled"],
+                        "timetables": state["timetables"],
+                        "services": state["services"],
+                    })
+            elif path == "/api/sim/duties":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    state = self.engine.operation_plan_state()
+                    self._send_json({
+                        "ok": True,
+                        "enabled": state["enabled"],
+                        "duties": state["duties"],
+                        "recentEvents": state["recentEvents"],
+                    })
             elif path == "/api/hardware/driver-cab/status":
                 controller = self._driver_cab_controller()
                 if controller is None:
@@ -935,6 +996,19 @@ class ApiHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
+            with ApiHandler.replay_lock:
+                replay_active = ApiHandler.replay_snapshot is not None
+            if (
+                replay_active
+                and path.startswith("/api/sim/")
+                and path not in {"/api/sim/replay/load", "/api/sim/replay/seek", "/api/sim/replay/exit"}
+            ):
+                self._send_json(
+                    {"ok": False, "error": "REPLAY_READ_ONLY", "message": "退出回放后才能发送实时仿真命令"},
+                    HTTPStatus.CONFLICT,
+                )
+                return
+
             if path == "/api/phase2/member-c/manual/place":
                 payload = self._read_json_body()
                 self._send_json(self.service.member_c_place_train(int(payload.get("segmentId", 0))))
@@ -1010,6 +1084,29 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": True, "speedMultiplier": multiplier})
                 except (TypeError, ValueError) as exc:
                     self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            elif path in {"/api/sim/replay/load", "/api/sim/replay/seek"}:
+                if self.engine is None or self.engine.recorder is None:
+                    self._send_json({"ok": False, "error": "RECORDER_NOT_AVAILABLE"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    payload = self._read_json_body()
+                    try:
+                        run_id = int(payload.get("runId", ApiHandler.replay_run_id or 0))
+                        sequence = payload.get("sequence")
+                        sim_time_ms = payload.get("simTimeMs")
+                        snapshot = self.engine.recorder.read_world_snapshot(
+                            run_id,
+                            sequence=int(sequence) if sequence is not None else None,
+                            sim_time_ms=int(sim_time_ms) if sim_time_ms is not None else None,
+                        )
+                        with ApiHandler.replay_lock:
+                            ApiHandler.replay_run_id = run_id
+                            ApiHandler.replay_snapshot = snapshot
+                        self._send_json({"ok": True, "data": self._replay_state(snapshot, run_id)})
+                    except (KeyError, ValueError):
+                        self._send_json({"ok": False, "error": "SNAPSHOT_NOT_FOUND"}, HTTPStatus.NOT_FOUND)
+            elif path == "/api/sim/replay/exit":
+                self._exit_replay()
+                self._send_json({"ok": True, "dataMode": "LIVE_SIM"})
             elif path == "/api/sim/train/add":
                 self._send_json(self._add_train())
             elif path == "/api/sim/train/remove":
@@ -1295,35 +1392,43 @@ class ApiHandler(BaseHTTPRequestHandler):
         }
 
     def _sim_state(self) -> JsonDict:
+        with ApiHandler.replay_lock:
+            if ApiHandler.replay_snapshot is not None and ApiHandler.replay_run_id is not None:
+                return self._replay_state(ApiHandler.replay_snapshot, ApiHandler.replay_run_id)
         if self.engine is None:
             return {
+                "sessionId": None,
+                "runId": None,
+                "snapshotSequence": 0,
+                "dataMode": "DISCONNECTED",
                 "clock": {"state": "IDLE", "simTime": "--:--:--", "tick": 0},
                 "trains": [],
                 "stations": self.service.station_mappings(),
+                "kpi": {},
                 "source": "static",
             }
         snap = self.engine.snapshot()
         if snap is None:
             return {"clock": {"state": "STOPPED", "simTime": "--:--:--", "tick": 0}, "trains": [], "source": "static"}
-        return {
-            "clock": {
-                "state": snap.clock_state,
-                "simTime": snap.sim_time_str,
-                "tick": snap.tick,
-                "simTimeMs": snap.sim_time_ms,
-                "speedMultiplier": snap.speed_multiplier,
-                "tickIntervalMs": round(self.engine._tick_interval_seconds * 1000),
-            },
-            "trains": snap.trains,
-            "stations": snap.stations,
-            "power": snap.power,
-            "powerNetwork": snap.power_network,
-            "dispatchDecisions": snap.dispatch_decisions,
-            "dispatchRuntime": snap.dispatch_runtime,
-            "interlocking": snap.interlocking,
-            "kpi": snap.kpi,
-            "source": "simulation-engine",
-        }
+        return snap.to_api_dict(
+            tick_interval_ms=round(self.engine._tick_interval_seconds * 1000),
+        )
+
+    @staticmethod
+    def _replay_state(snapshot: JsonDict, run_id: int) -> JsonDict:
+        payload = dict(snapshot)
+        payload["recordedSource"] = payload.get("source")
+        payload["source"] = "recorded-snapshot"
+        payload["dataMode"] = "REPLAY"
+        payload["runId"] = run_id
+        payload["replayReadOnly"] = True
+        return payload
+
+    @staticmethod
+    def _exit_replay() -> None:
+        with ApiHandler.replay_lock:
+            ApiHandler.replay_run_id = None
+            ApiHandler.replay_snapshot = None
 
     def _sim_power_state(self) -> JsonDict:
         if self.engine is None:
@@ -1665,7 +1770,16 @@ def main() -> None:
         )
 
     # ── WebSocket ──
-    ws = WebSocketBroadcaster(args.host, args.ws_port)
+    def ws_state() -> JsonDict | None:
+        engine = ApiHandler.engine
+        snap = engine.snapshot() if engine is not None else None
+        if engine is None or snap is None:
+            return None
+        return snap.to_api_dict(
+            tick_interval_ms=round(engine._tick_interval_seconds * 1000),
+        )
+
+    ws = WebSocketBroadcaster(args.host, args.ws_port, state_provider=ws_state)
     ws.start()
     ApiHandler.ws_broadcaster = ws
 

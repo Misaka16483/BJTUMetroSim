@@ -126,6 +126,15 @@ export interface SimTrainState {
   stationIndex: number;
   direction: 'UP' | 'DOWN';
   phase: string;
+  serviceId?: string | null;
+  nextServiceId?: string | null;
+  dutyId?: string | null;
+  lifecycleState?: string;
+  plannedDepartureMs?: number | null;
+  plannedArrivalMs?: number | null;
+  actualDepartureMs?: number | null;
+  actualArrivalMs?: number | null;
+  scheduleDeviationSec?: number | null;
   currentStationCode: string;
   nextStationCode: string;
   speedMps: number;
@@ -528,6 +537,11 @@ export interface DispatchRuntimeState {
 }
 
 export interface SimStateResponse {
+  sessionId: string | null;
+  runId: number | null;
+  snapshotSequence: number;
+  dataMode: 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
+  modelQuality?: string;
   clock: SimClock;
   trains: SimTrainState[];
   stations: SimStationInfo[];
@@ -537,7 +551,16 @@ export interface SimStateResponse {
   dispatchRuntime?: DispatchRuntimeState;
   interlocking?: InterlockingRuntimeState;
   kpi: SimKpi;
+  operations?: {
+    enabled: boolean;
+    timetables: Array<Record<string, unknown>>;
+    services: Array<Record<string, unknown>>;
+    duties: Array<Record<string, unknown>>;
+    recentEvents: Array<Record<string, unknown>>;
+  };
   source: string;
+  recordedSource?: string;
+  replayReadOnly?: boolean;
 }
 
 export interface PassengerHistoryPoint {

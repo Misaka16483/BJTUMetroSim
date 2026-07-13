@@ -33,6 +33,11 @@ export default function App() {
   const viewMode = useSimStore((s) => s.viewMode);
   const setViewMode = useSimStore((s) => s.setViewMode);
   const backendStatus = useSimStore((s) => s.backendStatus);
+  const dataMode = useSimStore((s) => s.dataMode);
+  const dataStale = useSimStore((s) => s.dataStale);
+  const snapshotSequence = useSimStore((s) => s.snapshotSequence);
+  const snapshotGapCount = useSimStore((s) => s.snapshotGapCount);
+  const setDataMode = useSimStore((s) => s.setDataMode);
   const trackMap = useSimStore((s) => s.trackMap);
   const showOnlyLines = useSimStore((s) => s.showOnlyLines);
   const metroLines = useSimStore((s) => s.metroLines);
@@ -123,21 +128,61 @@ export default function App() {
     requestAnimationFrame(() => showOnlyLines(['9']));
   }, [metroLines.length]);
 
-  // 后端仿真引擎轮询 (200ms — 比后端 tick 快，确保控制响应及时、列车位移平滑)
+  // REST 负责启动快照、断线恢复和 WebSocket 序列缺口后的权威重同步。
   useEffect(() => {
-    if (backendStatus !== 'connected') return;
     let active = true;
-    const POLL_MS = 200;
+    let timer: number | undefined;
     const poll = () => {
       if (!active) return;
       fetchSimState()
-        .then((data) => { if (active) updateFromBackend(data); })
-        .catch(() => { /* 静默忽略轮询错误 */ })
-        .finally(() => { if (active) setTimeout(poll, POLL_MS); });
+        .then((data) => {
+          if (!active) return;
+          updateFromBackend(data, 'REST');
+          setBackendStatus('connected');
+          timer = window.setTimeout(poll, 1000);
+        })
+        .catch(() => {
+          if (!active) return;
+          setBackendStatus('fallback');
+          timer = window.setTimeout(poll, 1000);
+        });
     };
     poll();
-    return () => { active = false; };
-  }, [backendStatus, updateFromBackend]);
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [setBackendStatus, updateFromBackend]);
+
+  // WebSocket 是实时主通道；发现序列缺口时不消费乱序帧，立即用 REST 重同步。
+  useEffect(() => {
+    let active = true;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
+    const connect = () => {
+      if (!active) return;
+      const defaultUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:8001`;
+      socket = new WebSocket((import.meta.env.VITE_WS_URL as string | undefined) ?? defaultUrl);
+      socket.onmessage = (event) => {
+        try {
+          const result = updateFromBackend(JSON.parse(String(event.data)), 'WS');
+          if (result === 'gap') {
+            void fetchSimState().then((data) => updateFromBackend(data, 'REST'));
+          }
+        } catch (error) {
+          console.warn('[App] WebSocket 状态帧无效:', error);
+        }
+      };
+      socket.onclose = () => {
+        socket = null;
+        if (active) reconnectTimer = window.setTimeout(connect, 1000);
+      };
+      socket.onerror = () => socket?.close();
+    };
+    connect();
+    return () => {
+      active = false;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [updateFromBackend]);
 
   // 引擎运行时拉取全部列车的当前规划曲线，并归档到各自的站间记录。
   useEffect(() => {
@@ -230,12 +275,12 @@ export default function App() {
 
         <div className="flex items-center gap-1.5">
           {/* ─── 仿真控制 ─── */}
-          {backendStatus === 'connected' && (
+          {backendStatus === 'connected' && dataMode === 'LIVE_SIM' && (
             <SimulationLifecycleControls />
           )}
         </div>
 
-        {backendStatus === 'connected' ? <DriverCabConnectionButton /> : null}
+        {backendStatus === 'connected' && dataMode === 'LIVE_SIM' ? <DriverCabConnectionButton /> : null}
 
         <div className="flex items-center gap-3">
           <button
@@ -274,6 +319,15 @@ export default function App() {
               {backendStatus.toUpperCase()}
             </span>
           </span>
+          <span style={{ color: dataStale ? 'var(--amber)' : dataMode === 'LIVE_SIM' ? 'var(--green)' : 'var(--cyan)' }}>
+            {dataMode}{dataStale ? ' · FROZEN' : ''} · #{snapshotSequence}
+          </span>
+          {snapshotGapCount > 0 && <span style={{ color: 'var(--amber)' }}>RESYNC {snapshotGapCount}</span>}
+          {import.meta.env.VITE_ENABLE_DEMO_MODE === 'true' && dataMode === 'DISCONNECTED' && (
+            <button type="button" onClick={() => setDataMode('DEMO')} style={{ color: 'var(--amber)' }}>
+              ENTER DEMO
+            </button>
+          )}
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
           <span>UTC+8</span>
           {linesLoading && <span style={{ color: 'var(--amber)' }}>LOADING</span>}

@@ -60,6 +60,7 @@ class TrainService:
     train_id: str
     line_id: str
     direction: str
+    duty_id: str = ""
     stops: list[ScheduledStop] = field(default_factory=list)
     origin_station_code: str = ""
     terminal_station_code: str = ""
@@ -93,6 +94,7 @@ class TrainService:
             "trainId": self.train_id,
             "lineId": self.line_id,
             "direction": self.direction,
+            "dutyId": self.duty_id,
             "originStationCode": self.origin_station_code,
             "terminalStationCode": self.terminal_station_code,
             "plannedRunTimeS": round(self.planned_run_time_s, 1),
@@ -138,6 +140,29 @@ class Timetable:
         }
 
 
+@dataclass
+class TrainDuty:
+    """A physical trainset's ordered work for one simulated operating day."""
+    duty_id: str
+    train_id: str
+    service_ids: list[str]
+    planned_start_s: float
+    planned_end_s: float
+    lifecycle_state: str = "IN_DEPOT"
+    active_service_id: str | None = None
+
+    def to_dict(self) -> JsonDict:
+        return {
+            "dutyId": self.duty_id,
+            "trainId": self.train_id,
+            "serviceIds": list(self.service_ids),
+            "plannedStartS": round(self.planned_start_s, 1),
+            "plannedEndS": round(self.planned_end_s, 1),
+            "lifecycleState": self.lifecycle_state,
+            "activeServiceId": self.active_service_id,
+        }
+
+
 class TimetableService:
     """运行图生成器.
 
@@ -155,6 +180,9 @@ class TimetableService:
         self.default_run_time_s = default_run_time_per_interval_s
         self.base_dwell_sec = base_dwell_sec
         self._service_counter: int = 0
+
+    def reset(self) -> None:
+        self._service_counter = 0
 
     def generate(
         self,
@@ -204,7 +232,7 @@ class TimetableService:
         # 首站到各站的累计里程
         mileages = [float(s.get("mileageM", 0)) for s in stations]
         origin_m = mileages[0]
-        cumulative_distance = [0.0] + [mileages[i] - origin_m for i in range(1, n)]
+        cumulative_distance = [0.0] + [abs(mileages[i] - origin_m) for i in range(1, n)]
 
         # 生成车次
         services: list[TrainService] = []
@@ -227,7 +255,7 @@ class TimetableService:
                 stops.append(ScheduledStop(
                     station_code=str(station.get("code", "")),
                     station_name=str(station.get("name", "")),
-                    station_index=i,
+                    station_index=int(station.get("stationIndex", i)),
                     planned_arrival_s=arrival,
                     planned_departure_s=departure,
                     distance_from_origin_m=cumulative_distance[i],

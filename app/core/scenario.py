@@ -21,6 +21,17 @@ class TrainConfig:
     initial_load_pax: int = 0
 
 
+@dataclass(frozen=True)
+class OperationPlanConfig:
+    enabled: bool = False
+    direction: str = "UP"
+    start_time_ms: int | None = None
+    end_time_ms: int | None = None
+    max_duties: int = 8
+    ready_lead_sec: float = 30.0
+    turnback_layover_sec: float = 60.0
+
+
 @dataclass
 class ScenarioConfig:
     line_id: str
@@ -31,9 +42,11 @@ class ScenarioConfig:
     auto_spawn_trains: bool = False
     line_scope_file: str | None = None
     trains: list[TrainConfig] = field(default_factory=list)
+    operation_plan: OperationPlanConfig = field(default_factory=OperationPlanConfig)
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> ScenarioConfig:
+        operation = data.get("operationPlan", {})
         return cls(
             line_id=data["lineId"],
             name=data["name"],
@@ -42,6 +55,21 @@ class ScenarioConfig:
             use_dynamic_programming_profile=bool(data.get("useDynamicProgrammingProfile", True)),
             auto_spawn_trains=bool(data.get("autoSpawnTrains", False)),
             line_scope_file=data.get("lineScopeFile"),
+            operation_plan=OperationPlanConfig(
+                enabled=bool(operation.get("enabled", False)),
+                direction=str(operation.get("direction", "UP")).upper(),
+                start_time_ms=(
+                    int(operation["startTimeMs"])
+                    if operation.get("startTimeMs") is not None else None
+                ),
+                end_time_ms=(
+                    int(operation["endTimeMs"])
+                    if operation.get("endTimeMs") is not None else None
+                ),
+                max_duties=max(1, int(operation.get("maxDuties", 8))),
+                ready_lead_sec=max(0.0, float(operation.get("readyLeadSec", 30.0))),
+                turnback_layover_sec=max(0.0, float(operation.get("turnbackLayoverSec", 60.0))),
+            ),
             trains=[
                 TrainConfig(
                     train_id=item["trainId"],

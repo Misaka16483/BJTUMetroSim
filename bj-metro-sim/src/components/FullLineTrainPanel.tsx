@@ -75,6 +75,17 @@ export default function FullLineTrainPanel() {
                         </span>
                       </div>
                     </div>
+                    {t.dutyId && (
+                      <div className="flex items-center justify-between mt-1 text-[8px] font-mono" style={{ color: '#7d8590' }}>
+                        <span>{t.dutyId} · {t.serviceId}</span>
+                        <span style={{ color: t.lifecycleState === 'IN_SERVICE' ? '#30d158' : '#d29922' }}>
+                          {t.lifecycleState}
+                          {typeof t.scheduleDeviationSec === 'number'
+                            ? ` · ${t.scheduleDeviationSec >= 0 ? '+' : ''}${t.scheduleDeviationSec.toFixed(0)}s`
+                            : ''}
+                        </span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-2 mt-1">
                       <div className="flex-1 h-1 rounded-full" style={{ background: 'rgba(255,255,255,.06)', overflow: 'hidden' }}>
                         <div className="h-full rounded-full transition-all"
