@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import select
 import socket
 import struct
 from dataclasses import dataclass
@@ -140,46 +141,24 @@ class TcpFrameClient:
             raise RuntimeError("TCP client is not connected")
         self._socket.sendall(frame)
 
-
-@dataclass
-class UdpFrameClient:
-    host: str
-    port: int
-    timeout_s: float = 3.0
-
-    def __post_init__(self) -> None:
-        if not self.host:
-            raise ValueError("host must not be empty")
-        if self.port <= 0 or self.port > 65535:
-            raise ValueError("port must be between 1 and 65535")
-        if self.timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
-        self._socket: socket.socket | None = None
-
-    def connect(self) -> None:
-        if self._socket is not None:
-            return
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._socket.settimeout(self.timeout_s)
-        self._socket.connect((self.host, self.port))
-
-    def close(self) -> None:
+    def receive_available(self, max_bytes: int = 65536) -> bytes:
+        """Read all bytes currently waiting without blocking the send loop."""
         if self._socket is None:
-            return
-        self._socket.close()
-        self._socket = None
-
-    def __enter__(self) -> UdpFrameClient:
-        self.connect()
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-    def send_frame(self, frame: bytes) -> None:
-        if self._socket is None:
-            raise RuntimeError("UDP client is not connected")
-        self._socket.sendall(frame)
+            raise RuntimeError("TCP client is not connected")
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        chunks: list[bytes] = []
+        remaining = max_bytes
+        while remaining > 0:
+            readable, _, _ = select.select([self._socket], [], [], 0)
+            if not readable:
+                break
+            chunk = self._socket.recv(min(4096, remaining))
+            if not chunk:
+                raise ConnectionError("TCP peer closed the connection")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
 
 def _padded(values: list[T], count: int, default: T) -> list[T]:
