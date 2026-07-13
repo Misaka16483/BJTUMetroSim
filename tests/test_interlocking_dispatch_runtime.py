@@ -29,6 +29,15 @@ class FakeTrain:
     phase: str = DWELLING
 
 
+@dataclass(frozen=True)
+class FakePathPlan:
+    key: str
+    segment_ids: tuple[int, ...]
+
+    def cache_key(self) -> tuple[str]:
+        return (self.key,)
+
+
 class DispatchRuntimeTests(unittest.TestCase):
     def test_real_phase_transition_records_departure_and_headway(self) -> None:
         service = RuleBasedDispatchService()
@@ -82,10 +91,48 @@ class InterlockingRuntimeTests(unittest.TestCase):
         self.assertTrue(first["departureAuthorized"])
         self.assertEqual(second["phase"], DWELLING)
         self.assertFalse(second["departureAuthorized"])
-        self.assertEqual(second["interlockingHoldReason"], "INTERVAL_RESERVED")
+        self.assertEqual(second["interlockingHoldReason"], "CONFLICT_ROUTE_LOCKED")
         self.assertEqual(second["lastDispatchAction"], "HOLD")
         self.assertEqual(second["lastDispatchReason"], "HEADWAY_TOO_SHORT")
         self.assertEqual(engine.snapshot().dispatch_runtime["departureCount"], 1)
+
+    def test_independent_routes_are_not_blocked_by_broad_path_reservations(self) -> None:
+        engine = make_engine()
+        runtime = InterlockingRuntimeCoordinator(engine.line_map, engine.track_query)
+
+        first = runtime.request_departure(
+            "T1",
+            FakePathPlan("first", (49, 50, 51)),
+            ("28",),
+        )
+        # Segment 49 deliberately overlaps the first diagnostic PathPlan.
+        # Route 92 itself uses sections 185/186/187 and is independent of 28.
+        second = runtime.request_departure(
+            "T2",
+            FakePathPlan("second", (49, 220, 221, 222, 223, 225)),
+            ("92",),
+        )
+
+        self.assertTrue(first.granted)
+        self.assertTrue(second.granted)
+        owners = {
+            item["routeId"]: item["trainId"]
+            for item in runtime.route_service.snapshot()
+            if item["state"] in {"LOCKED", "APPROACH_LOCKED"}
+        }
+        self.assertEqual(owners["28"], "T1")
+        self.assertEqual(owners["92"], "T2")
+
+    def test_same_real_route_is_still_exclusive(self) -> None:
+        engine = make_engine()
+        runtime = InterlockingRuntimeCoordinator(engine.line_map, engine.track_query)
+        path = FakePathPlan("shared", (49, 50, 51))
+
+        self.assertTrue(runtime.request_departure("T1", path, ("28",)).granted)
+        second = runtime.request_departure("T2", path, ("28",))
+
+        self.assertFalse(second.granted)
+        self.assertEqual(second.failure_reason, "CONFLICT_ROUTE_LOCKED")
 
     def test_red_start_signal_revokes_departure_authority(self) -> None:
         engine = make_engine()

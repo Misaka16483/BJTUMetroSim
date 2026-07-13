@@ -25,7 +25,7 @@ from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
 from app.domain.dispatch.timetable import HeadwayConfig, TimetableService
 from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
-from app.domain.interlocking.route_chain_planner import RouteChainPlanner
+from app.domain.interlocking.route_chain_planner import RouteChainPlan, RouteChainPlanner
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
@@ -148,6 +148,7 @@ class SimTrainState:
     # ── profile 触发控制 ──
     _profile_triggered: bool = False
     _path_plan: PathPlan | None = field(default=None, repr=False, compare=False)
+    _planned_route_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
     _path_origin_station_index: int | None = field(default=None, repr=False, compare=False)
     _path_destination_station_index: int | None = field(default=None, repr=False, compare=False)
     # 鈹€鈹€ 鎵嬪姩椹鹃┒ per-train 鎸囦护 鈹€鈹€
@@ -1986,6 +1987,7 @@ class SimulationEngine:
         self._profile_run_times.pop(train.train_id, None)
         train._profile_triggered = False
         train._path_plan = None
+        train._planned_route_ids = ()
         train._path_origin_station_index = None
         train._path_destination_station_index = None
         self._ato_for_train(train.train_id).reset()
@@ -2041,6 +2043,7 @@ class SimulationEngine:
         train.path_position_m = 0.0
         train.path_total_length_m = 0.0
         train._path_plan = None
+        train._planned_route_ids = ()
         train._path_origin_station_index = None
         train._path_destination_station_index = None
         train._profile_triggered = False
@@ -2072,13 +2075,17 @@ class SimulationEngine:
             return train._path_plan
 
         initial_platform_id = getattr(train, "_initial_platform_id", None)
-        path_plan = self._path_plan_for_station_pair(train.station_index, next_idx, initial_platform_id)
-        if path_plan is None:
+        route_plan = self._route_chain_plan_for_station_pair(
+            train.station_index, next_idx, initial_platform_id,
+        )
+        if route_plan is None:
             return None
+        path_plan = route_plan.path_plan
 
         if initial_platform_id is not None:
             train._initial_platform_id = None
         train._path_plan = path_plan
+        train._planned_route_ids = route_plan.route_ids
         train._path_origin_station_index = train.station_index
         train._path_destination_station_index = next_idx
         train.path_position_m = 0.0
@@ -2095,7 +2102,12 @@ class SimulationEngine:
         self._update_train_path_context(train)
         return path_plan
 
-    def _path_plan_for_station_pair(self, origin_idx: int, destination_idx: int, origin_platform_id: int | None = None) -> PathPlan | None:
+    def _route_chain_plan_for_station_pair(
+        self,
+        origin_idx: int,
+        destination_idx: int,
+        origin_platform_id: int | None = None,
+    ) -> RouteChainPlan | None:
         origin_platforms = self._station_platform_ids.get(origin_idx, ())
         destination_platforms = self._station_platform_ids.get(destination_idx, ())
         if origin_platform_id is not None:
@@ -2107,9 +2119,20 @@ class SimulationEngine:
         try:
             return self.route_chain_planner.plan_between_platform_sets(
                 origin_platforms, destination_platforms, direction,
-            ).path_plan
+            )
         except ValueError:
             return None
+
+    def _path_plan_for_station_pair(self, origin_idx: int, destination_idx: int, origin_platform_id: int | None = None) -> PathPlan | None:
+        route_plan = self._route_chain_plan_for_station_pair(
+            origin_idx, destination_idx, origin_platform_id,
+        )
+        if route_plan is not None:
+            return route_plan.path_plan
+        return None
+
+        # Legacy shortest-path fallback intentionally remains unreachable:
+        # ordinary passenger operation must use one route-table-derived plan.
         preferred_pairs = [(origin_platforms[0], destination_platforms[0])]
         all_pairs = [
             (origin_platform_id, destination_platform_id)
@@ -2658,14 +2681,8 @@ class SimulationEngine:
                 train.active_route_ids = ()
                 train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
                 continue
-            origin_platforms = self._station_platform_ids.get(train.station_index, ())
-            destination_platforms = self._station_platform_ids.get(next_idx, ())
-            direction = "forward" if train.direction == "UP" else "backward"
-            try:
-                route_chain_ids = self.route_chain_planner.plan_between_platform_sets(
-                    origin_platforms, destination_platforms, direction,
-                ).route_ids
-            except ValueError:
+            route_chain_ids = train._planned_route_ids
+            if not route_chain_ids:
                 train.departure_authorized = False
                 train.interlocking_hold_reason = "NO_ROUTE_CHAIN"
                 train.active_route_ids = ()

@@ -92,7 +92,7 @@ class RouteService:
 
         # 防重复：同一进路已锁闭 → 直接拒绝
         existing = self._routes.get(route_id)
-        if existing is not None and existing.state == "LOCKED":
+        if existing is not None and existing.state in ("LOCKED", "APPROACH_LOCKED"):
             return RouteResult(
                 accepted=False,
                 route_id=route_id,
