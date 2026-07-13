@@ -1,0 +1,56 @@
+{
+  "baselineId": "POWER-CREDIBILITY-BASELINE-V1",
+  "quality": "ENGINEERING_ESTIMATE",
+  "releaseGatePassed": true,
+  "sourceDefinition": {
+    "fileName": "188_2.tableData-1(1).csv",
+    "encoding": "gbk",
+    "rowCount": 5000,
+    "powerPointRange": [1000, 1470],
+    "sha256": "35fc7bc3b6234e8ad5147dd7345f8715078c667377a2d5ef2675dfd005e162c8"
+  },
+  "pointContract": {
+    "version": "RTDB-188_2-POWER-V1",
+    "mappedPointCount": 211,
+    "displayIndexBase": 1,
+    "transportIndexBase": 0,
+    "writeEnabled": false,
+    "sha256": "41437805742988bae1f266c1392ae0911f2dbb8ad94fcbfd263a6c21295fb256"
+  },
+  "topology": {
+    "path": "data/scenarios/line9_power_topology.json",
+    "sha256": "985c6b1e91dd6a8e66ce2f9bf5b878d9cde80d27a3b4bbcb14d88acc6c0781ac"
+  },
+  "thresholds": {
+    "powerBalanceErrorRatioMax": 0.01,
+    "experimentHardStopBalanceErrorRatio": 0.05,
+    "regenBalanceErrorKwMax": 0.000001,
+    "sourceStationPowerIdentityErrorRatioMax": 0.01
+  },
+  "referenceCases": {
+    "singleTrainTraction": {
+      "minTrainVoltageV": 779.9659514127853,
+      "powerBalanceErrorRatio": 0.00009145093969120946
+    },
+    "twoTrainRegenCoordination": {
+      "generatedKw": 1152.0,
+      "crossTrainAbsorbedKw": 1039.555672044872,
+      "regenBalanceErrorKw": 2.2737367544323206e-13
+    },
+    "substationOutageRecovery": {
+      "substationId": "TS-0905",
+      "baselineMinVoltageV": 715.1050672507083,
+      "outageMinVoltageV": 605.7132357807735,
+      "recoveredMinVoltageV": 715.1050672507083,
+      "outageMinTractionLimitRatio": 0.7047549052051568
+    }
+  },
+  "acceptanceEvidence": {
+    "powerCriteriaPassed": 13,
+    "powerCriteriaTotal": 13,
+    "pythonTestsPassed": 355,
+    "pythonTestsTotal": 355,
+    "oneHourFailedSteps": 0,
+    "oneHourTotalSteps": 3600
+  }
+}
