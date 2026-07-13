@@ -109,6 +109,7 @@ class SimTrainState:
     estimated_run_time_s: float = 0.0   # 棰勮鍖洪棿杩愯鏃堕棿锛岀敱閫熷害鏇茬嚎绉垎寰楀嚭
     path_position_m: float = 0.0
     path_total_length_m: float = 0.0
+    current_platform_id: int | None = None
     current_segment_id: int | None = None
     current_segment_offset_m: float = 0.0
     local_speed_limit_mps: float = 22.22
@@ -203,6 +204,7 @@ class SimTrainState:
             "estimatedRunTimeS": round(self.estimated_run_time_s, 1),
             "pathPositionM": round(self.path_position_m, 1),
             "pathTotalLengthM": round(self.path_total_length_m, 1),
+            "currentPlatformId": self.current_platform_id,
             "currentSegmentId": self.current_segment_id,
             "currentSegmentOffsetM": round(self.current_segment_offset_m, 1),
             "localSpeedLimitMps": round(self.local_speed_limit_mps, 2),
@@ -610,7 +612,7 @@ class SimulationEngine:
         )
         train = self._create_train(cfg)
         if initial_platform_id is not None:
-            train._initial_platform_id = initial_platform_id
+            train.current_platform_id = initial_platform_id
         next_index = station_index + (1 if direction == "UP" else -1)
         if not 0 <= next_index < len(self._station_list):
             return {"ok": False, "error": "INITIAL_STATION_MUST_MATCH_DIRECTION_ORIGIN"}
@@ -1464,7 +1466,22 @@ class SimulationEngine:
             return True, None
         path_plan = self._ensure_interval_path(train, next_idx)
         if path_plan is None:
-            return False, None
+            # Ordinary passenger operation has no topology-distance fallback.
+            # Keep the train at its real platform and retry on later ticks;
+            # otherwise a missing route chain would silently bypass CI/MA.
+            train.speed_mps = 0.0
+            train.traction_percent = 0.0
+            train.brake_percent = 20.0
+            train.target_speed_mps = 0.0
+            train.departure_authorized = False
+            train.interlocking_hold_reason = "NO_ROUTE_TABLE_PATH"
+            train.active_route_ids = ()
+            if train.phase == DWELLING:
+                train.dwell_remaining_sec = max(
+                    train.dwell_remaining_sec,
+                    self.clock.tick_seconds,
+                )
+            return True, None
 
         dt = self.clock.tick_seconds
         if train.phase in (DWELLING, IDLE):
@@ -1583,6 +1600,10 @@ class SimulationEngine:
     def _apply_prepared_train_step(self, prepared: PreparedTrainStep, flow: Any, sim_time_ms: int) -> None:
         train = prepared.train
         try:
+            # Once physics advances, the train is no longer occupying a
+            # platform as a stopping location. Its route-specific PathPlan
+            # remains the positional authority until the next arrival.
+            train.current_platform_id = None
             traction_limit = float(flow.traction_limit_ratio) if flow is not None else 1.0
             regen_limit = float(flow.regen_limit_ratio) if flow is not None else 1.0
             blend = BrakeBlendService.blend(prepared.demand, regen_limit)
@@ -1989,15 +2010,36 @@ class SimulationEngine:
         next_stn: JsonDict,
         sim_time_ms: int,
     ) -> None:
+        completed_plan = train._path_plan
+        destination_platform_id = (
+            int(completed_plan.destination_platform_id)
+            if completed_plan is not None
+            else None
+        )
         train.speed_mps = 0.0
-        train.segment_progress = 0.0
-        train.path_position_m = 0.0
-        train.path_total_length_m = 0.0
-        train.current_segment_id = None
-        train.local_speed_limit_mps = train.permitted_speed_mps
-        train.grade_ratio = 0.0
-        train.path_segment_count = 0
-        train.path_constraint_count = 0
+        # Keep the completed path through the post-movement CI scan. Clearing
+        # it here made the train disappear from its destination detector before
+        # RouteService could observe entry into the route's final section.
+        if completed_plan is not None:
+            train.segment_progress = 1.0
+            train.path_position_m = completed_plan.total_length_m
+            train.path_total_length_m = completed_plan.total_length_m
+            train.current_platform_id = destination_platform_id
+            self._update_train_path_context(train)
+            # A platform at offset 0 can be the exact boundary after the last
+            # travelled constraint. Use the PathPlan's explicit destination
+            # platform as the stopped head position, not the preceding Seg.
+            self._anchor_train_at_platform(train, destination_platform_id)
+        else:
+            train.segment_progress = 0.0
+            train.path_position_m = 0.0
+            train.path_total_length_m = 0.0
+            train.current_platform_id = None
+            train.current_segment_id = None
+            train.local_speed_limit_mps = train.permitted_speed_mps
+            train.grade_ratio = 0.0
+            train.path_segment_count = 0
+            train.path_constraint_count = 0
         train.station_index = next_idx
         train.current_station_code = str(next_stn.get("code", ""))
         train.current_station_name = next_stn.get("name", "")
@@ -2011,10 +2053,6 @@ class SimulationEngine:
         self._dcdp_curve_meta.pop(train.train_id, None)
         self._profile_run_times.pop(train.train_id, None)
         train._profile_triggered = False
-        train._path_plan = None
-        train._planned_route_ids = ()
-        train._path_origin_station_index = None
-        train._path_destination_station_index = None
         self._ato_for_train(train.train_id).reset()
 
         stations = self._station_list
@@ -2022,19 +2060,27 @@ class SimulationEngine:
             train.direction == "DOWN" and next_idx == 0
         ):
             self._turn_train_at_terminal(train)
-        self._anchor_train_at_current_platform(train)
+        elif completed_plan is None:
+            # Legacy scenarios without a route-table path still need a best
+            # effort platform anchor. Normal PathPlan arrivals never reselect
+            # another platform at the same station.
+            self._anchor_train_at_current_platform(train)
         new_next_idx = next_idx + 1 if train.direction == "UP" else next_idx - 1
         if 0 <= new_next_idx < len(stations):
             new_next_stn = stations[new_next_idx]
             train.next_station_code = str(new_next_stn.get("code", ""))
             train.next_station_name = new_next_stn.get("name", "")
-            next_plan = self._path_plan_for_station_pair(next_idx, new_next_idx)
+            next_plan = self._path_plan_for_station_pair(
+                next_idx,
+                new_next_idx,
+                train.current_platform_id,
+            )
             if next_plan is not None:
                 train.target_distance_m = next_plan.total_length_m
                 train.distance_to_next_m = next_plan.total_length_m
             else:
-                train.target_distance_m = abs(self._station_distances[new_next_idx] - self._station_distances[next_idx])
-                train.distance_to_next_m = train.target_distance_m
+                train.target_distance_m = 0.0
+                train.distance_to_next_m = 0.0
         else:
             train.next_station_code = ""
             train.next_station_name = ""
@@ -2099,17 +2145,17 @@ class SimulationEngine:
             self._update_train_path_context(train)
             return train._path_plan
 
-        initial_platform_id = getattr(train, "_initial_platform_id", None)
         route_plan = self._route_chain_plan_for_station_pair(
-            train.station_index, next_idx, initial_platform_id,
+            train.station_index,
+            next_idx,
+            train.current_platform_id,
         )
         if route_plan is None:
             return None
         path_plan = route_plan.path_plan
 
-        if initial_platform_id is not None:
-            train._initial_platform_id = None
         train._path_plan = path_plan
+        train.current_platform_id = int(path_plan.origin_platform_id)
         train._planned_route_ids = route_plan.route_ids
         train._path_origin_station_index = train.station_index
         train._path_destination_station_index = next_idx
@@ -2523,6 +2569,25 @@ class SimulationEngine:
         if anchor is None:
             return
         train.current_segment_id, train.current_segment_offset_m = anchor
+        train.current_platform_id = self._platform_id_by_segment.get(
+            int(train.current_segment_id)
+        )
+
+    def _anchor_train_at_platform(
+        self,
+        train: SimTrainState,
+        platform_id: int | None,
+    ) -> bool:
+        """Place a stopped train at one explicitly selected PathPlan platform."""
+        if platform_id is None:
+            return False
+        platform = self._platform_by_id.get(int(platform_id))
+        if platform is None or platform.get("segmentId") is None:
+            return False
+        train.current_platform_id = int(platform_id)
+        train.current_segment_id = int(platform["segmentId"])
+        train.current_segment_offset_m = float(platform.get("offsetM", 0.0))
+        return True
 
     def _begin_station_stop(self, train: SimTrainState) -> None:
         train.phase = DWELLING
@@ -2741,24 +2806,29 @@ class SimulationEngine:
             path_plan = train._path_plan
             if path_plan is None or train.current_segment_id is None:
                 continue
-            constraint = path_plan.constraint_at(train.path_position_m)
-            if constraint is None:
-                continue
-            span_m = max(constraint.path_end_m - constraint.path_start_m, 1e-9)
-            ratio = min(
-                1.0,
-                max(0.0, (train.path_position_m - constraint.path_start_m) / span_m),
-            )
-            offset_m = constraint.start_offset_m + ratio * (
-                constraint.end_offset_m - constraint.start_offset_m
-            )
+            if train.phase == DWELLING and train.current_platform_id is not None:
+                segment_id = int(train.current_segment_id)
+                offset_m = float(train.current_segment_offset_m)
+            else:
+                constraint = path_plan.constraint_at(train.path_position_m)
+                if constraint is None:
+                    continue
+                span_m = max(constraint.path_end_m - constraint.path_start_m, 1e-9)
+                ratio = min(
+                    1.0,
+                    max(0.0, (train.path_position_m - constraint.path_start_m) / span_m),
+                )
+                segment_id = int(constraint.segment_id)
+                offset_m = constraint.start_offset_m + ratio * (
+                    constraint.end_offset_m - constraint.start_offset_m
+                )
             states.append(
                 TrainState(
                     train_id=train.train_id,
                     sim_time_ms=sim_time_ms,
                     sim_time_s=self.clock.sim_time_seconds,
-                    seg_id=int(constraint.segment_id),
-                    segment_id=int(constraint.segment_id),
+                    seg_id=segment_id,
+                    segment_id=segment_id,
                     offset_m=max(0.0, offset_m),
                     position_m=max(0.0, train.head_mileage_m),
                     speed_mps=max(0.0, train.speed_mps),
@@ -2942,9 +3012,9 @@ class SimulationEngine:
         initial_segment_id = spec.get("initialSegmentId")
         if initial_segment_id is not None:
             try:
-                train._initial_platform_id = self._platform_id_by_segment.get(int(initial_segment_id))
+                train.current_platform_id = self._platform_id_by_segment.get(int(initial_segment_id))
             except (TypeError, ValueError):
-                train._initial_platform_id = None
+                train.current_platform_id = None
         train.operation_mode = str(spec.get("operationMode", "ATO"))
         self._manual_mode_by_train[train_id] = train.operation_mode == "MANUAL"
         vehicle_config = self._vehicle_config_by_train.get(train_id)

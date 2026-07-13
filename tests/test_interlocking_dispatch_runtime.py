@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from app.core.engine import DWELLING, SimulationEngine
 from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
@@ -58,6 +59,77 @@ class DispatchRuntimeTests(unittest.TestCase):
 
 
 class InterlockingRuntimeTests(unittest.TestCase):
+    def test_missing_route_table_path_holds_instead_of_using_legacy_motion(self) -> None:
+        engine = make_engine()
+        try:
+            self.assertTrue(engine.add_train({
+                "trainId": "HOLD", "initialStationCode": "QLZ", "direction": "UP"
+            })["ok"])
+            train = engine.trains[0]
+            train._path_plan = None
+            train.speed_mps = 5.0
+
+            with patch.object(engine, "_ensure_interval_path", return_value=None):
+                handled, prepared = engine._prepare_train_step(
+                    train,
+                    engine._absolute_sim_time_ms(),
+                )
+
+            self.assertTrue(handled)
+            self.assertIsNone(prepared)
+            self.assertEqual(train.speed_mps, 0.0)
+            self.assertFalse(train.departure_authorized)
+            self.assertEqual(train.interlocking_hold_reason, "NO_ROUTE_TABLE_PATH")
+            self.assertEqual(train.current_platform_id, 12)
+        finally:
+            engine.speed_profile_service.shutdown()
+
+    def test_arrival_platform_continuity_completes_route_50_lifecycle(self) -> None:
+        engine = make_engine()
+        try:
+            self.assertTrue(engine.add_train({
+                "trainId": "R50", "initialStationCode": "QLZ", "direction": "UP"
+            })["ok"])
+            engine.clock.start()
+
+            for _ in range(1200):
+                engine._tick()
+                train = engine.trains[0]
+                if train.current_station_code == "LLQ":
+                    break
+            else:
+                self.fail("train did not arrive at LLQ")
+
+            train = engine.trains[0]
+            route_50 = next(
+                item for item in engine.route_service.snapshot()
+                if item["routeId"] == "50"
+            )
+            self.assertEqual(train.current_platform_id, 14)
+            self.assertEqual(train.current_segment_id, 103)
+            self.assertEqual(train.current_segment_offset_m, 0.0)
+            self.assertEqual(route_50["lastEnteredSectionId"], "88")
+            self.assertIn(route_50["state"], {"LOCKED", "APPROACH_LOCKED"})
+
+            # The next interval must continue from the platform actually
+            # reached by routes 49/50, not another platform at the same station.
+            engine._tick()
+            self.assertEqual(train._path_plan.origin_platform_id, 14)
+            self.assertEqual(train._path_plan.start_segment_id, 103)
+            self.assertEqual(train.current_platform_id, 14)
+            self.assertEqual(train.current_segment_id, 103)
+
+            for _ in range(1200):
+                engine._tick()
+                if engine.route_service.state_of("50") == "IDLE":
+                    break
+            else:
+                self.fail("route 50 was not released after the train tail cleared")
+
+            self.assertNotEqual(train.current_segment_id, 88)
+        finally:
+            engine.speed_profile_service.shutdown()
+
     def test_every_mainline_interval_has_route_or_cbtc_section_authority(self) -> None:
         engine = make_engine()
         runtime = InterlockingRuntimeCoordinator(
