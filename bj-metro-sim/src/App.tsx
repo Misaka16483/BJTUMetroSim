@@ -58,7 +58,9 @@ export default function App() {
             ? 4
             : viewMode === 'power'
               ? 5
-              : 6;
+              : viewMode === 'stationFlow'
+                ? 6
+                : 7;
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
@@ -200,8 +202,8 @@ export default function App() {
           <div
             className="absolute top-0 rounded-full"
             style={{
-              left: `${modeIndex * (100 / 7)}%`,
-              width: `${100 / 7}%`,
+              left: `${modeIndex * (100 / 8)}%`,
+              width: `${100 / 8}%`,
               bottom: 0,
               background: viewMode === 'macro'
                 ? 'rgba(74,158,255,0.35)'
@@ -226,7 +228,7 @@ export default function App() {
           <button type="button" onClick={() => setViewMode('driver')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>驾驶</button>
           <button type="button" onClick={() => setViewMode('power')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'power' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>供电</button>
           <button type="button" onClick={() => setViewMode('stationFlow')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'stationFlow' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>客流</button>
-          <button type="button" onClick={() => setViewMode('memberCDemo')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'memberCDemo' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>??</button>
+          <button type="button" onClick={() => setViewMode('memberCDemo')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'memberCDemo' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>信号</button>
         </div>
         </div>
 
