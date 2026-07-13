@@ -32,7 +32,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-width: 150px;
+  min-width: 164px;
   height: 34px;
   padding: 0 9px;
   overflow: hidden;
@@ -372,7 +372,7 @@ button, .btn, [role="button"], .clickable {
 }
 
 .cab-dialog {
-  width: 620px;
+  width: 900px;
   max-width: calc(100vw - 32px);
   padding: 24px 22px 20px;
   animation: cab-dialog-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -438,10 +438,11 @@ button, .btn, [role="button"], .clickable {
   --endpoint-state: #636366;
   position: relative;
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr) 124px;
+  grid-template-columns: 142px minmax(0, 1fr) 112px;
   grid-template-areas:
     "identity address actions"
     "status telemetry actions"
+    "options options actions"
     "error error error";
   align-items: center;
   gap: 9px 14px;
@@ -452,6 +453,11 @@ button, .btn, [role="button"], .clickable {
     rgba(0, 0, 0, 0.22);
   border: 1px solid color-mix(in srgb, var(--endpoint-state) 24%, rgba(255, 255, 255, 0.06));
   border-radius: 11px;
+}
+
+.cab-manager-card--log-selected {
+  border-color: color-mix(in srgb, var(--endpoint-state) 52%, rgba(255, 255, 255, 0.08));
+  box-shadow: inset 0 0 24px color-mix(in srgb, var(--endpoint-state) 5%, transparent);
 }
 
 .cab-manager-card::before {
@@ -564,6 +570,14 @@ button, .btn, [role="button"], .clickable {
   gap: 7px;
 }
 
+.cab-manager-card__options {
+  grid-area: options;
+  display: grid;
+  grid-template-columns: 120px minmax(180px, 1fr);
+  gap: 8px;
+  padding-top: 2px;
+}
+
 .cab-manager-card__action {
   height: 30px;
   border-radius: 7px;
@@ -592,6 +606,18 @@ button, .btn, [role="button"], .clickable {
   background: rgba(255, 69, 58, 0.12);
 }
 
+.cab-manager-card__action--log {
+  color: #9eb0c5;
+  background: rgba(100, 210, 255, 0.035);
+  border: 1px solid rgba(100, 210, 255, 0.12);
+}
+
+.cab-manager-card__action--log:hover {
+  color: var(--cyan);
+  background: rgba(100, 210, 255, 0.09);
+  border-color: rgba(100, 210, 255, 0.25);
+}
+
 .cab-manager-card__action:disabled {
   cursor: not-allowed;
   opacity: 0.35;
@@ -614,6 +640,233 @@ button, .btn, [role="button"], .clickable {
   border: 1px solid rgba(255, 69, 58, 0.14);
   border-radius: 8px;
   font-size: 10px;
+}
+
+/* ── Hardware connection event stream ───────────────────── */
+.hardware-log-console {
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(rgba(100, 210, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(100, 210, 255, 0.018) 1px, transparent 1px),
+    #070b10;
+  background-size: 20px 20px;
+  border: 1px solid rgba(100, 210, 255, 0.13);
+  border-radius: 11px;
+  box-shadow: inset 0 1px 18px rgba(0, 0, 0, 0.56);
+}
+
+.hardware-log-console::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(100, 210, 255, 0.65), transparent);
+}
+
+.hardware-log-console__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.hardware-log-console__header strong,
+.hardware-log-console__eyebrow {
+  display: block;
+}
+
+.hardware-log-console__header strong {
+  margin-top: 3px;
+  color: #dce8f5;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.hardware-log-console__eyebrow {
+  color: rgba(100, 210, 255, 0.58);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 7px;
+  letter-spacing: 0.15em;
+}
+
+.hardware-log-console__tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hardware-log-console__tools button,
+.hardware-log-console__follow {
+  height: 27px;
+  padding: 0 9px;
+  color: #8594a7;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 6px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 8px;
+}
+
+.hardware-log-console__tools button {
+  cursor: pointer;
+}
+
+.hardware-log-console__tools button:hover:not(:disabled) {
+  color: #ff8a84;
+  border-color: rgba(255, 69, 58, 0.22);
+  background: rgba(255, 69, 58, 0.07);
+}
+
+.hardware-log-console__follow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.hardware-log-console__follow input {
+  width: 11px;
+  height: 11px;
+  accent-color: var(--cyan);
+}
+
+.hardware-log-console__filters {
+  display: flex;
+  gap: 5px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+}
+
+.hardware-log-console__filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  color: #68788b;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 8px;
+}
+
+.hardware-log-console__filters button span {
+  display: grid;
+  min-width: 15px;
+  height: 15px;
+  place-items: center;
+  color: #718296;
+  background: rgba(255, 255, 255, 0.055);
+  border-radius: 4px;
+  font-size: 7px;
+}
+
+.hardware-log-console__filters button:hover,
+.hardware-log-console__filters button.is-active {
+  color: var(--cyan);
+  background: rgba(100, 210, 255, 0.065);
+  border-color: rgba(100, 210, 255, 0.16);
+}
+
+.hardware-log-console__viewport {
+  height: 230px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 7px 8px 10px;
+  content-visibility: auto;
+}
+
+.hardware-log-console__empty {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  gap: 7px;
+  color: #536174;
+  text-align: center;
+  font-size: 9px;
+}
+
+.hardware-log-console__empty span {
+  color: rgba(100, 210, 255, 0.38);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.18em;
+}
+
+.hardware-log-row {
+  --log-accent: #64d2ff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+}
+
+.hardware-log-row--warn { --log-accent: #ff9f0a; }
+.hardware-log-row--error { --log-accent: #ff453a; }
+
+.hardware-log-row summary {
+  display: grid;
+  grid-template-columns: 58px 54px 140px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 7px;
+  min-height: 29px;
+  padding: 3px 6px;
+  color: #8190a2;
+  cursor: pointer;
+  list-style: none;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 8px;
+}
+
+.hardware-log-row summary::-webkit-details-marker { display: none; }
+
+.hardware-log-row summary:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.hardware-log-row time {
+  color: #536174;
+  font-variant-numeric: tabular-nums;
+}
+
+.hardware-log-row__endpoint {
+  color: var(--log-accent);
+  font-weight: 700;
+}
+
+.hardware-log-row__event {
+  overflow: hidden;
+  color: #91a0b2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hardware-log-row__message {
+  overflow: hidden;
+  color: #c4cfdb;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hardware-log-row__level {
+  justify-self: end;
+  color: var(--log-accent);
+  font-size: 7px;
+}
+
+.hardware-log-row pre {
+  margin: 0 6px 7px 119px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  color: #7f91a5;
+  background: rgba(0, 0, 0, 0.32);
+  border-left: 1px solid color-mix(in srgb, var(--log-accent) 42%, transparent);
+  border-radius: 0 5px 5px 0;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 8px;
+  line-height: 1.45;
 }
 
 .cab-manager__bulk-actions {
@@ -839,11 +1092,37 @@ button, .btn, [role="button"], .clickable {
       "identity status"
       "address address"
       "telemetry telemetry"
+      "options options"
       "actions actions"
       "error error";
   }
 
   .cab-manager-card__actions {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+
+  .cab-manager-card__options {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .hardware-log-console__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hardware-log-console__filters {
+    overflow-x: auto;
+  }
+
+  .hardware-log-row summary {
+    grid-template-columns: 54px 48px minmax(0, 1fr) 38px;
+  }
+
+  .hardware-log-row__event {
+    display: none;
+  }
+
+  .hardware-log-row pre {
+    margin-left: 6px;
   }
 }

@@ -144,6 +144,11 @@ class VisionUdpPublisherTests(unittest.TestCase):
         self.assertEqual(status["layout"], "fixed")
         self.assertEqual(status["mapping"]["mappedSignalCount"], 1)
         self.assertEqual(status["mapping"]["mappedSwitchCount"], 1)
+        self.assertEqual(status["logs"][0]["event"], "READY")
+
+        cleared = publisher.clear_logs()["status"]["logs"]
+        self.assertEqual(len(cleared), 1)
+        self.assertEqual(cleared[0]["event"], "LOGS_CLEARED")
 
     def test_udp_loopback_sends_a_parseable_snapshot_frame(self) -> None:
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -175,6 +180,10 @@ class VisionUdpPublisherTests(unittest.TestCase):
         status = publisher.status()["status"]
         self.assertEqual(status["framesSent"], 1)
         self.assertEqual(status["state"], "DISCONNECTED")
+        events = [entry["event"] for entry in status["logs"]]
+        self.assertIn("CONNECTED", events)
+        self.assertIn("FIRST_FRAME_SENT", events)
+        self.assertIn("DISCONNECTED", events)
 
 
 if __name__ == "__main__":

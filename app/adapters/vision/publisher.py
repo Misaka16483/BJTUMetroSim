@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from app.adapters.connection_log import ConnectionEventLog
 from app.adapters.vision.mapper import VisionSnapshotMapper
 from app.adapters.vision.protocol import COMPACT_LAYOUT, VisionFrameBuilder
 
@@ -98,6 +99,7 @@ class VisionUdpPublisher:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
+        self._connection_log = ConnectionEventLog()
         self._state = "DISCONNECTED"
         self._live_counter = 0
         self._frames_sent = 0
@@ -105,6 +107,17 @@ class VisionUdpPublisher:
         self._last_frame_size = 0
         self._last_frame_at: str | None = None
         self._last_error: str | None = None
+        self._log(
+            "READY",
+            "视景 UDP 发布器已就绪",
+            details={
+                "remoteHost": self.remote_host,
+                "remotePort": self.remote_port,
+                "localHost": self.local_host,
+                "localPort": self.local_port,
+                "layout": self.builder.layout,
+            },
+        )
 
     def start(self) -> dict[str, Any]:
         with self._lock:
@@ -113,11 +126,24 @@ class VisionUdpPublisher:
             self._stop_event.clear()
             self._state = "STARTING"
             self._last_error = None
+            self._log(
+                "CONNECTING",
+                "正在启动视景 UDP 发布",
+                details={
+                    "remoteHost": self.remote_host,
+                    "remotePort": self.remote_port,
+                    "intervalMs": round(self.interval_s * 1000.0),
+                },
+            )
             self._thread = threading.Thread(target=self._run, name="vision-udp-publisher", daemon=True)
             self._thread.start()
             return self.status()
 
     def stop(self) -> dict[str, Any]:
+        with self._lock:
+            was_active = self._state != "DISCONNECTED" or self._thread is not None
+            if was_active:
+                self._log("DISCONNECT_REQUESTED", "正在停止视景 UDP 发布")
         self._stop_event.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
@@ -126,6 +152,8 @@ class VisionUdpPublisher:
             self._close_sender_locked()
             self._thread = None
             self._state = "DISCONNECTED"
+            if was_active:
+                self._log("DISCONNECTED", "视景 UDP 发布已停止")
             return self.status()
 
     connect = start
@@ -140,6 +168,7 @@ class VisionUdpPublisher:
         state = self.mapper.build_state(snapshot, counter)
         frame = self.builder.build(state)
         with self._lock:
+            previous_state = self._state
             sender = self._sender
             if sender is None:
                 sender = self._sender_factory(
@@ -159,6 +188,22 @@ class VisionUdpPublisher:
             self._last_error = None
             self._state = "CONNECTED"
             self._live_counter = 0 if counter >= 2**31 - 1 else counter + 1
+            if previous_state != "CONNECTED":
+                self._log(
+                    "CONNECTED",
+                    "视景 UDP 数据流已建立",
+                    details={
+                        "remoteHost": self.remote_host,
+                        "remotePort": self.remote_port,
+                        "frameBytes": sent,
+                    },
+                )
+            if self._frames_sent == 1:
+                self._log(
+                    "FIRST_FRAME_SENT",
+                    "视景控制机已发送首帧状态数据",
+                    details={"bytes": sent, "layout": self.builder.layout},
+                )
         return frame
 
     def status(self) -> dict[str, Any]:
@@ -180,8 +225,14 @@ class VisionUdpPublisher:
                     "lastError": self._last_error,
                     "nextLiveCounter": self._live_counter,
                     "mapping": self.mapper.mapping_report(),
+                    "logs": self._connection_log.snapshot(),
                 },
             }
+
+    def clear_logs(self) -> dict[str, Any]:
+        self._connection_log.clear()
+        self._log("LOGS_CLEARED", "视景连接日志已清空")
+        return self.status()
 
     def _run(self) -> None:
         next_send = time.monotonic()
@@ -190,9 +241,17 @@ class VisionUdpPublisher:
                 self.send_once()
             except (OSError, RuntimeError, ValueError) as exc:
                 with self._lock:
+                    should_log = self._state != "RETRYING" or self._last_error != str(exc)
                     self._last_error = str(exc)
                     self._state = "RETRYING"
                     self._close_sender_locked()
+                    if should_log:
+                        self._log(
+                            "CONNECTION_ERROR",
+                            "视景 UDP 发布异常，等待重试",
+                            level="ERROR",
+                            details={"error": str(exc)},
+                        )
             next_send += self.interval_s
             wait_s = max(0.0, next_send - time.monotonic())
             if wait_s == 0.0:
@@ -204,6 +263,22 @@ class VisionUdpPublisher:
         if self._sender is not None:
             self._sender.close()
             self._sender = None
+
+    def _log(
+        self,
+        event: str,
+        message: str,
+        *,
+        level: str = "INFO",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self._connection_log.append(
+            "vision",
+            event,
+            message,
+            level=level,
+            details=details,
+        )
 
 
 def _utc_now_iso() -> str:

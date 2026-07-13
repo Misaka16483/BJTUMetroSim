@@ -667,6 +667,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
                 else:
                     self._send_json(publisher.disconnect())
+            elif path == "/api/hardware/logs/clear":
+                controller = self._driver_cab_controller()
+                publisher = self._vision_publisher()
+                if controller is None or publisher is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json({
+                        "ok": True,
+                        "driverCab": controller.clear_logs()["status"],
+                        "vision": publisher.clear_logs()["status"],
+                    })
             elif path == "/api/hardware/driver-cab/plc/connect":
                 controller = self._driver_cab_controller()
                 if controller is None:
@@ -1158,6 +1169,7 @@ def main() -> None:
     print("  POST /api/sim/stop")
     print("  POST /api/hardware/vision/connect")
     print("  POST /api/hardware/vision/disconnect")
+    print("  POST /api/hardware/logs/clear")
     try:
         server.serve_forever()
     finally:

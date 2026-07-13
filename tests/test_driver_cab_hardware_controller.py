@@ -267,6 +267,43 @@ class DriverCabHardwareControllerTests(unittest.TestCase):
         status = controller.status()["status"]
         self.assertEqual(status["state"], "ERROR")
         self.assertIn("PLC unreachable", status["lastError"])
+        plc_events = [entry["event"] for entry in status["logs"] if entry["endpoint"] == "plc"]
+        self.assertIn("CONNECTING", plc_events)
+        self.assertIn("CONNECTION_ERROR", plc_events)
+        controller.disconnect()
+
+    def test_connection_logs_cover_all_endpoints_and_can_be_cleared(self) -> None:
+        plc_connected = threading.Event()
+        display_factory = _DisplayClientFactory()
+        controller = DriverCabHardwareController(
+            self.engine,
+            client_factory=lambda _host, _port, _timeout: _BlockingPlcClient(plc_connected),
+            display_client_factory=display_factory,
+            display_interval_s=0.01,
+        )
+
+        controller.connect()
+        self.assertTrue(plc_connected.wait(timeout=1.0))
+        deadline = time.monotonic() + 1.0
+        status = controller.status()["status"]
+        while (
+            not {"plc", "networkScreen", "signalScreen"}.issubset(
+                {entry["endpoint"] for entry in status["logs"] if entry["event"] == "CONNECTED"}
+            )
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+            status = controller.status()["status"]
+
+        connected_endpoints = {
+            entry["endpoint"] for entry in status["logs"] if entry["event"] == "CONNECTED"
+        }
+        self.assertEqual(connected_endpoints, {"plc", "networkScreen", "signalScreen"})
+        self.assertTrue(all(entry["timestamp"] for entry in status["logs"]))
+        self.assertTrue(all(entry["message"] for entry in status["logs"]))
+
+        cleared = controller.clear_logs()["status"]["logs"]
+        self.assertIn("LOGS_CLEARED", {entry["event"] for entry in cleared})
         controller.disconnect()
 
     def test_display_screen_addresses_are_saved_and_reported(self) -> None:

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from app.adapters.binary import TcpFrameClient
+from app.adapters.connection_log import ConnectionEventLog
 from app.adapters.cab.mitsubishi_plc import (
     MitsubishiPlcCabInputState,
     MitsubishiPlcCabOutputFrameBuilder,
@@ -89,6 +90,7 @@ class DriverCabHardwareStatus:
     signal_screen_port: int
     network_screen: dict[str, Any]
     signal_screen: dict[str, Any]
+    logs: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +112,7 @@ class DriverCabHardwareStatus:
             "signalScreenPort": self.signal_screen_port,
             "networkScreen": self.network_screen,
             "signalScreen": self.signal_screen,
+            "logs": self.logs,
         }
 
 
@@ -154,6 +157,7 @@ class DriverCabHardwareController:
         self._signal_screen_builder = SignalScreenFrameBuilder()
         self._plc_output_builder = MitsubishiPlcCabOutputFrameBuilder()
         self._lock = threading.RLock()
+        self._connection_log = ConnectionEventLog()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._client: MitsubishiPlcTcpClient | None = None
@@ -181,6 +185,19 @@ class DriverCabHardwareController:
         self._ato_available_sent = False
         self._ato_active_sent = False
         self._last_plc_output: MitsubishiPlcCabOutputState | None = None
+        self._log("plc", "READY", "PLC 连接控制器已就绪", details={"host": self._host, "port": self._port})
+        self._log(
+            "networkScreen",
+            "READY",
+            "HMI 网络屏连接控制器已就绪",
+            details={"host": self._network_screen_host, "port": self._network_screen_port},
+        )
+        self._log(
+            "signalScreen",
+            "READY",
+            "MMI 信号屏连接控制器已就绪",
+            details={"host": self._signal_screen_host, "port": self._signal_screen_port},
+        )
 
     def connect(
         self,
@@ -235,6 +252,9 @@ class DriverCabHardwareController:
 
     def disconnect_plc(self) -> dict[str, Any]:
         with self._lock:
+            was_active = self._state != "DISCONNECTED" or self._thread is not None
+            if was_active:
+                self._log("plc", "DISCONNECT_REQUESTED", "正在断开 PLC 连接")
             self._stop_event.set()
             client = self._client
         if client is not None:
@@ -254,6 +274,8 @@ class DriverCabHardwareController:
             self._last_plc_output = None
             self._state = "DISCONNECTED"
             self._control_state = "IDLE"
+            if was_active:
+                self._log("plc", "DISCONNECTED", "PLC 连接已断开")
             return {"ok": True, "status": self._snapshot_locked().to_dict()}
 
     def connect_display(self, endpoint: str, host: str | None = None) -> dict[str, Any]:
@@ -275,6 +297,9 @@ class DriverCabHardwareController:
     def disconnect_display(self, endpoint: str) -> dict[str, Any]:
         runtime = self._display_runtime(endpoint)
         with self._lock:
+            was_active = runtime.state != "DISCONNECTED" or endpoint in self._display_threads
+            if was_active:
+                self._log(endpoint, "DISCONNECT_REQUESTED", f"正在断开 {self._endpoint_label(endpoint)}")
             stop_event = self._display_stop_events.get(endpoint)
             if stop_event is not None:
                 stop_event.set()
@@ -289,6 +314,8 @@ class DriverCabHardwareController:
             self._display_threads.pop(endpoint, None)
             self._display_stop_events.pop(endpoint, None)
             runtime.state = "DISCONNECTED"
+            if was_active:
+                self._log(endpoint, "DISCONNECTED", f"{self._endpoint_label(endpoint)}连接已断开")
             return {"ok": True, "status": self._snapshot_locked().to_dict()}
 
     def _start_plc_locked(self) -> None:
@@ -305,6 +332,12 @@ class DriverCabHardwareController:
         self._ato_available_sent = False
         self._ato_active_sent = False
         self._last_plc_output = None
+        self._log(
+            "plc",
+            "CONNECTING",
+            "正在连接 PLC 司机台",
+            details={"host": self._host, "port": self._port, "transport": "TCP"},
+        )
         stop_event = threading.Event()
         self._stop_event = stop_event
         self._thread = threading.Thread(
@@ -323,6 +356,13 @@ class DriverCabHardwareController:
             self._signal_screen_runtime = runtime
         else:
             raise ValueError(f"unknown display endpoint: {endpoint}")
+        host, port = self._display_address(endpoint)
+        self._log(
+            endpoint,
+            "CONNECTING",
+            f"正在连接 {self._endpoint_label(endpoint)}",
+            details={"host": host, "port": port, "transport": "TCP"},
+        )
         stop_event = threading.Event()
         self._display_stop_events[endpoint] = stop_event
         thread = threading.Thread(
@@ -337,6 +377,11 @@ class DriverCabHardwareController:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {"ok": True, "status": self._snapshot_locked().to_dict()}
+
+    def clear_logs(self) -> dict[str, Any]:
+        self._connection_log.clear()
+        self._log("system", "LOGS_CLEARED", "设备连接日志已清空")
+        return self.status()
 
     def process_input_state(self, input_state: MitsubishiPlcCabInputState) -> dict[str, Any]:
         """Apply one decoded frame; public for deterministic integration tests.
@@ -458,6 +503,12 @@ class DriverCabHardwareController:
                 self._state = "CONNECTED"
                 self._control_state = "WAITING_FOR_TRAIN"
                 self._connected_at = _utc_now_iso()
+                self._log(
+                    "plc",
+                    "CONNECTED",
+                    "PLC 司机台 TCP 连接已建立",
+                    details={"host": self._host, "port": self._port},
+                )
             while not stop_event.is_set():
                 input_state = client.read_input_state(train_id=self.train_id)
                 self.process_input_state(input_state)
@@ -469,6 +520,13 @@ class DriverCabHardwareController:
                     self._state = "ERROR"
                     self._control_state = "FAIL_SAFE_BRAKE" if self._manual_mode_armed else "IDLE"
                     self._last_error = str(exc)
+                    self._log(
+                        "plc",
+                        "CONNECTION_ERROR",
+                        "PLC 连接中断，已进入保护状态",
+                        level="ERROR",
+                        details={"error": str(exc)},
+                    )
         finally:
             client.close()
             with self._lock:
@@ -484,12 +542,26 @@ class DriverCabHardwareController:
             with self._lock:
                 runtime.state = "CONNECTING" if first_attempt else "RETRYING"
                 self._display_clients[endpoint] = client
+                if not first_attempt:
+                    self._log(
+                        endpoint,
+                        "RETRYING",
+                        f"正在重新连接 {self._endpoint_label(endpoint)}",
+                        level="WARN",
+                        details={"host": host, "port": port},
+                    )
             try:
                 client.connect()
                 with self._lock:
                     runtime.state = "CONNECTED"
                     runtime.connected_at = _utc_now_iso()
                     runtime.last_error = None
+                    self._log(
+                        endpoint,
+                        "CONNECTED",
+                        f"{self._endpoint_label(endpoint)} TCP 连接已建立",
+                        details={"host": host, "port": port},
+                    )
                 previous_speed: float | None = None
                 previous_sample_at: float | None = None
                 while not stop_event.is_set():
@@ -508,6 +580,13 @@ class DriverCabHardwareController:
                     with self._lock:
                         runtime.frames_sent += 1
                         runtime.last_frame_at = _utc_now_iso()
+                        if runtime.frames_sent == 1:
+                            self._log(
+                                endpoint,
+                                "FIRST_FRAME_SENT",
+                                f"{self._endpoint_label(endpoint)}已发送首帧",
+                                details={"bytes": len(frame)},
+                            )
                     if stop_event.wait(self.display_interval_s):
                         break
             except (ConnectionError, OSError, RuntimeError, socket.timeout, ValueError) as exc:
@@ -515,6 +594,13 @@ class DriverCabHardwareController:
                     with self._lock:
                         runtime.state = "RETRYING"
                         runtime.last_error = str(exc)
+                        self._log(
+                            endpoint,
+                            "CONNECTION_ERROR",
+                            f"{self._endpoint_label(endpoint)}连接异常",
+                            level="ERROR",
+                            details={"error": str(exc), "host": host, "port": port},
+                        )
             finally:
                 client.close()
                 with self._lock:
@@ -680,6 +766,13 @@ class DriverCabHardwareController:
     def _record_input_locked(self, input_state: MitsubishiPlcCabInputState) -> None:
         self._frames_received += 1
         self._last_frame_at = _utc_now_iso()
+        if self._frames_received == 1:
+            self._log(
+                "plc",
+                "FIRST_FRAME_RECEIVED",
+                "PLC 已接收首帧驾驶数据",
+                details={"trainId": self.train_id},
+            )
         self._last_input = {
             "speedMps": input_state.vehicle_speed_mps,
             "direction": input_state.direction,
@@ -733,7 +826,32 @@ class DriverCabHardwareController:
                 self._signal_screen_host,
                 self._signal_screen_port,
             ),
+            logs=self._connection_log.snapshot(),
         )
+
+    def _log(
+        self,
+        endpoint: str,
+        event: str,
+        message: str,
+        *,
+        level: str = "INFO",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self._connection_log.append(
+            endpoint,
+            event,
+            message,
+            level=level,
+            details=details,
+        )
+
+    @staticmethod
+    def _endpoint_label(endpoint: str) -> str:
+        return {
+            "networkScreen": "HMI 网络屏",
+            "signalScreen": "MMI 信号屏",
+        }.get(endpoint, endpoint)
 
 
 def _clamp_u8(value: Any) -> int:
