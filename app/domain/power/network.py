@@ -48,6 +48,7 @@ class TractionPowerNetwork:
         self.supercapacitor_storages = {
             item.storage_id: item for item in supercapacitor_storages
         }
+        self._outage_restore_states: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
         self.sections = self._build_supply_sections()
 
     @property
@@ -92,6 +93,21 @@ class TractionPowerNetwork:
     def apply_substation_outage(self, substation_id: str, *, big_bilateral: bool = True) -> dict[str, list[str] | str]:
         if substation_id not in self.substations:
             raise KeyError(substation_id)
+        affected_feeders = {
+            feeder.feeder_id: feeder.status
+            for feeder in self.feeders.values()
+            if feeder.substation_id == substation_id
+        }
+        affected_switches = {
+            switch.switch_id: switch.current_state
+            for switch in self.switches.values()
+            if switch.switch_type == "TIE"
+            and substation_id in {switch.from_node_id, switch.to_node_id}
+        }
+        self._outage_restore_states.setdefault(
+            substation_id,
+            (affected_feeders, affected_switches),
+        )
         self.substations[substation_id] = replace(self.substations[substation_id], status="OUTAGE")
 
         opened: list[str] = []
@@ -118,15 +134,36 @@ class TractionPowerNetwork:
         if substation_id not in self.substations:
             raise KeyError(substation_id)
         self.substations[substation_id] = replace(self.substations[substation_id], status="IN_SERVICE")
-        closed: list[str] = []
+        feeder_states, switch_states = self._outage_restore_states.pop(substation_id, ({}, {}))
+        restored_feeders: list[str] = []
         for feeder in list(self.feeders.values()):
-            if feeder.substation_id == substation_id:
-                self.feeders[feeder.feeder_id] = replace(feeder, status="CLOSED")
-                closed.append(feeder.feeder_id)
+            if feeder.substation_id != substation_id:
+                continue
+            restored_status = feeder_states.get(feeder.feeder_id, "CLOSED")
+            self.feeders[feeder.feeder_id] = replace(feeder, status=restored_status)
+            restored_feeders.append(feeder.feeder_id)
+
+        restored_switches: list[str] = []
+        for switch_id, previous_state in switch_states.items():
+            switch = self.switches[switch_id]
+            adjacent_outage = any(
+                self.substations[node_id].status == "OUTAGE"
+                for node_id in (switch.from_node_id, switch.to_node_id)
+                if node_id in self.substations
+            )
+            next_state = "CLOSED" if adjacent_outage else previous_state
+            self.switches[switch_id] = replace(switch, current_state=next_state)
+            restored_switches.append(switch_id)
         return {
             "affectedSubstationId": substation_id,
             "supplyMode": "RESTORED",
-            "closedFeeders": closed,
+            "closedFeeders": [
+                feeder_id
+                for feeder_id in restored_feeders
+                if self.feeders[feeder_id].status == "CLOSED"
+            ],
+            "restoredFeeders": restored_feeders,
+            "restoredSwitches": restored_switches,
         }
 
     def operate_switch(self, switch_id: str, state: str) -> PowerSwitch:

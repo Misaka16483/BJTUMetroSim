@@ -42,6 +42,33 @@ class Line9PowerNetworkTests(unittest.TestCase):
         self.assertGreater(len(result["openedSwitches"]), 0)
         self.assertGreater(len(result["closedSwitches"]), 0)
 
+    def test_substation_restore_returns_exact_prefault_topology(self) -> None:
+        network = load_line9_power_network(ROOT / "data" / "scenarios" / "line9_power_topology.json")
+        network.set_feeder_status("FD-0905-UP-LEFT", "OPEN")
+        network.operate_switch("SW-TIE-0905", "CLOSED")
+        feeder_states = {key: item.status for key, item in network.feeders.items()}
+        switch_states = {key: item.current_state for key, item in network.switches.items()}
+
+        network.apply_substation_outage("TS-0905", big_bilateral=True)
+        result = network.restore_substation("TS-0905")
+
+        self.assertEqual(network.substations["TS-0905"].status, "IN_SERVICE")
+        self.assertEqual({key: item.status for key, item in network.feeders.items()}, feeder_states)
+        self.assertEqual({key: item.current_state for key, item in network.switches.items()}, switch_states)
+        self.assertNotIn("FD-0905-UP-LEFT", result["closedFeeders"])
+        self.assertGreater(len(result["restoredFeeders"]), 0)
+        self.assertGreater(len(result["restoredSwitches"]), 0)
+
+    def test_repeated_outage_restore_cycles_do_not_drift_topology(self) -> None:
+        network = load_line9_power_network(ROOT / "data" / "scenarios" / "line9_power_topology.json")
+        initial = network.topology_dict()
+
+        for _ in range(5):
+            network.apply_substation_outage("TS-0905", big_bilateral=True)
+            network.restore_substation("TS-0905")
+
+        self.assertEqual(network.topology_dict(), initial)
+
     def test_strict_topology_rejects_implicit_generated_devices(self) -> None:
         data = json.loads(
             (ROOT / "data" / "scenarios" / "line9_power_topology.json").read_text(encoding="utf-8")

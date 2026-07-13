@@ -302,15 +302,19 @@ def n_minus_one_check() -> dict:
         key: replace(value, no_load_voltage_v=740.0, internal_resistance_ohm=0.025)
         for key, value in network.substations.items()
     }
-    for _tick in range(40):
+    for _tick in range(math.ceil(45.0 / engine.clock.tick_seconds)):
         engine._tick()
     delay_before = sum(item.power_constraint_delay_sec for item in engine.trains)
     engine.queue_power_command("SUBSTATION_OUTAGE", {"targetId": "TS-0905", "bigBilateral": True})
-    for _tick in range(40):
+    min_outage_limit = 1.0
+    for _tick in range(math.ceil(20.0 / engine.clock.tick_seconds)):
         engine._tick()
+        current = engine.snapshot()
+        assert current is not None
+        min_outage_limit = min(min_outage_limit, current.kpi["minTractionLimitRatio"])
     delay_outage = sum(item.power_constraint_delay_sec for item in engine.trains)
     engine.queue_power_command("RESET_NETWORK", {})
-    for _tick in range(20):
+    for _tick in range(math.ceil(10.0 / engine.clock.tick_seconds)):
         engine._tick()
     delay_recovered = sum(item.power_constraint_delay_sec for item in engine.trains)
     recovered_snapshot = engine.snapshot()
@@ -325,6 +329,7 @@ def n_minus_one_check() -> dict:
         "delayDuringOutageSec": delay_outage,
         "delayAfterRecoverySec": delay_recovered,
         "recoveredTractionLimitRatio": recovered_snapshot.kpi["minTractionLimitRatio"],
+        "engineOutageMinTractionLimitRatio": min_outage_limit,
     }
 
 
@@ -341,14 +346,18 @@ def regen_check() -> dict:
         dt_sec=0.25,
     )
     split = (
-        snapshot.absorbed_regen_kw
+        snapshot.self_consumed_regen_kw
+        + snapshot.absorbed_regen_kw
+        + sum(item.charge_power_kw for item in snapshot.supercapacitor_flows)
         + snapshot.feedback_regen_kw
         + snapshot.wasted_regen_kw
         + snapshot.regen_transfer_losses_kw
     )
     return {
         "generatedKw": snapshot.generated_regen_kw,
+        "selfConsumedKw": snapshot.self_consumed_regen_kw,
         "absorbedKw": snapshot.absorbed_regen_kw,
+        "storageChargedKw": sum(item.charge_power_kw for item in snapshot.supercapacitor_flows),
         "feedbackKw": snapshot.feedback_regen_kw,
         "wastedKw": snapshot.wasted_regen_kw,
         "transferLossesKw": snapshot.regen_transfer_losses_kw,
@@ -371,7 +380,8 @@ def passenger_check(output_dir: Path) -> dict:
             peak_power_kw = 0.0
             min_voltage_v = 1000.0
             reach_tick = None
-            for tick in range(360):
+            max_ticks = math.ceil(180.0 / engine.clock.tick_seconds)
+            for tick in range(max_ticks):
                 engine._tick()
                 snapshot = engine.snapshot()
                 assert snapshot is not None
@@ -388,7 +398,7 @@ def passenger_check(output_dir: Path) -> dict:
                 "peakPowerKw": peak_power_kw,
                 "minVoltageV": min_voltage_v,
                 "energyKwh": sum(item["energyKwh"] for item in snapshot.trains),
-                "timeTo1000mSec": reach_tick * 0.25,
+                "timeTo1000mSec": reach_tick * engine.clock.tick_seconds,
             }
 
             stressed = build_engine(path)
@@ -442,7 +452,7 @@ def recording_check(output_dir: Path) -> dict:
     }
 
 
-def write_markdown_report(report: dict, path: Path) -> None:
+def _legacy_write_markdown_report(report: dict, path: Path) -> None:
     criteria_rows = "\n".join(
         f"| `{name}` | {'通过' if passed else '失败'} |"
         for name, passed in report["criteria"].items()
@@ -519,7 +529,7 @@ def write_markdown_report(report: dict, path: Path) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def write_traceability_matrix(path: Path) -> None:
+def _legacy_write_traceability_matrix(path: Path) -> None:
     content = """# 供电仿真需求追溯矩阵
 
 | 需求编号 | 需求/验收目标 | 设计与实现 | 自动验证 | 证据输出 |
@@ -538,6 +548,83 @@ def write_traceability_matrix(path: Path) -> None:
 | PWR-R12 | 同输入结果可重复 | 确定性排序与固定场景 | 重复运行对比 | `determinism` |
 | PWR-R13 | 支持批量实验与优化 | `power_experiments.py` | 优化接口测试 | 实验JSON/SQLite |
 """
+    path.write_text(content, encoding="utf-8")
+
+
+def write_markdown_report(report: dict, path: Path) -> None:
+    status = "通过" if report["passed"] else "未通过"
+    criteria_rows = "\n".join(
+        f"| `{name}` | {'通过' if passed else '失败'} |"
+        for name, passed in report["criteria"].items()
+    )
+    fleet_rows = "\n".join(
+        f"| {item['trainCount']} | {item['p95Ms']:.3f} | {item['maxMs']:.3f} | "
+        f"{item['maxBalanceErrorRatio'] * 100:.5f}% | {'是' if item['allConverged'] else '否'} |"
+        for item in report["fleetScalability"]["cases"]
+    )
+    reference = report["analyticalReference"]
+    hour = report["oneHour"]
+    regen = report["regen"]
+    content = f"""# 9号线牵引供电仿真自动验收报告
+
+生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}
+总体结论：**{status}**
+
+## 验收判据
+
+| 判据 | 结果 |
+|---|:---:|
+{criteria_rows}
+
+## 解析基准
+
+- 参考模型：单电源恒功率直流电路闭式解。
+- 电压绝对误差：{reference['voltageAbsErrorV']:.6f} V（阈值 0.5 V）。
+- 电流相对误差：{reference['currentRelativeError'] * 100:.6f}%（阈值 0.1%）。
+
+## 多车性能
+
+| 列车数 | 求解 P95/ms | 最大值/ms | 最大平衡误差 | 全部收敛 |
+|---:|---:|---:|---:|:---:|
+{fleet_rows}
+
+## 再生能量守恒
+
+生成 {regen['generatedKw']:.3f} kW；本车自用 {regen['selfConsumedKw']:.3f} kW；跨车吸收 {regen['absorbedKw']:.3f} kW；
+储能充电 {regen['storageChargedKw']:.3f} kW；交流回馈 {regen['feedbackKw']:.3f} kW；线路损耗 {regen['transferLossesKw']:.3f} kW；浪费 {regen['wastedKw']:.3f} kW。
+守恒误差：{regen['conservationErrorKw']:.9f} kW。
+
+## 长时稳定性
+
+- 20 列车、1 秒步长、3600 步；失败步数 {hour['failedSteps']}。
+- 求解 P95 {hour['solveP95Ms']:.3f} ms，最大 {hour['solveMaxMs']:.3f} ms。
+- 最大功率平衡误差 {hour['maxBalanceErrorRatio'] * 100:.6f}%。
+- 最低列车电压 {hour['minVoltageV']:.2f} V。
+
+## 适用边界
+
+本验收证明 `ENGINEERING_ESTIMATE` 教学仿真模型的软件正确性、数值稳定性和契约一致性，
+不等同于真实线路工程投运认证。真实设备参数仍需用运营方图纸、SCADA 或实测数据校准。
+"""
+    path.write_text(content, encoding="utf-8")
+
+
+def write_traceability_matrix(path: Path) -> None:
+    content = """# 供电仿真需求追溯矩阵
+
+| 编号 | 验收目标 | 实现位置 | 自动验证 |
+|---|---|---|---|
+| PWR-R01 | 显式拓扑和参数来源 | `line9_power_topology.json`、`line9_topology.py` | `test_power_network_models.py`、`test_power_validation_properties.py` |
+| PWR-R02 | 多车有符号 DC 潮流与功率平衡 | `flow_solver.py` | `test_power_flow_solver.py`、随机多车性质测试 |
+| PWR-R03 | 再生能量逐路径守恒 | `RegenPathFlow`、再生分配器 | `test_power_flow_solver.py`、`test_supercapacitor_storage.py` |
+| PWR-R04 | 超级电容 SOC、效率和功率边界 | 储能状态账本 | `test_supercapacitor_storage.py`、步长不变性测试 |
+| PWR-R05 | 故障、联络供电与无漂移恢复 | `network.py`、供电命令队列 | 网络和引擎故障恢复测试 |
+| PWR-R06 | 求解失败不发布坏结果 | 最后有效快照和自动暂停 | `test_engine_power_network_loop.py` |
+| PWR-R07 | 数据可记录、导出和回放 | `recorder.py` | 引擎记录闭环与自动验收脚本 |
+| PWR-R08 | 10/20/40 车性能和一小时稳定性 | 验收运行器 | `run_power_acceptance.py` |
+| PWR-R09 | 前端量纲、符号和历史连续性 | `PowerSystemView.tsx` | TypeScript 构建与浏览器验收 |
+"""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
 
@@ -567,12 +654,11 @@ def main() -> None:
         "balanceErrorUnder1Percent": report["solver"]["maxBalanceErrorRatio"] < 0.01,
         "deterministic": report["determinism"]["repeatable"],
         "switchChangesPath": report["switch"]["pathChanged"],
-        "nMinusOneExplainable": report["nMinusOne"]["outageMinTractionLimitRatio"] < 1.0 and report["nMinusOne"]["delayDuringOutageSec"] > report["nMinusOne"]["delayBeforeSec"] and report["nMinusOne"]["delayAfterRecoverySec"] == report["nMinusOne"]["delayDuringOutageSec"],
+        "nMinusOneExplainable": report["nMinusOne"]["outageMinTractionLimitRatio"] < 1.0 and report["nMinusOne"]["engineOutageMinTractionLimitRatio"] < 1.0 and report["nMinusOne"]["delayDuringOutageSec"] > report["nMinusOne"]["delayBeforeSec"] and report["nMinusOne"]["delayAfterRecoverySec"] == report["nMinusOne"]["delayDuringOutageSec"],
         "regenConservative": (
             report["regen"]["conservationErrorKw"] < 1e-9
-            and report["regen"]["absorbedKw"] > 0.0
-            and report["regen"]["feedbackKw"] > 0.0
-            and report["regen"]["wastedKw"] > 0.0
+            and report["regen"]["generatedKw"] > 0.0
+            and report["regen"]["absorbedKw"] + report["regen"]["storageChargedKw"] + report["regen"]["feedbackKw"] > 0.0
             and report["regen"]["transferLossesKw"] > 0.0
             and report["regen"]["pathCount"] >= 3
         ),

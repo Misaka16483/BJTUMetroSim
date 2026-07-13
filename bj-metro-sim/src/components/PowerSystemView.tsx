@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSimStore } from '../store/useSimStore';
 import type {
@@ -89,6 +89,7 @@ export default function PowerSystemView() {
   const [selectedSwitchId, setSelectedSwitchId] = useState<string>('');
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [events, setEvents] = useState<EventPoint[]>([]);
+  const lastSampleTickRef = useRef<number | null>(null);
   const [feederFilter, setFeederFilter] = useState<'ALL' | 'SELECTED' | 'ABNORMAL'>('ABNORMAL');
   const [actionStatus, setActionStatus] = useState<string>('就绪');
   const [actionPending, setActionPending] = useState(false);
@@ -147,7 +148,17 @@ export default function PowerSystemView() {
 
   useEffect(() => {
     if (!simPowerNetwork) return;
-    const minVoltage = Math.min(...trainVoltages.map((item) => item.voltageV), 750);
+    const sampleTick = simPowerNetwork.simTimeMs ?? (lastSampleTickRef.current ?? -1) + 1;
+    if (lastSampleTickRef.current !== null && sampleTick < lastSampleTickRef.current) {
+      setEvents([]);
+    }
+    lastSampleTickRef.current = sampleTick;
+    const validTrainVoltages = trainVoltages
+      .map((item) => item.voltageV)
+      .filter((voltage) => Number.isFinite(voltage));
+    const minVoltage = validTrainVoltages.length > 0
+      ? Math.min(...validTrainVoltages)
+      : (powerTopology?.nominalVoltageV ?? 750);
     const netPower = substations.reduce((sum, item) => sum + (item.powerKw ?? 0), 0);
     const rectifierPower = substations.reduce((sum, item) => sum + Math.max(item.rectifierPowerKw ?? 0, 0), 0);
     const substationFeedbackPower = substations.reduce(
@@ -161,7 +172,7 @@ export default function PowerSystemView() {
     setHistory((items) => {
       const previous = items[items.length - 1];
       const point: HistoryPoint = {
-        tick: simPowerNetwork.simTimeMs ?? (previous?.tick ?? -1) + 1,
+        tick: sampleTick,
         minVoltageV: minVoltage,
         netSubstationPowerKw: netPower,
         rectifierPowerKw: rectifierPower,
@@ -175,11 +186,11 @@ export default function PowerSystemView() {
         storageChargeKw: regen?.storageChargedKw ?? 0,
         storageDischargeKw: regen?.storageDischargedKw ?? 0,
       };
-      if (previous && point.tick < previous.tick) return items;
+      if (previous && point.tick < previous.tick) return [point];
       if (previous?.tick === point.tick) return [...items.slice(0, -1), point];
       return [...items.slice(-179), point];
     });
-  }, [simPowerNetwork, trainVoltages, substations, regen]);
+  }, [simPowerNetwork, trainVoltages, substations, regen, powerTopology?.nominalVoltageV]);
 
   useEffect(() => {
     const result = simPowerNetwork?.commandResults?.at(-1);

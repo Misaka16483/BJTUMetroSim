@@ -305,11 +305,22 @@ export default function App() {
             pointerEvents: viewMode !== 'macro' ? 'auto' : 'none',
             transition: 'opacity 200ms ease-out',
           }}>
+            {/* Keep the power view mounted so its rolling trend history keeps
+                sampling while the operator inspects another subsystem. */}
+            <div
+              aria-hidden={viewMode !== 'power'}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                visibility: viewMode === 'power' ? 'visible' : 'hidden',
+                pointerEvents: viewMode === 'power' ? 'auto' : 'none',
+              }}
+            >
+              <PowerSystemView />
+            </div>
             {viewMode === 'driver'
               ? <DriverConsole fullPage />
-              : viewMode === 'power'
-                ? <PowerSystemView />
-                : viewMode === 'stationFlow'
+              : viewMode === 'stationFlow'
                   ? <StationPassengerView />
                   : viewMode === 'interlocking'
                     ? <StationInterlockingView />
