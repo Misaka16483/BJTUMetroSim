@@ -33,8 +33,9 @@ class TerminalTurnbackConfig:
 # The data source has no authoritative turnback flag.  These arrangements were
 # verified against its route, signal, Seg, and turnout records:
 #
-# * GGZ: platform 1 (S13) -- route 10 --> S22, change ends, then use the
-#   reverse traversal of route 23 into platform 2 (S39).
+# * GGZ: platform 1 (S13) -- route 10 --> S22, change ends, then follow the
+#   signal-continuous backward chain route 13 (F9->F7, 11->10) and route 12
+#   (F7->F6, 10->57) into platform 2 (S39).
 # * GTG: platform 26 (S220) -- route 90 --> S213, change ends, then route 87
 #   returns in the backward direction to platform 25 (S207).
 DEFAULT_TERMINAL_TURNBACKS: tuple[TerminalTurnbackConfig, ...] = (
@@ -45,7 +46,7 @@ DEFAULT_TERMINAL_TURNBACKS: tuple[TerminalTurnbackConfig, ...] = (
         turning_point_segment_id=22,
         phases=(
             TurnbackPhaseConfig(direction="forward", route_ids=("10",)),
-            TurnbackPhaseConfig(direction="backward", route_ids=("23",)),
+            TurnbackPhaseConfig(direction="backward", route_ids=("13", "12")),
         ),
     ),
     TerminalTurnbackConfig(

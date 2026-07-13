@@ -355,16 +355,22 @@ class RouteChainPlanner:
         segment_ids: tuple[int, ...] = ()
         signal_ids: list[tuple[int, int]] = []
         route_switch_positions: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+        previous_route_id: str | None = None
+        previous_end_signal_id: int | None = None
         for route_id in route_ids:
             route = self._catalog.get(route_id)
             if route is None:
                 raise ValueError(f"TURNBACK_CONFIG_INVALID: unknown route {route_id}")
             route_segments = self._route_segments(route_id, direction)
             if not route_segments:
-                opposite = "backward" if direction == "forward" else "forward"
-                route_segments = tuple(reversed(self._route_segments(route_id, opposite)))
-            if not route_segments:
-                raise ValueError(f"TURNBACK_CONFIG_INVALID: no Seg path for route {route_id}")
+                raise ValueError(
+                    f"TURNBACK_CONFIG_INVALID: route {route_id} has no {direction} Seg path"
+                )
+            if previous_end_signal_id is not None and previous_end_signal_id != route.start_signal_id:
+                raise ValueError(
+                    "TURNBACK_CONFIG_INVALID: signal-discontinuous route chain "
+                    f"{previous_route_id}->{route_id}"
+                )
             segment_ids = self._merge_sequences(segment_ids, route_segments, direction) if segment_ids else route_segments
             if not segment_ids:
                 raise ValueError(f"TURNBACK_CONFIG_INVALID: discontinuous route {route_id}")
@@ -372,6 +378,8 @@ class RouteChainPlanner:
             route_switch_positions.append(
                 (route_id, tuple(sorted(route.required_switches.items())))
             )
+            previous_route_id = route_id
+            previous_end_signal_id = route.end_signal_id
 
         self._validate_segment_sequence(segment_ids, direction)
         return TurnbackPhase(

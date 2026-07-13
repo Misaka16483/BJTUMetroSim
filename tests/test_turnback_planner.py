@@ -112,10 +112,15 @@ class TerminalTurnbackTests(unittest.TestCase):
         self.assertEqual(ggz.turning_point_segment_id, 22)
         self.assertEqual([(p.direction, p.route_ids) for p in ggz.phases], [
             ("forward", ("10",)),
-            ("backward", ("23",)),
+            ("backward", ("13", "12")),
         ])
         self.assertEqual(ggz.phases[0].segment_ids[-1], ggz.phases[1].segment_ids[0])
+        self.assertEqual(ggz.phases[1].signal_ids, ((11, 10), (10, 57)))
         self.assertEqual(ggz.phases[0].route_switch_positions, (("10", (("12", "NORMAL"), ("8", "NORMAL"), ("9", "NORMAL"))),))
+        self.assertEqual(ggz.phases[1].route_switch_positions, (
+            ("13", (("12", "NORMAL"),)),
+            ("12", (("10", "REVERSE"), ("9", "REVERSE"))),
+        ))
         self.assertEqual(gtg.turning_point_segment_id, 213)
         self.assertEqual([(p.direction, p.route_ids) for p in gtg.phases], [
             ("forward", ("90",)),
@@ -140,6 +145,23 @@ class TerminalTurnbackTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "TURNBACK_CONFIG_INVALID: unknown route missing"):
             self.planner.plan_turnback("TEST", 1, (invalid,))
+
+    def test_rejects_reverse_traversal_of_an_opposite_direction_route(self) -> None:
+        unsafe = TerminalTurnbackConfig(
+            terminal_id="TEST",
+            origin_platform_id=1,
+            final_platform_id=2,
+            turning_point_segment_id=22,
+            phases=(
+                TurnbackPhaseConfig(direction="forward", route_ids=("10",)),
+                TurnbackPhaseConfig(direction="backward", route_ids=("23",)),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "TURNBACK_CONFIG_INVALID: route 23 has no backward Seg path"
+        ):
+            self.planner.plan_turnback("TEST", 1, (unsafe,))
 
 
 if __name__ == "__main__":
