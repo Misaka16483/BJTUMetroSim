@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 from collections import deque
+import hashlib
+import json
 import math
 import threading
 import time
@@ -19,7 +21,12 @@ from app.core.scenario import ScenarioConfig, TrainConfig
 from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
 from app.domain.control.movement_authority import MovementAuthorityService, TrainPosition
 from app.domain.control.services import ATOController
-from app.domain.control.profile_runtime import AsyncSpeedProfileService, build_speed_profile_request
+from app.domain.control.profile_runtime import (
+    PROFILE_CACHE_VERSION,
+    AsyncSpeedProfileService,
+    SpeedProfileRequest,
+    build_speed_profile_request,
+)
 from app.domain.dispatch.kpi import DispatchKpiTracker
 from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
@@ -512,6 +519,18 @@ class SimulationEngine:
         self._ato_by_train: dict[str, ATOController] = {}
         self._dcdp_curve_data: dict[str, list[dict[str, Any]]] = {}     # 瑙勫垝鏇茬嚎
         self._dcdp_curve_meta: dict[str, dict[str, Any]] = {}
+        self._operation_profile_requests: dict[str, SpeedProfileRequest] = {}
+        self._operation_startup_profile_keys: tuple[str, ...] = ()
+        self._operation_profile_warmup: JsonDict = {
+            "enabled": False,
+            "ready": True,
+            "requestedProfileCount": 0,
+            "readyProfileCount": 0,
+            "pendingProfileCount": 0,
+            "failedProfileCount": 0,
+        }
+        self._operation_plan_hash: str | None = None
+        self._operation_window: JsonDict = {}
         self._profile_run_times: dict[str, float] = {}                  # 棰勮鍖洪棿杩愯鏃堕棿
 
         # 鈹€鈹€ 鐢ㄦ埛閰嶇疆鐨勮溅杈嗗弬鏁帮紙per-train锛?鈹€鈹€
@@ -964,6 +983,9 @@ class SimulationEngine:
                     "operationPlanEnabled": self.scenario.operation_plan.enabled,
                     "dutyCount": len(self._operation_duties),
                     "serviceCount": len(self._operation_services),
+                    "operationPlanHash": self._operation_plan_hash,
+                    "experimentWindow": dict(self._operation_window),
+                    "profileWarmup": dict(self._operation_profile_warmup),
                     "powerModelVersion": (
                         self.power_service.network.model_version
                         if self.power_service.network is not None else None
@@ -1315,6 +1337,56 @@ class SimulationEngine:
             return self._snapshot
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  浠跨湡涓诲惊鐜?    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    def _refresh_operation_profile_warmup(self) -> None:
+        if not self._operation_profile_requests:
+            return
+        overall = self.speed_profile_service.wait_for(
+            tuple(self._operation_profile_requests),
+            0.0,
+        )
+        self._operation_profile_warmup.update({
+            "requestedProfileCount": overall["requestedProfileCount"],
+            "readyProfileCount": overall["readyProfileCount"],
+            "pendingProfileCount": overall["pendingProfileCount"],
+            "failedProfileCount": overall["failedProfileCount"],
+            "pendingCacheKeys": overall["pendingCacheKeys"],
+            "errors": overall["errors"],
+            "allProfilesReady": overall["ready"],
+        })
+
+    def _hold_operation_clock_for_profile(self) -> bool:
+        """Yield wall time for a due DCDP curve without creating fake lateness."""
+        if not self.scenario.operation_plan.enabled:
+            return False
+        waiting = False
+        for train in self.trains:
+            if (
+                train.duty_id is None
+                or train.phase != DWELLING
+                or train._path_plan is None
+                or train._profile_triggered
+                or train.dwell_remaining_sec > 0.0
+                or train._passenger_service_pending
+                or not train.door_system.all_closed_and_locked
+            ):
+                continue
+            if self._prime_path_profile(train, train._path_plan):
+                train._profile_triggered = True
+                continue
+            cache_key = str(self._dcdp_curve_meta.get(train.train_id, {}).get("cacheKey", ""))
+            if cache_key:
+                status = self.speed_profile_service.wait_for((cache_key,), 0.0)
+                if status["failedProfileCount"]:
+                    raise RuntimeError(f"DCDP_PROFILE_RUNTIME_FAILED: {status['errors']}")
+            waiting = True
+        self._refresh_operation_profile_warmup()
+        if waiting:
+            # Direct batch loops can otherwise consume simulated ticks much
+            # faster than the worker receives wall-clock CPU time.
+            time.sleep(0.001)
+            self._snapshot = self._build_snapshot()
+        return waiting
+
     def _run_loop(self) -> None:
         """鍚庡彴浠跨湡绾跨▼."""
         while not self._stop_event.is_set():
@@ -1337,6 +1409,10 @@ class SimulationEngine:
     def _tick(self) -> None:
         """鍗曟浠跨湡."""
         self.speed_profile_service.poll()
+        if self._hold_operation_clock_for_profile():
+            return
+        if self.clock.state != ClockState.RUNNING:
+            return
         self.clock.step()
         tick = self.clock.current_tick
         sim_time_ms = self._absolute_sim_time_ms()
@@ -1699,7 +1775,7 @@ class SimulationEngine:
         sim_time_ms: int,
     ) -> tuple[bool, PreparedTrainStep | None]:
         """Prepare a PathPlan train without advancing physics; return whether the train was handled."""
-        if train.lifecycle_state in {"IN_DEPOT", "READY", "RETURN_REQUESTED", "STORED"}:
+        if train.lifecycle_state in {"IN_DEPOT", "RETURN_REQUESTED", "STORED"}:
             train.speed_mps = 0.0
             train.traction_percent = 0.0
             train.brake_percent = 0.0
@@ -1849,6 +1925,15 @@ class SimulationEngine:
             if self._ato_config.use_dynamic_programming_profile and not train._profile_triggered:
                 return True, None
             train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
+            if (
+                train.duty_id is not None
+                and train.planned_departure_ms is not None
+                and sim_time_ms < train.planned_departure_ms
+                and train.turnback_state in {None, "COMPLETED"}
+            ):
+                train.last_dispatch_action = "HOLD"
+                train.last_dispatch_reason = "TIMETABLE_EARLY_HOLD"
+                return True, None
             train.phase = DEPARTING
 
         path_position_m = min(max(0.0, train.path_position_m), path_plan.total_length_m)
@@ -2380,11 +2465,16 @@ class SimulationEngine:
         if((train.direction == "UP" and next_idx == len(stations) - 1) or (
             train.direction == "DOWN" and next_idx == 0)
         ):
+            duty = self._operation_duties.get(train.duty_id or "")
+            if duty is not None and train.service_id == duty.service_ids[-1]:
+                self._handle_planned_terminal(train, sim_time_ms)
+                return
             # The inbound route ends in the occupied terminal platform. It
             # must pass the same guarded terminal-arrival release before an
             # opposing turnback route can be requested.
             train._terminal_arrival_release_route_ids = train._planned_route_ids
             self._plan_terminal_turnback(train)
+            self._activate_return_service(train, sim_time_ms)
         elif completed_plan is None:
             # Legacy scenarios without a route-table path still need a best
             # effort platform anchor. Normal PathPlan arrivals never reselect
@@ -2858,7 +2948,13 @@ class SimulationEngine:
             path_plan=path_plan,
         )
         if self._ato_config.use_dynamic_programming_profile:
-            load_bucket_pax = int((max(0, train.onboard_pax) + 25) // 50 * 50)
+            if train.duty_id is not None and self.scenario.operation_plan.enabled:
+                # A frozen reference load makes the planned DCDP curve and the
+                # executed curve identical across all duties. Passenger mass
+                # still affects the force/power model at every physical tick.
+                load_bucket_pax = self.scenario.operation_plan.profile_reference_load_pax
+            else:
+                load_bucket_pax = int((max(0, train.onboard_pax) + 25) // 50 * 50)
             vehicle_config = self._make_vehicle_config(train.train_id, load_bucket_pax)
             request = build_speed_profile_request(
                 path_plan,
@@ -3625,12 +3721,197 @@ class SimulationEngine:
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  蹇収鏋勫缓
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    def _operation_interval_profile_inputs(
+        self,
+        ordered_stations: list[JsonDict],
+        initial_platform_id: int | None = None,
+    ) -> tuple[list[float], list[SpeedProfileRequest], int]:
+        """Derive timetable runtimes from the same PathPlan/DCDP inputs as ATO."""
+        config = self.scenario.operation_plan
+        reference_vehicle = self._make_vehicle_config(
+            "OPERATION-PROFILE",
+            config.profile_reference_load_pax,
+        )
+        run_times: list[float] = []
+        requests: list[SpeedProfileRequest] = []
+        current_platform_id = initial_platform_id
+        for origin, destination in zip(ordered_stations, ordered_stations[1:]):
+            origin_idx = int(origin["stationIndex"])
+            destination_idx = int(destination["stationIndex"])
+            service_direction = "UP" if destination_idx > origin_idx else "DOWN"
+            if current_platform_id is None:
+                origin_platform = self._platform_for_direction(origin_idx, service_direction)
+                current_platform_id = (
+                    int(origin_platform["id"]) if origin_platform is not None else None
+                )
+            path_plan = self._path_plan_for_station_pair(
+                origin_idx,
+                destination_idx,
+                current_platform_id,
+                train_length_m=reference_vehicle.train_length_m,
+            )
+            if path_plan is None:
+                raise ValueError(
+                    "OPERATION_PLAN_ROUTE_MISSING:"
+                    f"{origin.get('code', origin_idx)}->{destination.get('code', destination_idx)}"
+                )
+            speed_source_idx = min(origin_idx, destination_idx)
+            limit_kmh = int(
+                self._station_list[speed_source_idx].get("speedLimitToNextKmh", 80)
+            )
+            if limit_kmh <= 0:
+                limit_kmh = 80
+            request = build_speed_profile_request(
+                path_plan,
+                limit_kmh / 3.6,
+                self._ato_config,
+                reference_vehicle,
+            )
+            run_times.append(
+                request.scheduled_run_time_s + config.runtime_recovery_margin_sec
+            )
+            requests.append(request)
+            current_platform_id = int(path_plan.destination_platform_id)
+        if current_platform_id is None:
+            raise ValueError("OPERATION_PLAN_HAS_NO_FINAL_PLATFORM")
+        return run_times, requests, current_platform_id
+
+    def _operation_turnback_profile_inputs(
+        self,
+        terminal_station_code: str,
+        inbound_platform_id: int,
+    ) -> tuple[TurnbackPlan, list[SpeedProfileRequest], float]:
+        """Build the physical terminal reversal inputs included by the duty plan."""
+        config = self.scenario.operation_plan
+        reference_vehicle = self._make_vehicle_config(
+            "OPERATION-PROFILE",
+            config.profile_reference_load_pax,
+        )
+        plan = self.route_chain_planner.plan_turnback(
+            terminal_station_code,
+            inbound_platform_id,
+        )
+        requests = [
+            build_speed_profile_request(
+                phase.path_plan,
+                self.CRUISE_SPEED_MPS,
+                self._ato_config,
+                reference_vehicle,
+            )
+            for phase in plan.phases
+        ]
+        change_ends_sec = max(0, len(plan.phases) - 1) * 5.0
+        terminal_dwell_sec = (
+            self.station_service.dwell_config.base_dwell_sec
+            + config.door_cycle_allowance_sec
+        )
+        required_layover_sec = (
+            terminal_dwell_sec
+            + sum(request.scheduled_run_time_s for request in requests)
+            + change_ends_sec
+        )
+        return plan, requests, required_layover_sec
+
+    def _prewarm_operation_profiles(self) -> None:
+        config = self.scenario.operation_plan
+        requests = list(self._operation_profile_requests.values())
+        cache_keys = self.speed_profile_service.prime(requests)
+        startup = self.speed_profile_service.wait_for(
+            self._operation_startup_profile_keys,
+            config.profile_prewarm_timeout_sec if config.profile_prewarm_enabled else 0.0,
+        )
+        overall = self.speed_profile_service.wait_for(cache_keys, 0.0)
+        self._operation_profile_warmup = {
+            "enabled": config.profile_prewarm_enabled,
+            "timeoutSec": config.profile_prewarm_timeout_sec,
+            "referenceLoadPax": config.profile_reference_load_pax,
+            "startupProfileCount": startup["requestedProfileCount"],
+            "startupReadyProfileCount": startup["readyProfileCount"],
+            "startupPendingProfileCount": startup["pendingProfileCount"],
+            "startupFailedProfileCount": startup["failedProfileCount"],
+            **overall,
+            "ready": startup["ready"],
+            "allProfilesReady": overall["ready"],
+        }
+        if config.profile_prewarm_enabled and not startup["ready"]:
+            failure = "FAILED" if startup["failedProfileCount"] else "TIMEOUT"
+            raise RuntimeError(f"DCDP_PROFILE_PREWARM_{failure}: {startup}")
+
+    def _finalize_operation_plan_metadata(self) -> None:
+        config = self.scenario.operation_plan
+        if not self._operation_duties:
+            self._operation_plan_hash = None
+            self._operation_window = {}
+            return
+        first_departure_ms = round(
+            min(duty.planned_start_s for duty in self._operation_duties.values()) * 1000
+        )
+        last_arrival_ms = round(
+            max(duty.planned_end_s for duty in self._operation_duties.values()) * 1000
+        )
+        measurement_start_ms = config.measurement_start_time_ms or first_departure_ms
+        measurement_end_ms = config.measurement_end_time_ms or last_arrival_ms
+        clearance_end_ms = config.clearance_end_time_ms or (
+            measurement_end_ms + round(config.clearance_sec * 1000)
+        )
+        if measurement_end_ms <= measurement_start_ms:
+            raise ValueError("INVALID_OPERATION_MEASUREMENT_WINDOW")
+        if clearance_end_ms < measurement_end_ms:
+            raise ValueError("INVALID_OPERATION_CLEARANCE_WINDOW")
+        self._operation_window = {
+            "warmupStartTimeMs": self.scenario.start_time_ms,
+            "measurementStartTimeMs": measurement_start_ms,
+            "measurementEndTimeMs": measurement_end_ms,
+            "clearanceEndTimeMs": clearance_end_ms,
+        }
+        passenger_profile = getattr(self, "_passenger_profile", None)
+        plan_payload = {
+            "lineId": self.scenario.line_id,
+            "profileCacheVersion": PROFILE_CACHE_VERSION,
+            "profileReferenceLoadPax": config.profile_reference_load_pax,
+            "passengerProfileId": getattr(
+                passenger_profile, "profile_id", "BUILTIN_SYNTHETIC"
+            ),
+            "timetables": [item.to_dict() for item in self._operation_timetables],
+            "services": [item.to_dict() for item in self._operation_services.values()],
+            "duties": [
+                {
+                    "dutyId": duty.duty_id,
+                    "trainId": duty.train_id,
+                    "serviceIds": duty.service_ids,
+                    "plannedStartS": duty.planned_start_s,
+                    "plannedEndS": duty.planned_end_s,
+                }
+                for duty in self._operation_duties.values()
+            ],
+            "window": self._operation_window,
+        }
+        encoded = json.dumps(
+            plan_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._operation_plan_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     def _initialize_operation_plan(self) -> None:
         self._operation_timetables = []
         self._operation_services = {}
         self._operation_duties = {}
         self._operation_events = []
         self._pending_operation_events = []
+        self._operation_profile_requests = {}
+        self._operation_startup_profile_keys = ()
+        self._operation_profile_warmup = {
+            "enabled": False,
+            "ready": True,
+            "requestedProfileCount": 0,
+            "readyProfileCount": 0,
+            "pendingProfileCount": 0,
+            "failedProfileCount": 0,
+        }
+        self._operation_plan_hash = None
+        self._operation_window = {}
         self.timetable_service.reset()
         config = self.scenario.operation_plan
         if not config.enabled:
@@ -3639,11 +3920,60 @@ class SimulationEngine:
             raise ValueError("INVALID_OPERATION_PLAN_DIRECTION")
 
         indexed_stations = [
-            {**station, "stationIndex": index}
+            {
+                **station,
+                "stationIndex": index,
+                "dwellSeconds": (
+                    float(station.get("dwellSeconds", self.timetable_service.base_dwell_sec))
+                    + config.door_cycle_allowance_sec
+                ),
+            }
             for index, station in enumerate(self._station_list)
         ]
         outbound_stations = (
             indexed_stations if config.direction == "UP" else list(reversed(indexed_stations))
+        )
+        return_stations = list(reversed(outbound_stations))
+        (
+            outbound_run_times,
+            outbound_requests,
+            inbound_terminal_platform_id,
+        ) = self._operation_interval_profile_inputs(
+            outbound_stations
+        )
+        (
+            turnback_plan,
+            turnback_requests,
+            required_turnback_layover_sec,
+        ) = self._operation_turnback_profile_inputs(
+            str(outbound_stations[-1].get("code", "")),
+            inbound_terminal_platform_id,
+        )
+        (
+            return_run_times,
+            return_requests,
+            _return_terminal_platform_id,
+        ) = self._operation_interval_profile_inputs(
+            return_stations,
+            turnback_plan.final_platform_id,
+        )
+        effective_turnback_layover_sec = max(
+            config.turnback_layover_sec,
+            required_turnback_layover_sec,
+        )
+        prioritized_requests = [
+            *outbound_requests[:1],
+            *return_requests[:1],
+            *turnback_requests,
+            *outbound_requests[1:],
+            *return_requests[1:],
+        ]
+        self._operation_profile_requests = {
+            request.cache_key: request for request in prioritized_requests
+        }
+        self._operation_startup_profile_keys = tuple(
+            request.cache_key
+            for request in [*outbound_requests[:1], *return_requests[:1]]
         )
         start_ms = config.start_time_ms or self.scenario.start_time_ms
         end_ms = config.end_time_ms or (start_ms + 30 * 60 * 1000)
@@ -3656,6 +3986,8 @@ class SimulationEngine:
             stations=outbound_stations,
             start_time_s=start_ms / 1000.0,
             end_time_s=end_ms / 1000.0,
+            interval_run_times_s=outbound_run_times,
+            run_time_source="DCDP_TARGET_WITH_RECOVERY_MARGIN",
         )
         outbound.services = outbound.services[: config.max_duties]
         self._operation_timetables.append(outbound)
@@ -3667,16 +3999,18 @@ class SimulationEngine:
             outbound_service.duty_id = duty_id
             return_start_s = (
                 outbound_service.stops[-1].planned_arrival_s
-                + config.turnback_layover_sec
+                + effective_turnback_layover_sec
             )
             return_direction = "DOWN" if config.direction == "UP" else "UP"
             return_tt = self.timetable_service.generate(
                 timetable_id=f"TT-{self.scenario.line_id}-{return_direction}-{index:03d}",
                 line_id=self.scenario.line_id,
                 direction=return_direction,
-                stations=list(reversed(outbound_stations)),
+                stations=return_stations,
                 start_time_s=return_start_s,
                 end_time_s=return_start_s + 1.0,
+                interval_run_times_s=return_run_times,
+                run_time_source="DCDP_TARGET_WITH_RECOVERY_MARGIN",
             )
             return_service = return_tt.services[0]
             return_service.train_id = train_id
@@ -3697,7 +4031,7 @@ class SimulationEngine:
                 line_id=self.scenario.line_id,
                 initial_station_code=outbound_service.origin_station_code,
                 direction=config.direction,
-                capacity_pax=600,
+                capacity_pax=getattr(self, "_default_train_capacity_pax", 1_460),
                 initial_load_pax=0,
             ))
             train.phase = IDLE
@@ -3716,6 +4050,10 @@ class SimulationEngine:
             self._train_power_geometry(train, self._make_vehicle_config(train_id, 0))
             self.trains.append(train)
             self.dispatch_runtime.register_train(train, outbound_service)
+
+        self._finalize_operation_plan_metadata()
+        self._prewarm_operation_profiles()
+        self._advance_operation_lifecycle(self.scenario.start_time_ms)
 
     def _set_lifecycle(self, train: SimTrainState, state: str, sim_time_ms: int) -> None:
         previous_state = train.lifecycle_state
@@ -3739,7 +4077,7 @@ class SimulationEngine:
 
     def _append_operation_event(self, event: JsonDict) -> None:
         self._operation_events.append(event)
-        self._operation_events = self._operation_events[-500:]
+        self._operation_events = self._operation_events[-5000:]
         self._pending_operation_events.append(event)
         self.bus.publish(
             "operations.lifecycle",
@@ -3759,19 +4097,45 @@ class SimulationEngine:
             planned_departure_ms = train.planned_departure_ms
             if planned_departure_ms is None:
                 continue
+            ready_lead_sec = config.ready_lead_sec
+            active_service = self._operation_services.get(train.service_id or "")
+            if active_service is not None and active_service.stops:
+                origin_stop = active_service.stops[0]
+                ready_lead_sec = max(
+                    ready_lead_sec,
+                    origin_stop.planned_departure_s - origin_stop.planned_arrival_s,
+                )
             if (
                 train.lifecycle_state == "IN_DEPOT"
-                and sim_time_ms >= planned_departure_ms - round(config.ready_lead_sec * 1000)
+                and sim_time_ms >= planned_departure_ms - round(ready_lead_sec * 1000)
             ):
                 self._set_lifecycle(train, "READY", sim_time_ms)
-            if train.lifecycle_state in {"READY", "TURNBACK"} and sim_time_ms >= planned_departure_ms:
+                self._anchor_train_at_current_platform(train)
+                self._begin_station_stop(train)
+            turnback_ready = (
+                train.lifecycle_state == "TURNBACK"
+                and train.turnback_state == "COMPLETED"
+            )
+            if (
+                (train.lifecycle_state == "READY" or turnback_ready)
+                and sim_time_ms >= planned_departure_ms
+            ):
                 self._set_lifecycle(train, "DEPARTURE_REQUESTED", sim_time_ms)
-                train.phase = DWELLING
-                train.dwell_remaining_sec = 0.0
-                train.door_state = "CLOSED"
-                train.door_notice = "CLOSED"
-                train.door_side = "NONE"
-                train._passenger_service_pending = False
+                station_stop_active = (
+                    train.phase == DWELLING
+                    and (
+                        train._passenger_service_pending
+                        or train.dwell_remaining_sec > 0.0
+                        or not train.door_system.all_closed_and_locked
+                    )
+                )
+                if not station_stop_active:
+                    train.phase = DWELLING
+                    train.dwell_remaining_sec = 0.0
+                    train.door_state = "CLOSED"
+                    train.door_notice = "CLOSED"
+                    train.door_side = "NONE"
+                    train._passenger_service_pending = False
                 self._anchor_train_at_current_platform(train)
 
     def _record_operation_departures(self, departures: list[Any], sim_time_ms: int) -> None:
@@ -3839,6 +4203,23 @@ class SimulationEngine:
             "deviationSec": train.schedule_deviation_sec,
         })
 
+    def _activate_return_service(self, train: SimTrainState, sim_time_ms: int) -> None:
+        if train.duty_id is None:
+            return
+        duty = self._operation_duties[train.duty_id]
+        if train.service_id == duty.service_ids[-1]:
+            return
+        return_service_id = train.next_service_id or duty.service_ids[-1]
+        return_service = self._operation_services.get(return_service_id)
+        if return_service is None:
+            raise RuntimeError(f"RETURN_SERVICE_NOT_FOUND:{return_service_id}")
+        train.service_id = return_service_id
+        train.next_service_id = None
+        train.planned_departure_ms = round(return_service.stops[0].planned_departure_s * 1000)
+        train.planned_arrival_ms = round(return_service.stops[-1].planned_arrival_s * 1000)
+        self.dispatch_runtime.assign_service(train.train_id, return_service)
+        self._set_lifecycle(train, "TURNBACK", sim_time_ms)
+
     def _handle_planned_terminal(self, train: SimTrainState, sim_time_ms: int) -> bool:
         """Return True when the duty has returned to depot and must not turn again."""
         if train.duty_id is None:
@@ -3855,19 +4236,169 @@ class SimulationEngine:
             return True
 
         self._turn_train_at_terminal(train)
-        train.service_id = train.next_service_id
-        train.next_service_id = None
-        return_service = self._operation_services.get(train.service_id or "")
-        if return_service is not None:
-            train.planned_departure_ms = round(return_service.stops[0].planned_departure_s * 1000)
-            train.planned_arrival_ms = round(return_service.stops[-1].planned_arrival_s * 1000)
-            self.dispatch_runtime.assign_service(train.train_id, return_service)
-        self._set_lifecycle(train, "TURNBACK", sim_time_ms)
+        self._activate_return_service(train, sim_time_ms)
         return False
 
+    def _operation_experiment_phase(self, sim_time_ms: int) -> str:
+        if not self._operation_window:
+            return "DISABLED"
+        if sim_time_ms < int(self._operation_window["measurementStartTimeMs"]):
+            return "WARMUP"
+        if sim_time_ms <= int(self._operation_window["measurementEndTimeMs"]):
+            return "MEASUREMENT"
+        if sim_time_ms <= int(self._operation_window["clearanceEndTimeMs"]):
+            return "CLEARANCE"
+        return "COMPLETE"
+
+    def _operation_acceptance(self, sim_time_ms: int) -> JsonDict:
+        config = self.scenario.operation_plan
+        departure_services = {
+            str(event.get("serviceId"))
+            for event in self._operation_events
+            if event.get("event") == "DEPARTURE" and event.get("serviceId")
+        }
+        completed_services: set[str] = set()
+        deviations: list[float] = []
+        worst_deviation_event: JsonDict | None = None
+        last_progress_by_train: dict[str, int] = {}
+        for event in self._operation_events:
+            train_id = str(event.get("trainId", ""))
+            actual_time_ms = event.get("actualTimeMs")
+            if train_id and actual_time_ms is not None:
+                last_progress_by_train[train_id] = max(
+                    last_progress_by_train.get(train_id, 0), int(actual_time_ms)
+                )
+            deviation = event.get("deviationSec")
+            if deviation is not None:
+                signed_deviation = float(deviation)
+                deviations.append(signed_deviation)
+                if (
+                    worst_deviation_event is None
+                    or abs(signed_deviation)
+                    > abs(float(worst_deviation_event.get("deviationSec", 0.0)))
+                ):
+                    worst_deviation_event = {
+                        key: event.get(key)
+                        for key in (
+                            "event",
+                            "trainId",
+                            "serviceId",
+                            "stationIndex",
+                            "plannedTimeMs",
+                            "actualTimeMs",
+                            "deviationSec",
+                        )
+                    }
+            if event.get("event") != "ARRIVAL":
+                continue
+            service_id = str(event.get("serviceId", ""))
+            service = self._operation_services.get(service_id)
+            if service is None or not service.stops:
+                continue
+            if int(event.get("stationIndex", -1)) == service.stops[-1].station_index:
+                completed_services.add(service_id)
+
+        threshold_ms = round(config.stuck_threshold_sec * 1000)
+        stuck_trains: list[JsonDict] = []
+        active_states = {"DEPARTURE_REQUESTED", "IN_SERVICE", "TURNBACK", "RETURN_REQUESTED"}
+        for train in self.trains:
+            if train.duty_id is None or train.lifecycle_state not in active_states:
+                continue
+            last_progress_ms = max(
+                int(train.lifecycle_updated_ms or 0),
+                last_progress_by_train.get(train.train_id, 0),
+            )
+            stalled_for_ms = max(0, sim_time_ms - last_progress_ms)
+            if stalled_for_ms < threshold_ms:
+                continue
+            stuck_trains.append({
+                "trainId": train.train_id,
+                "dutyId": train.duty_id,
+                "serviceId": train.service_id,
+                "lifecycleState": train.lifecycle_state,
+                "phase": train.phase,
+                "stalledForSec": round(stalled_for_ms / 1000.0, 1),
+                "holdReason": train.interlocking_hold_reason,
+            })
+
+        completed_duties = sum(
+            1 for duty in self._operation_duties.values() if duty.lifecycle_state == "STORED"
+        )
+        total_duties = len(self._operation_duties)
+        total_services = len(self._operation_services)
+        all_completed = (
+            total_duties > 0
+            and completed_duties == total_duties
+            and len(completed_services) == total_services
+        )
+        maximum_deviation_sec = max((abs(value) for value in deviations), default=0.0)
+        maximum_late_sec = max(deviations, default=0.0)
+        maximum_early_sec = abs(min(deviations, default=0.0))
+        schedule_within_tolerance = (
+            maximum_deviation_sec <= config.max_schedule_deviation_sec
+        )
+        phase = self._operation_experiment_phase(sim_time_ms)
+        if all_completed and not stuck_trains and schedule_within_tolerance:
+            status = "PASSED"
+        elif all_completed or phase == "COMPLETE":
+            status = "FAILED"
+        elif departure_services or phase in {"MEASUREMENT", "CLEARANCE"}:
+            status = "RUNNING"
+        else:
+            status = "PENDING"
+        return {
+            "status": status,
+            "readyForAnalysis": status == "PASSED",
+            "totalDutyCount": total_duties,
+            "completedDutyCount": completed_duties,
+            "dutyCompletionRate": round(
+                completed_duties / total_duties if total_duties else 0.0, 4
+            ),
+            "totalServiceCount": total_services,
+            "startedServiceCount": len(departure_services),
+            "completedServiceCount": len(completed_services),
+            "serviceCompletionRate": round(
+                len(completed_services) / total_services if total_services else 0.0, 4
+            ),
+            "maximumAbsoluteDeviationSec": round(maximum_deviation_sec, 3),
+            "maximumLateSec": round(maximum_late_sec, 3),
+            "maximumEarlySec": round(maximum_early_sec, 3),
+            "worstDeviationEvent": worst_deviation_event,
+            "maxScheduleDeviationSec": config.max_schedule_deviation_sec,
+            "scheduleWithinTolerance": schedule_within_tolerance,
+            "stuckThresholdSec": config.stuck_threshold_sec,
+            "stuckTrainCount": len(stuck_trains),
+            "stuckTrains": stuck_trains,
+            "profileWarmupReady": bool(self._operation_profile_warmup.get("ready", False)),
+        }
+
     def operation_plan_state(self) -> JsonDict:
+        sim_time_ms = self._absolute_sim_time_ms()
+        experiment_window = dict(self._operation_window)
+        experiment_window["phase"] = self._operation_experiment_phase(sim_time_ms)
+        passenger_profile = getattr(self, "_passenger_profile", None)
+        passenger_scenario = getattr(passenger_profile, "flow_scenario", None)
         return {
             "enabled": self.scenario.operation_plan.enabled,
+            "planHash": self._operation_plan_hash,
+            "generationWindow": {
+                "startTimeMs": self.scenario.operation_plan.start_time_ms,
+                "endTimeMs": self.scenario.operation_plan.end_time_ms,
+            },
+            "experimentWindow": experiment_window,
+            "profileWarmup": dict(self._operation_profile_warmup),
+            "experimentManifest": {
+                "passengerProfileId": getattr(
+                    passenger_profile, "profile_id", "BUILTIN_SYNTHETIC"
+                ),
+                "passengerRandomSeed": getattr(passenger_scenario, "random_seed", None),
+                "profileCacheVersion": PROFILE_CACHE_VERSION,
+                "profileReferenceLoadPax": self.scenario.operation_plan.profile_reference_load_pax,
+                "runTimeSource": "DCDP_TARGET_WITH_RECOVERY_MARGIN",
+                "runtimeRecoveryMarginSec": self.scenario.operation_plan.runtime_recovery_margin_sec,
+                "doorCycleAllowanceSec": self.scenario.operation_plan.door_cycle_allowance_sec,
+            },
+            "acceptance": self._operation_acceptance(sim_time_ms),
             "timetables": [item.to_dict() for item in self._operation_timetables],
             "services": [item.to_dict() for item in self._operation_services.values()],
             "duties": [item.to_dict() for item in self._operation_duties.values()],

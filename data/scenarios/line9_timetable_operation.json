@@ -13,7 +13,15 @@
     "endTimeMs": 23400000,
     "maxDuties": 4,
     "readyLeadSec": 30,
-    "turnbackLayoverSec": 60
+    "turnbackLayoverSec": 60,
+    "profilePrewarmEnabled": true,
+    "profilePrewarmTimeoutSec": 180,
+    "profileReferenceLoadPax": 700,
+    "runtimeRecoveryMarginSec": 5,
+    "doorCycleAllowanceSec": 2,
+    "clearanceSec": 300,
+    "stuckThresholdSec": 300,
+    "maxScheduleDeviationSec": 120
   },
   "trains": []
 }

@@ -46,8 +46,12 @@ class OperationPlanLifecycleTests(unittest.TestCase):
         first = engine.trains[0]
         self.assertEqual(first.lifecycle_state, "IN_SERVICE")
         self.assertEqual(first.phase, "DEPARTING")
-        self.assertEqual(first.actual_departure_ms, first.planned_departure_ms)
-        self.assertEqual(first.schedule_deviation_sec, 0.0)
+        self.assertLessEqual(
+            abs(first.actual_departure_ms - first.planned_departure_ms),
+            round(engine.clock.tick_seconds * 1000),
+        )
+        self.assertLessEqual(abs(first.schedule_deviation_sec), engine.clock.tick_seconds)
+        self.assertGreater(first.last_boarding, 0)
         events = engine.operation_plan_state()["recentEvents"]
         self.assertEqual(events[-1]["event"], "DEPARTURE")
         self.assertEqual(events[-1]["serviceId"], first.service_id)
@@ -66,7 +70,10 @@ class OperationPlanLifecycleTests(unittest.TestCase):
         self.assertEqual(train.lifecycle_state, "TURNBACK")
         self.assertEqual(train.service_id, return_service_id)
         self.assertNotEqual(train.service_id, outbound_service_id)
-        self.assertEqual(train.direction, "DOWN")
+        # Service assignment switches at the terminal, while the physical
+        # direction changes only after the route-backed turnback completes.
+        self.assertEqual(train.direction, "UP")
+        self.assertIsNotNone(train._turnback_plan)
         self.assertEqual(
             engine.dispatch_service._train_states[train.train_id].service.service_id,
             return_service_id,
@@ -79,6 +86,30 @@ class OperationPlanLifecycleTests(unittest.TestCase):
         engine._advance_operation_lifecycle(25_000_250)
         self.assertEqual(train.lifecycle_state, "STORED")
         self.assertEqual(train.phase, "IDLE")
+
+    def test_plan_uses_dcdp_runtime_and_exposes_reproducible_window(self) -> None:
+        engine = load_engine()
+        engine.load()
+        state = engine.operation_plan_state()
+        self.assertEqual(
+            state["timetables"][0]["runTimeSource"],
+            "DCDP_TARGET_WITH_RECOVERY_MARGIN",
+        )
+        self.assertEqual(len(state["planHash"]), 64)
+        self.assertTrue(state["profileWarmup"]["ready"])
+        self.assertEqual(
+            state["experimentManifest"]["runTimeSource"],
+            "DCDP_TARGET_WITH_RECOVERY_MARGIN",
+        )
+
+        last_planned_end_ms = round(
+            max(item.planned_end_s for item in engine._operation_duties.values()) * 1000
+        )
+        window = state["experimentWindow"]
+        self.assertEqual(window["measurementEndTimeMs"], last_planned_end_ms)
+        self.assertEqual(window["clearanceEndTimeMs"], last_planned_end_ms + 300_000)
+        self.assertEqual(window["phase"], "WARMUP")
+        self.assertEqual(state["acceptance"]["status"], "PENDING")
 
     def test_return_service_uses_authoritative_reverse_station_indices(self) -> None:
         engine = load_engine()

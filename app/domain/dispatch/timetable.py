@@ -123,6 +123,7 @@ class Timetable:
     valid_to_s: float            # 生效结束秒
     services: list[TrainService] = field(default_factory=list)
     headway_config: HeadwayConfig = field(default_factory=HeadwayConfig)
+    run_time_source: str = "DISTANCE_ESTIMATE"
 
     @property
     def service_count(self) -> int:
@@ -136,6 +137,7 @@ class Timetable:
             "validFromS": round(self.valid_from_s, 1),
             "validToS": round(self.valid_to_s, 1),
             "serviceCount": self.service_count,
+            "runTimeSource": self.run_time_source,
             "services": [svc.to_dict() for svc in self.services],
         }
 
@@ -193,6 +195,8 @@ class TimetableService:
         start_time_s: float,           # 首班车发车秒
         end_time_s: float,             # 末班车发车秒
         interval_distance_m: list[float] | None = None,
+        interval_run_times_s: list[float] | None = None,
+        run_time_source: str = "DISTANCE_ESTIMATE",
     ) -> Timetable:
         """生成指定参数下的运行图.
 
@@ -217,11 +221,19 @@ class TimetableService:
             ]
 
         # 每段区间运行时间（从 csv dwellSeconds 或默认值估算）
-        interval_run_times: list[float] = []
-        for i, dist in enumerate(interval_distance_m):
-            # 假设平均速度 60km/h = 16.67 m/s
-            est_time = max(dist / 16.67, self.default_run_time_s * 0.5)
-            interval_run_times.append(est_time)
+        if interval_run_times_s is not None:
+            if len(interval_run_times_s) != n - 1:
+                raise ValueError("interval_run_times_s must match the station intervals")
+            if any(float(value) <= 0.0 for value in interval_run_times_s):
+                raise ValueError("interval_run_times_s values must be positive")
+            interval_run_times = [float(value) for value in interval_run_times_s]
+        else:
+            interval_run_times = []
+        if interval_run_times_s is None:
+            for dist in interval_distance_m:
+                # Compatibility estimate: average speed 60 km/h.
+                est_time = max(dist / 16.67, self.default_run_time_s * 0.5)
+                interval_run_times.append(est_time)
 
         # 一站的总停+行时间
         cumulative_times: list[float] = [0.0]
@@ -281,4 +293,5 @@ class TimetableService:
             valid_to_s=end_time_s,
             services=services,
             headway_config=self.headway_config,
+            run_time_source=run_time_source,
         )
