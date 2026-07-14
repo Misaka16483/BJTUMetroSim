@@ -13,6 +13,7 @@ import StationPassengerView from './components/StationPassengerView';
 import TrainManagementPanel from './components/TrainManagementPanel';
 import FullLineTrainPanel from './components/FullLineTrainPanel';
 import MemberCInterlockingDemo from './components/MemberCInterlockingDemo';
+import OptimizedTopologyView from './components/OptimizedTopologyView';
 import SimulationLifecycleControls from './components/SimulationLifecycleControls';
 import DriverCabConnectionButton from './components/DriverCabConnectionButton';
 import { useSimStore } from './store/useSimStore';
@@ -22,6 +23,17 @@ import { fetchBackendBundle, fetchSimState, fetchSpeedProfile } from './data/bac
 
 let globalFetching = false;
 const PANEL_W = 320;
+const VIEW_TABS = [
+  { mode: 'macro', label: '宏观', activeBackground: 'rgba(74,158,255,0.35)' },
+  { mode: 'micro', label: '轨道', activeBackground: 'rgba(143,195,31,0.38)' },
+  { mode: 'interlocking', label: '联锁', activeBackground: 'rgba(255,69,58,0.32)' },
+  { mode: 'fullLine', label: '全线', activeBackground: 'rgba(255,152,0,0.35)' },
+  { mode: 'driver', label: '驾驶', activeBackground: 'rgba(168,214,74,0.38)' },
+  { mode: 'power', label: '供电', activeBackground: 'rgba(88,166,255,0.36)' },
+  { mode: 'stationFlow', label: '客流', activeBackground: 'rgba(255,105,180,0.35)' },
+  { mode: 'memberCDemo', label: '联锁演示', activeBackground: 'rgba(180,105,255,0.35)' },
+  { mode: 'topologyLayout', label: '拓扑优化', activeBackground: 'rgba(224,161,27,0.35)' },
+] as const;
 
 export default function App() {
   const setMetroLines = useSimStore((s) => s.setMetroLines);
@@ -44,19 +56,8 @@ export default function App() {
   const trains = useSimStore((s) => s.trains);
   const [collapsed, setCollapsed] = useState(false);
   const [showTrainMgmt, setShowTrainMgmt] = useState(false);
-  const modeIndex = viewMode === 'macro'
-    ? 0
-    : viewMode === 'micro'
-      ? 1
-      : viewMode === 'interlocking'
-        ? 2
-        : viewMode === 'fullLine'
-          ? 3
-          : viewMode === 'driver'
-            ? 4
-            : viewMode === 'power'
-              ? 5
-              : 6;
+  const modeIndex = Math.max(0, VIEW_TABS.findIndex((tab) => tab.mode === viewMode));
+  const activeTab = VIEW_TABS[modeIndex];
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
@@ -160,24 +161,24 @@ export default function App() {
 
   return (
     <div
-      className="h-screen w-screen flex flex-col"
+      className="h-[100dvh] w-full max-w-full box-border overflow-hidden flex flex-col"
       style={{ padding: 12, gap: 8, background: 'var(--bg)' }}
     >
       {/* ═══════════════ header ═══════════════ */}
-      <header className="glass shrink-0 flex items-center justify-between px-5 h-12">
-        <div className="flex items-center gap-3">
+      <header className="glass shrink-0 min-w-0 flex items-center gap-2 px-3 lg:px-5 h-12 overflow-hidden">
+        <div className="flex min-w-0 flex-1 items-center gap-2 lg:gap-3 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <span className="led led-online" />
           <span className="text-[14px] font-semibold tracking-tight" style={{ color: 'var(--text)' }}>
             BJTUMetro<span style={{ color: 'var(--cyan)' }}>Sim</span>
           </span>
           <span
-            className="chip"
+            className="chip hidden sm:inline-flex"
             style={{ color: 'var(--text-muted)', border: '1px solid rgba(255,255,255,0.06)' }}
           >
             DISPATCH
           </span>
           <span
-            className="chip"
+            className="chip hidden sm:inline-flex"
             style={{
               color: 'var(--l9)',
               border: '1px solid rgba(168,214,74,0.15)',
@@ -198,46 +199,39 @@ export default function App() {
           <div
             className="absolute top-0 rounded-full"
             style={{
-              left: `${modeIndex * (100 / 7)}%`,
-              width: `${100 / 7}%`,
+              left: `${modeIndex * (100 / VIEW_TABS.length)}%`,
+              width: `${100 / VIEW_TABS.length}%`,
               bottom: 0,
-              background: viewMode === 'macro'
-                ? 'rgba(74,158,255,0.35)'
-                : viewMode === 'micro'
-                  ? 'rgba(143,195,31,0.38)'
-                  : viewMode === 'interlocking'
-                    ? 'rgba(255,69,58,0.32)'
-                    : viewMode === 'fullLine'
-                      ? 'rgba(255,152,0,0.35)'
-                      : viewMode === 'driver'
-                        ? 'rgba(168,214,74,0.38)'
-                        : viewMode === 'power'
-                          ? 'rgba(88,166,255,0.36)'
-                          : 'rgba(255,105,180,0.35)',
+              background: activeTab.activeBackground,
               transition: 'left 280ms cubic-bezier(0.33, 1, 0.68, 1), background 280ms ease',
             }}
           />
-          <button type="button" onClick={() => setViewMode('macro')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'macro' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>宏观</button>
-          <button type="button" onClick={() => setViewMode('micro')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'micro' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>轨道</button>
-          <button type="button" onClick={() => setViewMode('interlocking')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'interlocking' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>联锁</button>
-          <button type="button" onClick={() => setViewMode('fullLine')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'fullLine' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>全线</button>
-          <button type="button" onClick={() => setViewMode('driver')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'driver' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>驾驶</button>
-          <button type="button" onClick={() => setViewMode('power')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'power' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>供电</button>
-          <button type="button" onClick={() => setViewMode('stationFlow')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'stationFlow' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>客流</button>
-          <button type="button" onClick={() => setViewMode('memberCDemo')} className="relative z-10 py-1 w-14 text-[11px] font-medium cursor-pointer text-center" style={{ color: viewMode === 'memberCDemo' ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}>??</button>
+          {VIEW_TABS.map((tab) => (
+            <button
+              key={tab.mode}
+              type="button"
+              onClick={() => setViewMode(tab.mode)}
+              className="relative z-10 w-11 py-1 text-[10px] font-medium cursor-pointer text-center sm:w-14 sm:text-[11px]"
+              style={{ color: viewMode === tab.mode ? '#fff' : 'var(--text-muted)', transition: 'color 250ms ease' }}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           {/* ─── 仿真控制 ─── */}
           {backendStatus === 'connected' && (
             <SimulationLifecycleControls />
           )}
         </div>
 
-        {backendStatus === 'connected' ? <DriverCabConnectionButton /> : null}
+        <div className="hidden xl:block">
+          {backendStatus === 'connected' ? <DriverCabConnectionButton /> : null}
+        </div>
 
-        <div className="flex items-center gap-3">
+        <div className="hidden lg:flex shrink-0 items-center gap-3">
           <button
             onClick={() => setShowTrainMgmt(true)}
             className="flex items-center gap-1.5 cursor-pointer label text-[10px] rounded-lg"
@@ -265,7 +259,7 @@ export default function App() {
           </button>
         </div>
 
-        <div className="flex items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
+        <div className="hidden xl:flex shrink-0 items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
           <span className="led led-online" /> SYS ONLINE
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
           <span>
@@ -324,6 +318,8 @@ export default function App() {
               ? <DriverConsole fullPage />
               : viewMode === 'memberCDemo'
                 ? <MemberCInterlockingDemo />
+                : viewMode === 'topologyLayout'
+                  ? <OptimizedTopologyView />
                 : viewMode === 'stationFlow'
                   ? <StationPassengerView />
                   : viewMode === 'interlocking'

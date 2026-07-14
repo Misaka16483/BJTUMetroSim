@@ -4,6 +4,7 @@ import { fetchBackendTrackMap, fetchSimState } from '../data/backendApi';
 import type { SimStateResponse, TrackMapData } from '../data/backendApi';
 import { ggzInterlockingData, fspInterlockingData, bwrInterlockingData, gtgInterlockingData, kylInterlockingData, ftnInterlockingData, ftdInterlockingData, qlzInterlockingData, llqInterlockingData, lleInterlockingData, jbgInterlockingData, bdzInterlockingData, bqsInterlockingData } from '../data/stationInterlockingData';
 import type { StationInterlockingData } from '../types/interlocking';
+import { FULL_LINE_DOWN_INTERVAL_SEGMENTS, FULL_LINE_UP_INTERVAL_SEGMENTS } from '../data/fullLineTopologySemantics';
 
 const COLORS = {
   track: '#3a5a7a',
@@ -14,6 +15,11 @@ const COLORS = {
   text: '#dce8f8',
   muted: '#5f7088',
 };
+
+// Shared full-line interval assignment; the down list is already in physical
+// left-to-right station order.
+const UP_SEGMENT_IDS: number[][] = FULL_LINE_UP_INTERVAL_SEGMENTS.map((segments) => [...segments]);
+const DN_SEGMENT_IDS: number[][] = FULL_LINE_DOWN_INTERVAL_SEGMENTS.map((segments) => [...segments]);
 
 const SYMBOLS: Record<number, string> = { 1: '◆', 2: '◇', 3: '●' };
 
@@ -53,38 +59,6 @@ function getCombinedInterlockingData(): StationInterlockingData {
   const targetCanvasW = 12000;
   const availGap = targetCanvasW - totalStationW;
   const scaleMile = availGap / totalReal;
-
-  // 区间 seg 列表（UP 方向：GGZ → GTG）
-  const UP_SEGMENT_IDS: number[][] = [
-    [22, 23, 235],                                    // GGZ → FSP
-    [25, 54],                                          // FSP → KYL
-    [56, 57],                                          // KYL → FTN
-    [59, 60, 61],                                      // FTN → FTD
-    [63, 64, 66, 67, 82, 83],                          // FTD → QLZ
-    [85, 86, 87],                                      // QLZ → LLQ
-    [89, 90, 92, 93, 94, 96, 125],                     // LLQ → LLE
-    [127, 128],                                        // LLE → BWR
-    [130, 131, 133, 134, 169],                         // BWR → JBG
-    [171, 172, 173],                                   // JBG → BDZ
-    [178, 203],                                        // BDZ → BQS
-    [205, 206],                                        // BQS → GTG
-  ];
-
-  // 区间 seg 列表（DN 方向：GTG → GGZ）
-  const DN_SEGMENT_IDS: number[][] = [
-    [219, 218],                                        // GTG → BQS
-    [195, 194, 192, 191, 190, 188, 187, 186],           // BQS → BDZ
-    [184, 183, 182, 181],                              // BDZ → JBG
-    [179, 146, 145, 144, 142, 141, 140],                // JBG → BWR
-    [138, 137],                                        // BWR → LLE
-    [135, 116, 115, 113, 112, 111, 109, 108, 106, 105, 104], // LLE → LLQ
-    [102, 101, 100, 99],                               // LLQ → QLZ
-    [97, 81, 79, 78],                                  // QLZ → FTD
-    [76, 75, 74, 73],                                  // FTD → FTN
-    [71, 70],                                          // FTN → KYL
-    [68, 52],                                          // KYL → FSP
-    [50, 49, 48, 46, 45, 43, 41, 40],                   // FSP → GGZ
-  ];
 
   // 预计算各站绝对偏移
   const offsets: number[] = [];
