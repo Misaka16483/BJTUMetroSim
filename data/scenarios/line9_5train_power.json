@@ -3,7 +3,7 @@
   "name": "9号线五车供电闭环验收",
   "startTimeMs": 21600000,
   "tickSeconds": 0.25,
-  "useDynamicProgrammingProfile": false,
+  "useDynamicProgrammingProfile": true,
   "autoSpawnTrains": true,
   "lineScopeFile": "line9_mainline_scope.json",
   "trains": [
@@ -12,40 +12,40 @@
       "lineId": "9",
       "initialStationCode": "GGZ",
       "direction": "UP",
-      "capacityPax": 600,
-      "initialLoadPax": 420
+      "capacityPax": 1460,
+      "initialLoadPax": 1022
     },
     {
       "trainId": "T0902",
       "lineId": "9",
       "initialStationCode": "KYL",
       "direction": "UP",
-      "capacityPax": 600,
-      "initialLoadPax": 510
+      "capacityPax": 1460,
+      "initialLoadPax": 1241
     },
     {
       "trainId": "T0903",
       "lineId": "9",
       "initialStationCode": "FTD",
       "direction": "UP",
-      "capacityPax": 600,
-      "initialLoadPax": 360
+      "capacityPax": 1460,
+      "initialLoadPax": 876
     },
     {
       "trainId": "T0904",
       "lineId": "9",
       "initialStationCode": "GTG",
       "direction": "DOWN",
-      "capacityPax": 600,
-      "initialLoadPax": 280
+      "capacityPax": 1460,
+      "initialLoadPax": 681
     },
     {
       "trainId": "T0905",
       "lineId": "9",
       "initialStationCode": "BQS",
       "direction": "DOWN",
-      "capacityPax": 600,
-      "initialLoadPax": 470
+      "capacityPax": 1460,
+      "initialLoadPax": 1144
     }
   ]
 }

@@ -174,7 +174,11 @@ export default function FullLineInterlockingView() {
     loadData();
   }, []);
 
-  // 轮询仿真状态（暂时保留，等后端对齐）
+  const lastSimStateRef = useRef<SimStateResponse | null>(null);
+  const animationFrameRef = useRef<number>(0);
+  const lastUpdateTimeRef = useRef<number>(0);
+  const drawRef = useRef(() => {});
+
   useEffect(() => {
     if (loading) return;
     
@@ -182,14 +186,28 @@ export default function FullLineInterlockingView() {
       try {
         const state = await fetchSimState();
         setSimState(state);
+        lastSimStateRef.current = state;
       } catch (error) {
         console.error('[FullLine] 获取仿真状态失败:', error);
       }
     };
-    
+
+    const animate = () => {
+      const now = performance.now();
+      if (now - lastUpdateTimeRef.current >= 200) {
+        update();
+        lastUpdateTimeRef.current = now;
+      }
+      drawRef.current();
+      animationFrameRef.current = requestAnimationFrame(animate);
+    };
+
     update();
-    const interval = setInterval(update, 500);
-    return () => clearInterval(interval);
+    animationFrameRef.current = requestAnimationFrame(animate);
+    
+    return () => {
+      cancelAnimationFrame(animationFrameRef.current);
+    };
   }, [loading]);
 
   // 绘制主函数
@@ -311,11 +329,11 @@ export default function FullLineInterlockingView() {
       }
     }
 
-    // 绘制列车（根据 headMileageM 定位）
+    // 绘制列车（以列车中心里程定位，使列车图标居中于站台）
     if (simState) {
       for (const train of simState.trains) {
         if (!TRAIN_IMG.complete || TRAIN_IMG.naturalWidth <= 0) continue;
-        const cx = mileageToCanvasX(train.headMileageM);
+        const cx = trainToCanvasX(train);
         const cy = train.direction === 'UP' ? 140 : 220;
         // 选中列车高亮外圈
         if (selectedTrainId === train.trainId) {
@@ -344,6 +362,11 @@ export default function FullLineInterlockingView() {
     ctx.restore();
   }, [scale, interlockingData, trackMap, simState]);
 
+  // 同步 draw 到 ref，供 animation loop / 事件处理使用
+  useEffect(() => {
+    drawRef.current = draw;
+  }, [draw]);
+
   // 选中列车时居中定位
   const prevSelectedRef = useRef<string | null>(null);
   useEffect(() => {
@@ -353,10 +376,10 @@ export default function FullLineInterlockingView() {
     if (!train) return;
     const c = canvasWrapRef.current;
     if (!c) return;
-    const canvasX = mileageToCanvasX(train.headMileageM);
+    const canvasX = trainToCanvasX(train);
     const containerW = c.clientWidth;
     offsetRef.current.x = Math.round(containerW / 2 - canvasX * scale);
-    draw();
+    drawRef.current();
   }, [selectedTrainId, simState, scale, draw]);
 
   // 居中计算：将内容水平和垂直居中于容器
@@ -414,7 +437,7 @@ export default function FullLineInterlockingView() {
       if (!dragRef.current) return;
       offsetRef.current.x = dragRef.current.ox + (ev.clientX - dragRef.current.sx);
       offsetRef.current.y = dragRef.current.oy + (ev.clientY - dragRef.current.sy);
-      draw();
+      drawRef.current();
     };
     const onUp = () => {
       dragRef.current = null;
@@ -423,10 +446,10 @@ export default function FullLineInterlockingView() {
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-  }, [draw]);
+  }, []);
 
   useEffect(() => {
-    draw();
+    drawRef.current();
   }, [draw]);
 
   const updateSize = useCallback(() => {
@@ -442,8 +465,8 @@ export default function FullLineInterlockingView() {
     if (!centeredRef.current) {
       centerView();
     }
-    draw();
-  }, [draw]);
+    drawRef.current();
+  }, []);
 
   useEffect(() => {
     updateSize();
@@ -593,6 +616,27 @@ function mileageToCanvasX(mileage: number): number {
   }
 
   return anchors[anchors.length - 1].x;
+}
+
+function trainToCanvasX(train: SimStateResponse['trains'][number]): number {
+  const anchors = getStationMileageAnchors();
+  const stationIndex = Math.max(0, Math.min(anchors.length - 1, train.stationIndex));
+  const nextIndex = train.direction === 'UP'
+    ? Math.min(stationIndex + 1, anchors.length - 1)
+    : Math.max(stationIndex - 1, 0);
+
+  if (nextIndex !== stationIndex && Number.isFinite(train.segmentProgress)) {
+    const progress = Math.max(0, Math.min(1, train.segmentProgress));
+    const current = anchors[stationIndex];
+    const next = anchors[nextIndex];
+    return current.x + (next.x - current.x) * progress;
+  }
+
+  if (Number.isFinite(train.headMileageM) && Number.isFinite(train.tailMileageM)) {
+    return mileageToCanvasX((train.headMileageM + train.tailMileageM) / 2);
+  }
+
+  return anchors[stationIndex].x;
 }
 
 function getStationMileageAnchors(): { mileage: number; x: number }[] {

@@ -32,17 +32,30 @@ from app.domain.interlocking.models import (
     SwitchState,
 )
 from app.domain.interlocking.route_catalog import RouteCatalog
+from app.domain.interlocking.route_chain_planner import (
+    OperationIntent,
+    RouteChainPlan,
+    RouteChainPlanner,
+    TurnbackPhase,
+    TurnbackPlan,
+)
 from app.domain.interlocking.route_service import RouteService
 from app.domain.interlocking.rule_engine import InterlockingRuleEngine, RouteCheckResult
 from app.domain.interlocking.section_occupation import SectionOccupationService
 from app.domain.interlocking.signal_resolver import SignalAspectResolver
 from app.domain.interlocking.switch_lock import SwitchLockService
+from app.domain.interlocking.train_track_trace import TrainTrackTrace
 
 __all__ = [
     "AxleSectionDef",
     "InterlockingRuleEngine",
     "LogicalSectionDef",
     "RouteCatalog",
+    "OperationIntent",
+    "RouteChainPlan",
+    "RouteChainPlanner",
+    "TurnbackPhase",
+    "TurnbackPlan",
     "RouteCheckResult",
     "RouteDef",
     "RouteRequest",
@@ -55,4 +68,5 @@ __all__ = [
     "SwitchDef",
     "SwitchLockService",
     "SwitchState",
+    "TrainTrackTrace",
 ]

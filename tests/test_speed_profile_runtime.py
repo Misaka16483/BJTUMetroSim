@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -72,29 +73,39 @@ class SpeedProfileRuntimeTests(unittest.TestCase):
     def test_three_train_first_tick_is_non_blocking_and_deduplicated(self) -> None:
         engine = load_engine()
         try:
-            for train_id, direction, station in (
-                ("T1", "UP", "GGZ"),
-                ("T2", "DOWN", "GTG"),
-                ("T3", "UP", "GGZ"),
-            ):
-                result = engine.add_train({
-                    "trainId": train_id,
-                    "initialStationCode": station,
-                    "direction": direction,
-                    "initialLoadPax": 100,
-                })
-                self.assertTrue(result["ok"])
-            engine.clock.start()
-            started = time.perf_counter()
-            engine._tick()
-            elapsed = time.perf_counter() - started
+            # This test exercises first-run scheduling. Keep it independent of
+            # profiles persisted by earlier tests or local simulation sessions.
+            with tempfile.TemporaryDirectory() as cache_dir:
+                engine.speed_profile_service.cache_dir = Path(cache_dir)
+                for train_id, direction, station in (
+                    ("T1", "UP", "GGZ"),
+                    ("T2", "DOWN", "GTG"),
+                    ("T3", "UP", "GGZ"),
+                ):
+                    result = engine.add_train({
+                        "trainId": train_id,
+                        "initialStationCode": station,
+                        "direction": direction,
+                        "initialLoadPax": 100,
+                    })
+                    self.assertTrue(result["ok"])
+                engine.clock.start()
+                started = time.perf_counter()
+                engine._tick()
+                elapsed = time.perf_counter() - started
 
-            self.assertLess(elapsed, 0.25)
-            runtime = engine.speed_profile_service.snapshot()
-            self.assertEqual(runtime["pendingProfileCount"], 2)
-            self.assertTrue(runtime["workerAlive"])
-            self.assertTrue(all(train.phase == "DWELLING" for train in engine.trains))
-            self.assertTrue(all(not train._profile_triggered for train in engine.trains))
+                self.assertLess(elapsed, 0.25)
+                runtime = engine.speed_profile_service.snapshot()
+                self.assertEqual(runtime["pendingProfileCount"], 2)
+                self.assertTrue(runtime["workerAlive"])
+                self.assertTrue(all(train.phase == "DWELLING" for train in engine.trains))
+                self.assertTrue(all(not train._profile_triggered for train in engine.trains))
+                for train in engine.trains:
+                    self.assertEqual(engine.export_speed_profile(train.train_id), [])
+                    self.assertEqual(
+                        engine.export_speed_profile_meta(train.train_id)["source"],
+                        "DCDP_PENDING",
+                    )
         finally:
             engine.speed_profile_service.shutdown()
 

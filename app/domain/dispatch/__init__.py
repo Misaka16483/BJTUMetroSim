@@ -12,6 +12,7 @@ from app.domain.dispatch.timetable import (
     ScheduledStop,
     Timetable,
     TimetableService,
+    TrainDuty,
     TrainService,
 )
 from app.domain.dispatch.kpi import (
@@ -33,5 +34,6 @@ __all__ = [
     "TimetableService",
     "TrainArrivalRecord",
     "TrainDispatchState",
+    "TrainDuty",
     "TrainService",
 ]

@@ -7,6 +7,7 @@ import multiprocessing
 from pathlib import Path
 import queue
 import threading
+import time
 from typing import Any
 
 from app.domain.control.models import AtoConfig
@@ -155,6 +156,47 @@ class AsyncSpeedProfileService:
             self._pending.add(request.cache_key)
             self._request_queue.put(request)
             return None
+
+    def prime(self, requests: list[SpeedProfileRequest]) -> tuple[str, ...]:
+        """Queue unique profiles and return the cache keys that must become ready."""
+        cache_keys: list[str] = []
+        seen: set[str] = set()
+        for request in requests:
+            if request.cache_key in seen:
+                continue
+            seen.add(request.cache_key)
+            cache_keys.append(request.cache_key)
+            self.request(request)
+        return tuple(cache_keys)
+
+    def wait_for(
+        self,
+        cache_keys: tuple[str, ...] | list[str],
+        timeout_sec: float,
+        *,
+        poll_interval_sec: float = 0.01,
+    ) -> dict[str, Any]:
+        """Wait for an explicitly primed profile set without advancing simulation time."""
+        expected = set(cache_keys)
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        while True:
+            with self._lock:
+                self.poll()
+                ready = expected.intersection(self._cache)
+                failed = expected.intersection(self._errors)
+                pending = expected - ready - failed
+                errors = {key: self._errors[key] for key in sorted(failed)}
+            if not pending or time.monotonic() >= deadline:
+                return {
+                    "requestedProfileCount": len(expected),
+                    "readyProfileCount": len(ready),
+                    "pendingProfileCount": len(pending),
+                    "failedProfileCount": len(failed),
+                    "ready": not pending and not failed,
+                    "pendingCacheKeys": sorted(pending),
+                    "errors": errors,
+                }
+            time.sleep(max(0.001, float(poll_interval_sec)))
 
     def poll(self) -> None:
         with self._lock:

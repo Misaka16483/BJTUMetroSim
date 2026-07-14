@@ -15,7 +15,9 @@ import FullLineTrainPanel from './components/FullLineTrainPanel';
 import MemberCInterlockingDemo from './components/MemberCInterlockingDemo';
 import OptimizedTopologyView from './components/OptimizedTopologyView';
 import SimulationLifecycleControls from './components/SimulationLifecycleControls';
+import SimulationReport from './components/SimulationReport';
 import DriverCabConnectionButton from './components/DriverCabConnectionButton';
+import AutoDispatchPanel from './components/AutoDispatchPanel';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -45,6 +47,11 @@ export default function App() {
   const viewMode = useSimStore((s) => s.viewMode);
   const setViewMode = useSimStore((s) => s.setViewMode);
   const backendStatus = useSimStore((s) => s.backendStatus);
+  const dataMode = useSimStore((s) => s.dataMode);
+  const dataStale = useSimStore((s) => s.dataStale);
+  const snapshotSequence = useSimStore((s) => s.snapshotSequence);
+  const snapshotGapCount = useSimStore((s) => s.snapshotGapCount);
+  const setDataMode = useSimStore((s) => s.setDataMode);
   const trackMap = useSimStore((s) => s.trackMap);
   const showOnlyLines = useSimStore((s) => s.showOnlyLines);
   const metroLines = useSimStore((s) => s.metroLines);
@@ -54,10 +61,29 @@ export default function App() {
   const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
   const trains = useSimStore((s) => s.trains);
+  const operationPlan = useSimStore((s) => s.operationPlan);
+  const dispatchRuntime = useSimStore((s) => s.dispatchRuntime);
   const [collapsed, setCollapsed] = useState(false);
   const [showTrainMgmt, setShowTrainMgmt] = useState(false);
   const modeIndex = Math.max(0, VIEW_TABS.findIndex((tab) => tab.mode === viewMode));
   const activeTab = VIEW_TABS[modeIndex];
+  const [showReport, setShowReport] = useState(false);
+  const [showAutoDispatch, setShowAutoDispatch] = useState(false);
+  const modeIndex = viewMode === 'macro'
+    ? 0
+    : viewMode === 'micro'
+      ? 1
+      : viewMode === 'interlocking'
+        ? 2
+        : viewMode === 'fullLine'
+          ? 3
+          : viewMode === 'driver'
+            ? 4
+            : viewMode === 'power'
+              ? 5
+              : viewMode === 'stationFlow'
+                ? 6
+                : 7;
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
@@ -124,21 +150,61 @@ export default function App() {
     requestAnimationFrame(() => showOnlyLines(['9']));
   }, [metroLines.length]);
 
-  // 后端仿真引擎轮询 (200ms — 比后端 tick 快，确保控制响应及时、列车位移平滑)
+  // REST 负责启动快照、断线恢复和 WebSocket 序列缺口后的权威重同步。
   useEffect(() => {
-    if (backendStatus !== 'connected') return;
     let active = true;
-    const POLL_MS = 200;
+    let timer: number | undefined;
     const poll = () => {
       if (!active) return;
       fetchSimState()
-        .then((data) => { if (active) updateFromBackend(data); })
-        .catch(() => { /* 静默忽略轮询错误 */ })
-        .finally(() => { if (active) setTimeout(poll, POLL_MS); });
+        .then((data) => {
+          if (!active) return;
+          updateFromBackend(data, 'REST');
+          setBackendStatus('connected');
+          timer = window.setTimeout(poll, 1000);
+        })
+        .catch(() => {
+          if (!active) return;
+          setBackendStatus('fallback');
+          timer = window.setTimeout(poll, 1000);
+        });
     };
     poll();
-    return () => { active = false; };
-  }, [backendStatus, updateFromBackend]);
+    return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [setBackendStatus, updateFromBackend]);
+
+  // WebSocket 是实时主通道；发现序列缺口时不消费乱序帧，立即用 REST 重同步。
+  useEffect(() => {
+    let active = true;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
+    const connect = () => {
+      if (!active) return;
+      const defaultUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.hostname}:8001`;
+      socket = new WebSocket((import.meta.env.VITE_WS_URL as string | undefined) ?? defaultUrl);
+      socket.onmessage = (event) => {
+        try {
+          const result = updateFromBackend(JSON.parse(String(event.data)), 'WS');
+          if (result === 'gap') {
+            void fetchSimState().then((data) => updateFromBackend(data, 'REST'));
+          }
+        } catch (error) {
+          console.warn('[App] WebSocket 状态帧无效:', error);
+        }
+      };
+      socket.onclose = () => {
+        socket = null;
+        if (active) reconnectTimer = window.setTimeout(connect, 1000);
+      };
+      socket.onerror = () => socket?.close();
+    };
+    connect();
+    return () => {
+      active = false;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [updateFromBackend]);
 
   // 引擎运行时拉取全部列车的当前规划曲线，并归档到各自的站间记录。
   useEffect(() => {
@@ -222,8 +288,22 @@ export default function App() {
 
         <div className="flex shrink-0 items-center gap-1.5">
           {/* ─── 仿真控制 ─── */}
+          {backendStatus === 'connected' && dataMode === 'LIVE_SIM' && (
+            <SimulationLifecycleControls onReportRequested={() => setShowReport(true)} />
+          )}
           {backendStatus === 'connected' && (
-            <SimulationLifecycleControls />
+            <button
+              onClick={() => setShowReport(true)}
+              className="flex items-center gap-1.5 cursor-pointer label text-[10px] rounded-lg"
+              style={{
+                padding: '5px 10px',
+                color: '#58a6ff',
+                border: '1px solid rgba(88,166,255,0.2)',
+                background: 'rgba(88,166,255,0.06)',
+              }}
+            >
+              报告
+            </button>
           )}
         </div>
 
@@ -232,17 +312,50 @@ export default function App() {
         </div>
 
         <div className="hidden lg:flex shrink-0 items-center gap-3">
+        {backendStatus === 'connected' && dataMode === 'LIVE_SIM' ? <DriverCabConnectionButton /> : null}
+
+        <div className="flex items-center gap-1.5 shrink-0" style={{ flexBasis: 'auto' }}>
           <button
-            onClick={() => setShowTrainMgmt(true)}
-            className="flex items-center gap-1.5 cursor-pointer label text-[10px] rounded-lg"
+            onClick={() => setShowAutoDispatch(true)}
+            className="flex items-center justify-center gap-1.5 shrink-0 whitespace-nowrap cursor-pointer label text-[10px] rounded-lg"
             style={{
               padding: '5px 10px',
+              minWidth: 96,
+              whiteSpace: 'nowrap',
+              color: operationPlan?.enabled ? 'var(--cyan)' : 'var(--text-muted)',
+              border: `1px solid ${operationPlan?.enabled ? 'rgba(88,166,255,0.28)' : 'rgba(255,255,255,0.1)'}`,
+              background: operationPlan?.enabled ? 'rgba(88,166,255,0.08)' : 'rgba(255,255,255,0.03)',
+            }}
+            title="打开运行图自动发车控制台"
+          >
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+              <path d="M2 8.5V3.2C2 2.54 2.54 2 3.2 2h5.6c.66 0 1.2.54 1.2 1.2v5.3" stroke="currentColor" strokeWidth="1" />
+              <path d="M3.2 6.7h5.6M4 4h4M3 10l1-1.5h4L9 10" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+            </svg>
+            自动发车
+            {operationPlan?.enabled && (
+              <span style={{
+                fontSize: 9, color: '#fff', background: 'var(--cyan)',
+                borderRadius: 50, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}>
+                {dispatchRuntime?.registeredTrainCount ?? 0}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setShowTrainMgmt(true)}
+            className="flex items-center justify-center gap-1.5 shrink-0 whitespace-nowrap cursor-pointer label text-[10px] rounded-lg"
+            style={{
+              padding: '5px 10px',
+              minWidth: 96,
+              whiteSpace: 'nowrap',
               color: 'var(--l9)',
               border: '1px solid rgba(168,214,74,0.2)',
               background: 'rgba(168,214,74,0.06)',
             }}
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ flexShrink: 0 }}>
               <rect x="2" y="1" width="6" height="8" rx="1" stroke="currentColor" strokeWidth="0.8" />
               <rect x="3" y="2.5" width="4" height="1.5" rx="0.3" stroke="currentColor" strokeWidth="0.6" />
               <rect x="3" y="5" width="4" height="1.5" rx="0.3" stroke="currentColor" strokeWidth="0.6" />
@@ -252,6 +365,7 @@ export default function App() {
               <span style={{
                 fontSize: 9, color: '#fff', background: 'var(--l9)',
                 borderRadius: 50, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
               }}>
                 {trains.length}
               </span>
@@ -260,6 +374,7 @@ export default function App() {
         </div>
 
         <div className="hidden xl:flex shrink-0 items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
+        <div className="flex items-center justify-end gap-3 min-w-0 overflow-hidden whitespace-nowrap text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
           <span className="led led-online" /> SYS ONLINE
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
           <span>
@@ -268,6 +383,15 @@ export default function App() {
               {backendStatus.toUpperCase()}
             </span>
           </span>
+          <span style={{ color: dataStale ? 'var(--amber)' : dataMode === 'LIVE_SIM' ? 'var(--green)' : 'var(--cyan)' }}>
+            {dataMode}{dataStale ? ' · FROZEN' : ''} · #{snapshotSequence}
+          </span>
+          {snapshotGapCount > 0 && <span style={{ color: 'var(--amber)' }}>RESYNC {snapshotGapCount}</span>}
+          {import.meta.env.VITE_ENABLE_DEMO_MODE === 'true' && dataMode === 'DISCONNECTED' && (
+            <button type="button" onClick={() => setDataMode('DEMO')} style={{ color: 'var(--amber)' }}>
+              ENTER DEMO
+            </button>
+          )}
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
           <span>UTC+8</span>
           {linesLoading && <span style={{ color: 'var(--amber)' }}>LOADING</span>}
@@ -435,6 +559,12 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {showReport && (
+        <SimulationReport open={showReport} onClose={() => setShowReport(false)} />
+      )}
+
+      <AutoDispatchPanel open={showAutoDispatch} onClose={() => setShowAutoDispatch(false)} />
     </div>
   );
 }

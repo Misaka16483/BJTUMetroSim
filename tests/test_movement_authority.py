@@ -82,6 +82,24 @@ class MovementAuthorityTests(unittest.TestCase):
         self.assertEqual(authority.end_position_m, 300.0)
         self.assertEqual(authority.locked_route_ids, ("1", "2"))
 
+    def test_later_locked_route_cannot_bridge_an_unlocked_first_route(self) -> None:
+        self.assertTrue(
+            self.routes.request(RouteRequest("req-2", "2", "T1")).accepted
+        )
+
+        authority = self.service.calculate(
+            train_id="T1",
+            path_plan=self.path,
+            route_chain_ids=("1", "2"),
+            position_m=0.0,
+            speed_mps=0.0,
+            vehicle=self.vehicle,
+        )
+
+        self.assertEqual(authority.end_reason, "ROUTE_NOT_LOCKED")
+        self.assertEqual(authority.end_position_m, 0.0)
+        self.assertEqual(authority.locked_route_ids, ())
+
     def test_station_authority_keeps_a_usable_creep_speed_near_stop(self) -> None:
         self._lock_chain()
         authority = self.service.calculate(
@@ -115,6 +133,36 @@ class MovementAuthorityTests(unittest.TestCase):
         authority = MovementAuthority("T1", 100.0, "ROUTE_ENDPOINT", 5.0, 75.0, 80.0, ("1",), ("1",))
         command = self.service.supervise(ControlCommand("T1", traction_percent=30.0, source=CommandSource.ATO), authority, position_m=82.0, speed_mps=8.0)
         self.assertTrue(command.emergency_brake)
+        self.assertEqual(command.source, CommandSource.ATP_OVERRIDE)
+
+    def test_atp_tolerates_small_tracking_excess_near_station_stop(self) -> None:
+        authority = MovementAuthority(
+            "T1", 100.0, "STATION_STOP", 0.66, 80.0, 89.0, ("1",), ("1",)
+        )
+        requested = ControlCommand(
+            "T1", brake_percent=31.0, source=CommandSource.ATO
+        )
+
+        command = self.service.supervise(
+            requested, authority, position_m=99.2, speed_mps=0.69
+        )
+
+        self.assertEqual(command, requested)
+
+    def test_atp_uses_full_service_before_emergency_overspeed_threshold(self) -> None:
+        authority = MovementAuthority(
+            "T1", 100.0, "STATION_STOP", 0.60, 80.0, 89.0, ("1",), ("1",)
+        )
+
+        command = self.service.supervise(
+            ControlCommand("T1", brake_percent=43.0, source=CommandSource.ATO),
+            authority,
+            position_m=99.3,
+            speed_mps=0.87,
+        )
+
+        self.assertFalse(command.emergency_brake)
+        self.assertEqual(command.brake_percent, 100.0)
         self.assertEqual(command.source, CommandSource.ATP_OVERRIDE)
 
     def test_ato_respects_authority_target_even_when_path_continues(self) -> None:

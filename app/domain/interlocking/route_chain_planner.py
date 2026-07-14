@@ -12,9 +12,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol
 
 from app.domain.interlocking.route_catalog import RouteCatalog
+from app.domain.interlocking.terminal_turnback_config import (
+    DEFAULT_TERMINAL_TURNBACKS,
+    TerminalTurnbackConfig,
+)
 from app.domain.line.services import PathPlan, PathPlanner, TrackQueryService
 
 
@@ -31,6 +36,48 @@ class RouteChainCandidate:
 class RouteChainPlan:
     route_ids: tuple[str, ...]
     path_plan: PathPlan
+
+
+class OperationIntent(str, Enum):
+    """The operational reason for a route selection.
+
+    ``NORMAL`` is deliberately constrained to the train's actual platform.
+    Terminal reversal is a separate, explicit ``TURNBACK`` plan.
+    """
+
+    NORMAL = "NORMAL"
+    TURNBACK = "TURNBACK"
+    TRANSFER = "TRANSFER"
+    DEPOT = "DEPOT"
+
+
+@dataclass(frozen=True)
+class TurnbackPhase:
+    """One physical leg of a terminal manoeuvre.
+
+    ``route_ids``, ``signal_ids``, and ``route_switch_positions`` retain the
+    authoritative interlocking data; ``segment_ids`` is the ordered physical
+    path the vehicle follows.
+    """
+
+    direction: str
+    route_ids: tuple[str, ...]
+    signal_ids: tuple[tuple[int, int], ...]
+    route_switch_positions: tuple[tuple[str, tuple[tuple[str, str], ...]], ...]
+    segment_ids: tuple[int, ...]
+    path_plan: PathPlan
+
+
+@dataclass(frozen=True)
+class TurnbackPlan:
+    """A multi-phase, route-table-validated terminal turnback plan."""
+
+    terminal_id: str
+    origin_platform_id: int
+    final_platform_id: int
+    turning_point_segment_id: int
+    phases: tuple[TurnbackPhase, ...]
+    intent: OperationIntent = OperationIntent.TURNBACK
 
 
 class RouteSelectionPolicy(Protocol):
@@ -103,11 +150,81 @@ class RouteChainPlanner:
             route_ids.sort(key=MainRouteFirstPolicy._stable_route_id)
         self._ordered_routes: dict[tuple[str, str], tuple[int, ...]] = {}
 
+    def plan_operation(
+        self,
+        *,
+        intent: OperationIntent,
+        origin_platform_id: int,
+        destination_platform_ids: tuple[int, ...] = (),
+        direction: str | None = None,
+        terminal_id: str | None = None,
+    ) -> RouteChainPlan | TurnbackPlan:
+        """Plan a task-aware operation without inventing a platform change.
+
+        Normal passenger movements must supply the actual platform occupied by
+        the train.  Depot and transfer callers may use the same route-chain
+        mechanism, but they must state a direction explicitly.  A terminal
+        turnback is only available through a configured, multi-phase plan.
+        """
+        intent = OperationIntent(intent)
+        if intent is OperationIntent.TURNBACK:
+            if destination_platform_ids or direction is not None:
+                raise ValueError("TURNBACK_IGNORES_NORMAL_DESTINATION")
+            if terminal_id is None:
+                raise ValueError("TURNBACK_CONFIG_REQUIRED")
+            return self.plan_turnback(terminal_id, origin_platform_id)
+
+        if direction not in {"forward", "backward"}:
+            raise ValueError("OPERATION_DIRECTION_REQUIRED")
+        if origin_platform_id not in self._platforms:
+            raise ValueError("UNKNOWN_ORIGIN_PLATFORM")
+        if intent is OperationIntent.NORMAL and not self._is_passenger_platform(origin_platform_id):
+            raise ValueError("NORMAL_OPERATION_REQUIRES_PASSENGER_PLATFORM")
+        if not destination_platform_ids:
+            raise ValueError("DESTINATION_PLATFORM_REQUIRED")
+
+        destinations = tuple(
+            platform_id
+            for platform_id in destination_platform_ids
+            if platform_id in self._platforms
+            and (intent is not OperationIntent.NORMAL or self._is_passenger_platform(platform_id))
+        )
+        if not destinations:
+            raise ValueError("NO_OPERATIONAL_DESTINATION_PLATFORM")
+        return self.plan_between_platform_sets(
+            (origin_platform_id,), destinations, direction
+        )
+
+    def plan_turnback(
+        self,
+        terminal_id: str,
+        origin_platform_id: int,
+        configurations: tuple[TerminalTurnbackConfig, ...] = DEFAULT_TERMINAL_TURNBACKS,
+    ) -> TurnbackPlan:
+        """Build a configured terminal reversal from real route-table paths.
+
+        This never asks the ordinary platform-to-platform planner to cross a
+        terminal.  The vehicle reaches a configured turnback point, stops and
+        changes ends, then traverses a separately authorised return leg.
+        """
+        configuration = next(
+            (
+                item
+                for item in configurations
+                if item.terminal_id == terminal_id and item.origin_platform_id == origin_platform_id
+            ),
+            None,
+        )
+        if configuration is None:
+            raise ValueError("TURNBACK_CONFIG_NOT_FOUND")
+        return self._build_turnback_plan(configuration)
+
     def plan_between_platform_sets(
         self,
         origin_platform_ids: tuple[int, ...],
         destination_platform_ids: tuple[int, ...],
         direction: str,
+        train_length_m: float | None = None,
     ) -> RouteChainPlan:
         """Return the policy-selected route-table plan for an adjacent station pair.
 
@@ -139,6 +256,7 @@ class RouteChainPlanner:
                     destination_platform_id,
                     list(candidate.segment_ids),
                     direction,
+                    train_length_m=train_length_m,
                 )
             except ValueError:
                 continue
@@ -193,6 +311,145 @@ class RouteChainPlanner:
                 if merged:
                     pending.append((route_ids + (next_route_id,), merged))
         return results
+
+    def _build_turnback_plan(self, configuration: TerminalTurnbackConfig) -> TurnbackPlan:
+        if len(configuration.phases) < 2:
+            raise ValueError("TURNBACK_CONFIG_INVALID: requires multiple phases")
+        if configuration.origin_platform_id not in self._platforms:
+            raise ValueError("TURNBACK_CONFIG_INVALID: unknown origin platform")
+        if configuration.final_platform_id not in self._platforms:
+            raise ValueError("TURNBACK_CONFIG_INVALID: unknown final platform")
+
+        phases = tuple(
+            self._build_turnback_phase(
+                phase.direction,
+                phase.route_ids,
+                start_platform_id=(configuration.origin_platform_id if index == 0 else None),
+                end_platform_id=(
+                    configuration.final_platform_id
+                    if index == len(configuration.phases) - 1
+                    else None
+                ),
+            )
+            for index, phase in enumerate(configuration.phases)
+        )
+        origin_segment = int(self._platforms[configuration.origin_platform_id]["segmentId"])
+        final_segment = int(self._platforms[configuration.final_platform_id]["segmentId"])
+        if phases[0].segment_ids[0] != origin_segment:
+            raise ValueError("TURNBACK_CONFIG_INVALID: first phase does not start at origin platform")
+        if phases[-1].segment_ids[-1] != final_segment:
+            raise ValueError("TURNBACK_CONFIG_INVALID: final phase does not end at final platform")
+        if phases[0].segment_ids[-1] != configuration.turning_point_segment_id:
+            raise ValueError("TURNBACK_CONFIG_INVALID: first phase misses turnback point")
+        if phases[1].segment_ids[0] != configuration.turning_point_segment_id:
+            raise ValueError("TURNBACK_CONFIG_INVALID: second phase misses turnback point")
+        if any(
+            previous.segment_ids[-1] != following.segment_ids[0]
+            for previous, following in zip(phases, phases[1:])
+        ):
+            raise ValueError("TURNBACK_CONFIG_INVALID: discontinuous phases")
+
+        return TurnbackPlan(
+            terminal_id=configuration.terminal_id,
+            origin_platform_id=configuration.origin_platform_id,
+            final_platform_id=configuration.final_platform_id,
+            turning_point_segment_id=configuration.turning_point_segment_id,
+            phases=phases,
+        )
+
+    def _build_turnback_phase(
+        self,
+        direction: str,
+        route_ids: tuple[str, ...],
+        *,
+        start_platform_id: int | None = None,
+        end_platform_id: int | None = None,
+    ) -> TurnbackPhase:
+        if direction not in {"forward", "backward"} or not route_ids:
+            raise ValueError("TURNBACK_CONFIG_INVALID: phase direction/routes")
+        segment_ids: tuple[int, ...] = ()
+        signal_ids: list[tuple[int, int]] = []
+        route_switch_positions: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+        previous_route_id: str | None = None
+        previous_end_signal_id: int | None = None
+        for route_id in route_ids:
+            route = self._catalog.get(route_id)
+            if route is None:
+                raise ValueError(f"TURNBACK_CONFIG_INVALID: unknown route {route_id}")
+            route_segments = self._route_segments(route_id, direction)
+            if not route_segments:
+                raise ValueError(
+                    f"TURNBACK_CONFIG_INVALID: route {route_id} has no {direction} Seg path"
+                )
+            if previous_end_signal_id is not None and previous_end_signal_id != route.start_signal_id:
+                raise ValueError(
+                    "TURNBACK_CONFIG_INVALID: signal-discontinuous route chain "
+                    f"{previous_route_id}->{route_id}"
+                )
+            segment_ids = self._merge_sequences(segment_ids, route_segments, direction) if segment_ids else route_segments
+            if not segment_ids:
+                raise ValueError(f"TURNBACK_CONFIG_INVALID: discontinuous route {route_id}")
+            signal_ids.append((route.start_signal_id, route.end_signal_id))
+            route_switch_positions.append(
+                (route_id, tuple(sorted(route.required_switches.items())))
+            )
+            previous_route_id = route_id
+            previous_end_signal_id = route.end_signal_id
+
+        self._validate_segment_sequence(segment_ids, direction)
+        start_segment_length_m = self._segment_length_m(segment_ids[0])
+        end_segment_length_m = self._segment_length_m(segment_ids[-1])
+        if start_platform_id is None:
+            start_offset_m = 0.0 if direction == "forward" else start_segment_length_m
+        else:
+            platform = self._platforms[start_platform_id]
+            if int(platform["segmentId"]) != segment_ids[0]:
+                raise ValueError("TURNBACK_CONFIG_INVALID: start platform does not match phase")
+            start_offset_m = float(platform.get("offsetM") or 0.0)
+        if end_platform_id is None:
+            end_offset_m = end_segment_length_m if direction == "forward" else 0.0
+        else:
+            platform = self._platforms[end_platform_id]
+            if int(platform["segmentId"]) != segment_ids[-1]:
+                raise ValueError("TURNBACK_CONFIG_INVALID: end platform does not match phase")
+            end_offset_m = float(platform.get("offsetM") or 0.0)
+        path_plan = self._path_planner.plan_for_authorized_segment_sequence(
+            segment_ids,
+            direction,
+            start_offset_m=start_offset_m,
+            end_offset_m=end_offset_m,
+            origin_platform_id=start_platform_id if start_platform_id is not None else -1,
+            destination_platform_id=end_platform_id if end_platform_id is not None else -1,
+        )
+        return TurnbackPhase(
+            direction=direction,
+            route_ids=route_ids,
+            signal_ids=tuple(signal_ids),
+            route_switch_positions=tuple(route_switch_positions),
+            segment_ids=segment_ids,
+            path_plan=path_plan,
+        )
+
+    def _segment_length_m(self, segment_id: int) -> float:
+        segment = self._track.get_segment(segment_id)
+        if segment is None or segment.get("lengthM") is None:
+            raise ValueError(f"TURNBACK_CONFIG_INVALID: segment {segment_id} has no length")
+        return float(segment["lengthM"])
+
+    def _validate_segment_sequence(self, segment_ids: tuple[int, ...], direction: str) -> None:
+        for current, following in zip(segment_ids, segment_ids[1:]):
+            next_ids = {
+                int(item["id"])
+                for item in self._track.get_next_segments(current, direction)
+            }
+            if following not in next_ids:
+                raise ValueError(
+                    f"TURNBACK_CONFIG_INVALID: non-contiguous Seg path {current}->{following}"
+                )
+
+    def _is_passenger_platform(self, platform_id: int) -> bool:
+        direction = str(self._platforms[platform_id].get("direction", "")).lower()
+        return direction in {"0x55", "0xaa"}
 
     def _route_segments(self, route_id: str, direction: str) -> tuple[int, ...]:
         cache_key = (route_id, direction)

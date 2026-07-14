@@ -3,6 +3,8 @@ import type { MetroLineData } from '../data/amapMetroApi';
 import type {
   PowerNetworkState,
   PowerTopology,
+  DispatchRuntimeState,
+  OperationPlanState,
   SimDispatchDecision,
   SimPowerState,
   SimStateResponse,
@@ -16,9 +18,11 @@ import type {
   AddTrainPayload,
   DriverCabHardwareStatus,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow' | 'memberCDemo' | 'topologyLayout';
+export type DataMode = 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
+export type SnapshotUpdateResult = 'accepted' | 'stale' | 'gap';
 
 /**
  * 从 Amap 9号线数据中提取站名列表（去"站"后缀）。
@@ -48,6 +52,12 @@ interface SimState {
   linesLoading: boolean;
   linesError: string | null;
   backendStatus: 'idle' | 'connected' | 'fallback' | 'error';
+  dataMode: DataMode;
+  dataStale: boolean;
+  sessionId: string | null;
+  runId: number | null;
+  snapshotSequence: number;
+  snapshotGapCount: number;
   hiddenLines: Set<string>;
   line9Stations: string[];
   trackMap: TrackMapData | null;
@@ -73,6 +83,8 @@ interface SimState {
   simPower: SimPowerState[];
   simPowerNetwork: PowerNetworkState | null;
   dispatchDecisions: SimDispatchDecision[];
+  dispatchRuntime: DispatchRuntimeState | null;
+  operationPlan: OperationPlanState | null;
 
   // 所有列车状态
   trains: SimTrainState[];
@@ -116,6 +128,7 @@ interface SimState {
   pathPositionM: number;
   pathTotalLengthM: number;
   currentSegmentId: number | null;
+  currentSegmentOffsetM: number;
   localSpeedLimitMps: number;
   gradeRatio: number;
   pathSegmentCount: number;
@@ -151,7 +164,7 @@ interface SimState {
 
   // 后端仿真引擎
   engineClockState: string;
-  updateFromBackend: (data: SimStateResponse) => void;
+  updateFromBackend: (data: SimStateResponse, transport?: 'REST' | 'WS') => SnapshotUpdateResult;
   startBackendSim: () => Promise<void>;
   pauseBackendSim: () => Promise<void>;
   resumeBackendSim: () => Promise<void>;
@@ -177,6 +190,7 @@ interface SimState {
   manualBrake: number;
   setManualMode: (enabled: boolean, trainId?: string) => Promise<void>;
   sendManualCommand: (traction: number, brake: number) => void;
+  sendDoorCommand: (action: 'OPEN' | 'CLOSE', side?: 'LEFT' | 'RIGHT' | 'NONE') => Promise<boolean>;
   _lastManualSend: number;
 
   // 司机台硬件状态 (PLC)
@@ -188,6 +202,7 @@ interface SimState {
   setLinesLoading: (loading: boolean) => void;
   setLinesError: (error: string | null) => void;
   setBackendStatus: (status: 'idle' | 'connected' | 'fallback' | 'error') => void;
+  setDataMode: (mode: DataMode) => void;
   setTrackMap: (trackMap: TrackMapData | null) => void;
   setPowerTopology: (powerTopology: PowerTopology | null) => void;
   setViewMode: (viewMode: ViewMode) => void;
@@ -379,6 +394,7 @@ function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimSto
     stationIndex: t.stationIndex,
     segmentProgress: t.segmentProgress,
     driveMode: t.phase === 'DWELLING' ? 'CM' : manualMode ? 'RM' : 'AM',
+    manualMode,
     tractionPercent: t.tractionPercent ?? 0,
     brakePercent: t.brakePercent ?? 0,
     energyKwh: t.energyKwh ?? 0,
@@ -391,6 +407,7 @@ function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimSto
     pathPositionM: t.pathPositionM ?? 0,
     pathTotalLengthM: t.pathTotalLengthM ?? 0,
     currentSegmentId: t.currentSegmentId ?? null,
+    currentSegmentOffsetM: t.currentSegmentOffsetM ?? 0,
     localSpeedLimitMps: t.localSpeedLimitMps ?? t.permittedSpeedMps,
     gradeRatio: t.gradeRatio ?? 0,
     pathSegmentCount: t.pathSegmentCount ?? 0,
@@ -429,6 +446,12 @@ export const useSimStore = create<SimState>((set, get) => ({
   linesLoading: false,
   linesError: null,
   backendStatus: 'idle',
+  dataMode: 'DISCONNECTED',
+  dataStale: false,
+  sessionId: null,
+  runId: null,
+  snapshotSequence: 0,
+  snapshotGapCount: 0,
   hiddenLines: new Set<string>(),
   line9Stations: [],
   viewMode: 'macro' as ViewMode,
@@ -452,6 +475,8 @@ export const useSimStore = create<SimState>((set, get) => ({
   simPower: [],
   simPowerNetwork: null,
   dispatchDecisions: [],
+  dispatchRuntime: null,
+  operationPlan: null,
   trains: [],
   trainColors: {},
   speedHistoryByTrain: {},
@@ -483,6 +508,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   pathPositionM: 0,
   pathTotalLengthM: 0,
   currentSegmentId: null,
+  currentSegmentOffsetM: 0,
   localSpeedLimitMps: 22.22,
   gradeRatio: 0,
   pathSegmentCount: 0,
@@ -527,7 +553,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   toggleRunning: () => {
     const state = get();
-    if (state.backendStatus === 'connected') {
+    if (state.dataMode !== 'DEMO') {
       // 后端模式: 不直接切换, 由 App 层的 useEffect 处理
       return;
     }
@@ -574,7 +600,8 @@ export const useSimStore = create<SimState>((set, get) => ({
     let selectedMeta: SpeedProfileMeta | null | undefined;
 
     for (const [trainId, points] of Object.entries(profiles)) {
-      if (points.length === 0) continue;
+      const nextMeta = profileMeta[trainId] ?? null;
+      if (points.length === 0 && nextMeta === null) continue;
       const activeId = state.activeSpeedRunIdByTrain[trainId];
       // 请求发出后若车辆已经到下一站，丢弃迟到的旧区间响应。
       if (expectedActiveRunIds && expectedActiveRunIds[trainId] !== activeId) continue;
@@ -583,10 +610,14 @@ export const useSimStore = create<SimState>((set, get) => ({
       if (runIndex < 0 || !trainRuns) continue;
 
       const run = trainRuns[runIndex];
-      const profileEndM = points[points.length - 1]?.positionM ?? 0;
-      if (run.pathTotalLengthM > 0 && Math.abs(profileEndM - run.pathTotalLengthM) > 2) continue;
+      const profileEndM = points[points.length - 1]?.positionM;
+      if (
+        profileEndM !== undefined
+        && run.pathTotalLengthM > 0
+        && Math.abs(profileEndM - run.pathTotalLengthM) > 2
+      ) continue;
 
-      const updatedRun = { ...run, profile: points, profileMeta: profileMeta[trainId] ?? null };
+      const updatedRun = { ...run, profile: points, profileMeta: nextMeta };
       const updatedTrainRuns = [...trainRuns];
       updatedTrainRuns[runIndex] = updatedRun;
       nextRuns[trainId] = updatedTrainRuns;
@@ -611,7 +642,22 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
   setLinesLoading: (loading) => set({ linesLoading: loading }),
   setLinesError: (error) => set({ linesError: error, linesLoading: false }),
-  setBackendStatus: (status) => set({ backendStatus: status }),
+  setBackendStatus: (status) => set((state) => ({
+    backendStatus: status,
+    ...(status === 'connected' ? {} : {
+      dataMode: 'DISCONNECTED' as DataMode,
+      dataStale: state.snapshotSequence > 0,
+      isRunning: false,
+    }),
+  })),
+  setDataMode: (mode) => set((state) => {
+    if (mode === 'DEMO' && import.meta.env.VITE_ENABLE_DEMO_MODE !== 'true') return state;
+    return {
+      dataMode: mode,
+      dataStale: mode === 'DISCONNECTED' && state.snapshotSequence > 0,
+      isRunning: mode === 'DEMO' ? state.isRunning : mode === 'LIVE_SIM' ? state.isRunning : false,
+    };
+  }),
   setTrackMap: (trackMap) => set({ trackMap }),
   setPowerTopology: (powerTopology) => set({ powerTopology }),
   setViewMode: (viewMode) => set({ viewMode }),
@@ -640,8 +686,8 @@ export const useSimStore = create<SimState>((set, get) => ({
     const state = get();
     if (!state.isRunning) return;
 
-    // 后端模式下不跑本地 tick
-    if (state.backendStatus === 'connected') return;
+    // 本地推进只能由显式 DEMO 模式启用；断线状态必须冻结最后快照。
+    if (state.dataMode !== 'DEMO') return;
 
     const stations = state.line9Stations;
     if (stations.length === 0) return;
@@ -723,8 +769,9 @@ export const useSimStore = create<SimState>((set, get) => ({
     const targetDist = segDist - offsetInSegment;
 
     // KPI 平滑波动
-    const kpiWait = 100 + Math.floor(Math.random() * 80);
-    const kpiPunct = 96 + Math.random() * 3;
+    const kpiWave = (Math.sin(tickCount / 30) + 1) / 2;
+    const kpiWait = 100 + Math.floor(kpiWave * 80);
+    const kpiPunct = 96 + kpiWave * 3;
 
     // 当前区间进度 0~1
     const segProgress = segDist > 0 ? offsetInSegment / segDist : 0;
@@ -762,9 +809,9 @@ export const useSimStore = create<SimState>((set, get) => ({
       // KPI
       punctuality: Math.round(kpiPunct * 10) / 10,
       avgWaitTime: kpiWait,
-      avgLoadRate: 60 + Math.floor(Math.random() * 30),
-      totalPassengers: state.totalPassengers + Math.floor(Math.random() * 100),
-      totalBoarded: state.totalBoarded + Math.floor(Math.random() * 60),
+      avgLoadRate: 60 + Math.floor(kpiWave * 30),
+      totalPassengers: state.totalPassengers + Math.floor(kpiWave * 100),
+      totalBoarded: state.totalBoarded + Math.floor(kpiWave * 60),
     });
   },
 
@@ -772,12 +819,22 @@ export const useSimStore = create<SimState>((set, get) => ({
   //  后端仿真引擎
   // ═══════════════════════════════════════════════════
 
-  updateFromBackend: (data: SimStateResponse) => {
-    const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions } = data;
+  updateFromBackend: (data: SimStateResponse, transport = 'REST') => {
+    const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions, dispatchRuntime, operations } = data;
     const state = get();
+    const sameStream = state.sessionId === data.sessionId && state.runId === data.runId;
+    if (sameStream && data.snapshotSequence <= state.snapshotSequence) return 'stale';
+    const hasGap = sameStream
+      && state.snapshotSequence > 0
+      && data.snapshotSequence > state.snapshotSequence + 1;
+    if (hasGap && transport === 'WS') {
+      set({ snapshotGapCount: state.snapshotGapCount + 1 });
+      return 'gap';
+    }
+    const streamChanged = state.sessionId !== null && !sameStream;
     // A GET started before POST /start may arrive later with a stale LOADED or
     // STOPPED snapshot. Do not let it overwrite the acknowledged start state.
-    if (awaitingRunConfirmation && clock.state !== 'RUNNING') return;
+    if (awaitingRunConfirmation && clock.state !== 'RUNNING') return 'stale';
     if (clock.state === 'RUNNING') awaitingRunConfirmation = false;
     const isEngineRunning = clock.state === 'RUNNING';
 
@@ -789,6 +846,13 @@ export const useSimStore = create<SimState>((set, get) => ({
     const selTrain = selId ? trains.find((t) => t.trainId === selId) : null;
 
     set({
+      backendStatus: 'connected',
+      dataMode: data.dataMode,
+      dataStale: false,
+      sessionId: data.sessionId,
+      runId: data.runId,
+      snapshotSequence: data.snapshotSequence,
+      snapshotGapCount: hasGap ? state.snapshotGapCount + 1 : state.snapshotGapCount,
       engineClockState: clock.state,
       isRunning: isEngineRunning,
       speed: clock.speedMultiplier ?? state.speed,
@@ -800,6 +864,8 @@ export const useSimStore = create<SimState>((set, get) => ({
       simPower: power ?? [],
       simPowerNetwork: powerNetwork ?? null,
       dispatchDecisions: dispatchDecisions ?? [],
+      dispatchRuntime: dispatchRuntime ?? null,
+      operationPlan: operations ?? null,
       totalWaitingPax: kpi.totalWaitingPax ?? 0,
       maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
       totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
@@ -809,6 +875,17 @@ export const useSimStore = create<SimState>((set, get) => ({
       totalWastedRegenKw: kpi.totalWastedRegenKw ?? 0,
       powerLossesKw: kpi.powerLossesKw ?? 0,
       lastDispatchAction: kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
+      ...(streamChanged ? {
+        speedHistory: [],
+        speedTimeHistory: [],
+        speedProfile: [],
+        speedProfileMeta: null,
+        speedHistoryByTrain: {},
+        speedTimeHistoryByTrain: {},
+        speedRunsByTrain: {},
+        activeSpeedRunIdByTrain: {},
+        viewedSpeedRunIdByTrain: {},
+      } : {}),
     });
 
     // 为新出现的列车自动分配颜色
@@ -825,9 +902,12 @@ export const useSimStore = create<SimState>((set, get) => ({
     }
     if (changed) set({ trainColors: newColors });
 
-    if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
+    if (selTrain) {
+      // LOADED snapshots are already authoritative for a newly placed train.
+      // Applying details only after RUNNING left SEG, offset and CM mode stale
+      // on the first frame of both the driver and topology workflows.
       const sel = _applyTrainDetail(selTrain, get());
-      set({ ...sel, manualMode: selTrain.operationMode === 'MANUAL' });
+      set({ ...sel });
     }
 
     // 全部列车地图位置
@@ -876,7 +956,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
     // 速度曲线档案 — 每次轮询采集全部列车，并按站间运行分段。
     // 这样切换车辆不会中断采样，也不会把上一站末点与下一站首点连起来。
-    if (isEngineRunning || clock.state === 'PAUSED') {
+    if (data.dataMode === 'LIVE_SIM' && (isEngineRunning || clock.state === 'PAUSED')) {
       const curState = get();
       const nextRuns = { ...curState.speedRunsByTrain };
       const nextActiveIds = { ...curState.activeSpeedRunIdByTrain };
@@ -960,6 +1040,7 @@ export const useSimStore = create<SimState>((set, get) => ({
         speedProfileMeta: selectedRun?.profileMeta ?? null,
       });
     }
+    return 'accepted';
   },
 
   startBackendSim: async () => {
@@ -1012,6 +1093,8 @@ export const useSimStore = create<SimState>((set, get) => ({
       simPower: [],
       simPowerNetwork: null,
       dispatchDecisions: [],
+      dispatchRuntime: null,
+      operationPlan: null,
       totalWaitingPax: 0,
       maxPlatformDensity: 0,
       totalTractionEnergyKwh: 0,
@@ -1108,6 +1191,43 @@ export const useSimStore = create<SimState>((set, get) => ({
     if (enabled) next.add(id);
     else next.delete(id);
     set({ manualMode: enabled, manualTrainIds: next, manualTraction: 0, manualBrake: 0 });
+  },
+
+  sendDoorCommand: async (action, side = 'NONE') => {
+    const id = get().selectedTrainId;
+    if (!id) return false;
+    try {
+      const response = await simSendDoorCommand(id, action, side);
+      if (response.ok && (response.train || response.doorSystem)) {
+        set((state) => {
+          const current = state.trains.find((train) => train.trainId === id);
+          const updated = response.train ?? (
+            current && response.doorSystem
+              ? {
+                  ...current,
+                  doorSystem: response.doorSystem,
+                  doorState: response.doorSystem.aggregateState,
+                  doorSide: response.doorSystem.activeSide !== 'NONE'
+                    ? response.doorSystem.activeSide
+                    : response.doorSystem.permittedSide,
+                  doorTransitionRemainingSec: response.doorSystem.transitionRemainingSec,
+                }
+              : null
+          );
+          if (!updated) return {};
+          const trains = state.trains.map((train) => (
+            train.trainId === id ? updated : train
+          ));
+          const selected = updated.trainId === state.selectedTrainId
+            ? _applyTrainDetail(updated, state)
+            : {};
+          return { trains, ...selected };
+        });
+      }
+      return response.ok;
+    } catch {
+      return false;
+    }
   },
 
   sendManualCommand: (traction, brake) => {

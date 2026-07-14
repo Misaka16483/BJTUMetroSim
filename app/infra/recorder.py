@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
+import threading
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,10 +17,69 @@ class RunRecorder:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._lock = threading.RLock()
+        self._batch_active = False
+        self._batch_owner: int | None = None
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute("PRAGMA journal_mode = WAL")
+        self.connection.execute("PRAGMA synchronous = NORMAL")
         self._init_schema()
 
     def close(self) -> None:
-        self.connection.close()
+        with self._lock:
+            if self._batch_active:
+                self.connection.commit()
+                self._batch_active = False
+                self._batch_owner = None
+            self.connection.close()
+
+    def begin_batch(self) -> None:
+        """Defer per-row commits so one simulation tick is one SQLite transaction."""
+        owner = threading.get_ident()
+        self._lock.acquire()
+        try:
+            if self._batch_active:
+                if self._batch_owner != owner:
+                    raise RuntimeError("RECORDER_BATCH_OWNED_BY_ANOTHER_THREAD")
+                # Recover a transaction left open by an interrupted tick before
+                # starting the next authoritative tick transaction.
+                self.connection.rollback()
+                self._batch_active = False
+                self._batch_owner = None
+                self._lock.release()
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._batch_active = True
+            self._batch_owner = owner
+        except Exception:
+            self._lock.release()
+            raise
+
+    def commit_batch(self) -> None:
+        if not self._batch_active:
+            raise RuntimeError("RECORDER_BATCH_NOT_ACTIVE")
+        try:
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            self._batch_active = False
+            self._batch_owner = None
+            self._lock.release()
+
+    def rollback_batch(self) -> None:
+        if not self._batch_active:
+            return
+        try:
+            self.connection.rollback()
+            self._batch_active = False
+            self._batch_owner = None
+        finally:
+            self._lock.release()
+
+    def _commit_if_needed(self) -> None:
+        if not self._batch_active:
+            self.connection.commit()
 
     def _init_schema(self) -> None:
         self.connection.executescript(
@@ -309,6 +371,19 @@ class RunRecorder:
                 FOREIGN KEY(run_id) REFERENCES runs(id),
                 UNIQUE(run_id, command_id)
             );
+            CREATE TABLE IF NOT EXISTS world_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                sequence INTEGER NOT NULL,
+                tick INTEGER NOT NULL,
+                sim_time_ms INTEGER NOT NULL,
+                encoding TEXT NOT NULL DEFAULT 'json+zlib',
+                snapshot_blob BLOB NOT NULL,
+                snapshot_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                UNIQUE(run_id, sequence)
+            );
             CREATE INDEX IF NOT EXISTS idx_station_passenger_station_time
                 ON station_passenger_records(run_id, station_id, direction, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_train_load_train_time
@@ -341,9 +416,17 @@ class RunRecorder:
                 ON power_solver_records(run_id, sim_time_ms);
             CREATE INDEX IF NOT EXISTS idx_power_command_records_time
                 ON power_command_records(run_id, sim_time_ms);
+            CREATE TABLE IF NOT EXISTS sim_reports (
+                run_id INTEGER PRIMARY KEY,
+                generated_at TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_world_snapshots_run_time
+                ON world_snapshots(run_id, sim_time_ms, sequence);
             """
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def start_run(self, name: str, metadata: dict[str, Any] | None = None) -> int:
         cursor = self.connection.execute(
@@ -354,7 +437,7 @@ class RunRecorder:
                 json.dumps(metadata or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
         return int(cursor.lastrowid)
 
     def upsert_power_topology(self, topology: dict[str, Any]) -> None:
@@ -571,7 +654,7 @@ class RunRecorder:
                     json.dumps(item, ensure_ascii=False),
                 ),
             )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_station_passenger(
         self,
@@ -613,7 +696,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_train_load(
         self,
@@ -646,7 +729,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_dwell(
         self,
@@ -686,7 +769,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_dispatch_decision(
         self,
@@ -725,7 +808,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_power(
         self,
@@ -774,7 +857,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_train_voltage(
         self,
@@ -816,7 +899,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_substation_power(
         self,
@@ -853,7 +936,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_regen_energy(
         self,
@@ -884,7 +967,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_supercapacitor_power(
         self,
@@ -928,7 +1011,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_power_solver(
         self,
@@ -960,7 +1043,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_regen_path(
         self,
@@ -1006,7 +1089,7 @@ class RunRecorder:
                 json.dumps(detail or {}, ensure_ascii=False),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_power_command(
         self,
@@ -1035,7 +1118,7 @@ class RunRecorder:
                 error,
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def replay_events(self, run_id: int, topic: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT tick, topic, payload_json, created_at FROM events WHERE run_id = ?"
@@ -1079,6 +1162,109 @@ class RunRecorder:
             })
         return commands
 
+    def record_world_snapshot(
+        self,
+        run_id: int,
+        *,
+        sequence: int,
+        tick: int,
+        sim_time_ms: int,
+        snapshot: dict[str, Any],
+    ) -> str:
+        """Persist an authoritative, immutable state frame and return its SHA-256."""
+        canonical = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        snapshot_hash = hashlib.sha256(canonical).hexdigest()
+        compressed = zlib.compress(canonical, level=6)
+        with self._lock:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO world_snapshots(
+                    run_id, sequence, tick, sim_time_ms, encoding,
+                    snapshot_blob, snapshot_hash, created_at
+                ) VALUES (?, ?, ?, ?, 'json+zlib', ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    sequence,
+                    tick,
+                    sim_time_ms,
+                    compressed,
+                    snapshot_hash,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._commit_if_needed()
+        return snapshot_hash
+
+    def list_world_snapshots(self, run_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT sequence, tick, sim_time_ms, snapshot_hash,
+                       length(snapshot_blob), created_at
+                FROM world_snapshots
+                WHERE run_id = ?
+                ORDER BY sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                "sequence": row[0],
+                "tick": row[1],
+                "simTimeMs": row[2],
+                "snapshotHash": row[3],
+                "compressedBytes": row[4],
+                "createdAt": row[5],
+            }
+            for row in rows
+        ]
+
+    def read_world_snapshot(
+        self,
+        run_id: int,
+        *,
+        sequence: int | None = None,
+        sim_time_ms: int | None = None,
+    ) -> dict[str, Any]:
+        if sequence is not None:
+            where = "run_id = ? AND sequence = ?"
+            params: tuple[Any, ...] = (run_id, sequence)
+            order = "sequence DESC"
+        elif sim_time_ms is not None:
+            where = "run_id = ? AND sim_time_ms <= ?"
+            params = (run_id, sim_time_ms)
+            order = "sim_time_ms DESC, sequence DESC"
+        else:
+            where = "run_id = ?"
+            params = (run_id,)
+            order = "sequence ASC"
+        with self._lock:
+            row = self.connection.execute(
+                f"""
+                SELECT sequence, tick, sim_time_ms, encoding, snapshot_blob, snapshot_hash
+                FROM world_snapshots
+                WHERE {where}
+                ORDER BY {order}
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"snapshot run_id={run_id} sequence={sequence} sim_time_ms={sim_time_ms}")
+        raw = zlib.decompress(row[4]) if row[3] == "json+zlib" else bytes(row[4])
+        actual_hash = hashlib.sha256(raw).hexdigest()
+        if actual_hash != row[5]:
+            raise ValueError("WORLD_SNAPSHOT_HASH_MISMATCH")
+        payload = json.loads(raw.decode("utf-8"))
+        payload["snapshotHash"] = row[5]
+        return payload
+
     def export_run(self, run_id: int) -> dict[str, Any]:
         run = self.connection.execute(
             "SELECT id, name, started_at, metadata_json FROM runs WHERE id = ?",
@@ -1101,6 +1287,7 @@ class RunRecorder:
             "regen_path_records",
             "power_solver_records",
             "power_command_records",
+            "world_snapshots",
         )
         payload: dict[str, Any] = {
             "run": {
@@ -1126,6 +1313,8 @@ class RunRecorder:
                         if key.endswith("_json") and isinstance(value, str):
                             item[key[:-5]] = json.loads(value)
                             del item[key]
+                        elif key == "snapshot_blob" and isinstance(value, bytes):
+                            item[key] = f"<compressed:{len(value)} bytes>"
                     items.append(item)
                 payload["tables"][table_name] = items
         finally:
@@ -1159,7 +1348,7 @@ class RunRecorder:
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
 
     def record_metric(
         self,
@@ -1184,4 +1373,64 @@ class RunRecorder:
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
-        self.connection.commit()
+        self._commit_if_needed()
+
+    def list_reports(self, limit: int = 3) -> list[dict[str, Any]]:
+        """返回最近 N 次运行的报告摘要（按 run_id 倒序），不包含完整报告 JSON。"""
+        rows = self.connection.execute(
+            """
+            SELECT r.id, r.name, r.started_at,
+                   COALESCE(sr.generated_at, '') AS generated_at,
+                   COALESCE(sr.report_json, '{}') AS report_json
+            FROM runs r
+            LEFT JOIN sim_reports sr ON sr.run_id = r.id
+            ORDER BY r.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        results: list[dict[str, Any]] = []
+        for run_id, name, started_at, generated_at, report_json in rows:
+            try:
+                report = json.loads(report_json) if report_json else {}
+            except (json.JSONDecodeError, TypeError):
+                report = {}
+            summary = report.get("summary", {})
+            results.append({
+                "runId": run_id,
+                "scenarioName": name,
+                "startedAt": started_at,
+                "generatedAt": generated_at or None,
+                "durationStr": summary.get("durationStr", "—"),
+                "trainCount": summary.get("trainCount", 0),
+                "stationCount": summary.get("stationCount", 0),
+                "totalEvents": summary.get("totalEvents", 0),
+            })
+        return results
+
+    def save_report(self, run_id: int, report: dict[str, Any]) -> None:
+        """保存（或覆盖）一次运行的仿真报告。"""
+        self.connection.execute(
+            """
+            INSERT INTO sim_reports(run_id, generated_at, report_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                generated_at=excluded.generated_at,
+                report_json=excluded.report_json
+            """,
+            (
+                run_id,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(report, ensure_ascii=False),
+            ),
+        )
+        self._commit_if_needed()
+
+    def get_report(self, run_id: int) -> dict[str, Any] | None:
+        """读取一次运行的仿真报告，不存在返回 None。"""
+        row = self.connection.execute(
+            "SELECT report_json FROM sim_reports WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])

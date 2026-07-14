@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.domain.dispatch.services import RuleBasedDispatchService
+from app.domain.dispatch.timetable import TrainService
 
 
 @dataclass(frozen=True)
@@ -38,13 +39,18 @@ class DispatchRuntimeCoordinator:
         self._previous.clear()
         self._departures.clear()
 
-    def register_train(self, train: Any) -> None:
-        self.service.register_train(train.train_id)
+    def register_train(self, train: Any, service: TrainService | None = None) -> None:
+        self.service.register_train(train.train_id, service)
         self._previous[train.train_id] = (
             str(train.phase),
             int(train.station_index),
             str(train.direction),
         )
+
+    def assign_service(self, train_id: str, service: TrainService) -> None:
+        state = self.service._train_states.get(train_id)
+        if state is not None:
+            state.service = service
 
     def unregister_train(self, train_id: str) -> None:
         self.service.unregister_train(train_id)
@@ -69,6 +75,10 @@ class DispatchRuntimeCoordinator:
                 and current[0] not in {"DWELLING", "IDLE"}
                 and previous[1] == current[1]
                 and previous[2] == current[2]
+                # Route-backed terminal reversal movements are not passenger
+                # service departures. The return service starts only after
+                # the physical turnback has completed at its final platform.
+                and getattr(train, "turnback_state", None) in {None, "COMPLETED"}
             )
             if departed:
                 record = DepartureRecord(

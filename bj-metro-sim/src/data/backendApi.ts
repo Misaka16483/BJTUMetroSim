@@ -120,12 +120,50 @@ export async function fetchBackendBundle(): Promise<{
 //  仿真引擎 API
 // ═══════════════════════════════════════════════════════════
 
+export type DoorUnitStatus =
+  | 'CLOSED_LOCKED' | 'OPENING' | 'OPEN' | 'CLOSING'
+  | 'FAULT' | 'OBSTRUCTED' | 'ISOLATED' | 'EMERGENCY_UNLOCKED';
+
+export interface TrainDoorSystem {
+  carCount: number;
+  doorsPerCar: number;
+  controlMode: string;
+  permittedSide: 'LEFT' | 'RIGHT' | 'BOTH' | 'NONE';
+  activeSide: 'LEFT' | 'RIGHT' | 'BOTH' | 'NONE';
+  aggregateState: string;
+  allClosedAndLocked: boolean;
+  anyDoorOpen: boolean;
+  tractionInterlockActive: boolean;
+  transitionRemainingSec: number;
+  lastCommandSource?: string | null;
+  lastRejectionReason?: string | null;
+  cars: Array<{
+    carIndex: number;
+    protocolWord: number;
+    doors: Array<{
+      doorIndex: number;
+      side: 'LEFT' | 'RIGHT';
+      status: DoorUnitStatus;
+      protocolCode: number;
+    }>;
+  }>;
+}
+
 export interface SimTrainState {
   trainId: string;
   lineId: string;
   stationIndex: number;
   direction: 'UP' | 'DOWN';
   phase: string;
+  serviceId?: string | null;
+  nextServiceId?: string | null;
+  dutyId?: string | null;
+  lifecycleState?: string;
+  plannedDepartureMs?: number | null;
+  plannedArrivalMs?: number | null;
+  actualDepartureMs?: number | null;
+  actualArrivalMs?: number | null;
+  scheduleDeviationSec?: number | null;
   currentStationCode: string;
   nextStationCode: string;
   speedMps: number;
@@ -141,6 +179,7 @@ export interface SimTrainState {
   doorNotice?: string;
   doorPermission?: string;
   doorTransitionRemainingSec?: number;
+  doorSystem?: TrainDoorSystem;
   lastBoarding?: number;
   lastAlighting?: number;
   currentBoardingPax?: number;
@@ -174,6 +213,7 @@ export interface SimTrainState {
   pathPositionM?: number;
   pathTotalLengthM?: number;
   currentSegmentId?: number | null;
+  currentSegmentOffsetM?: number;
   localSpeedLimitMps?: number;
   gradeRatio?: number;
   pathSegmentCount?: number;
@@ -536,7 +576,80 @@ export interface DispatchRuntimeState {
   }>;
 }
 
+export interface OperationServiceState {
+  serviceId: string;
+  trainId: string;
+  lineId: string;
+  direction: 'UP' | 'DOWN';
+  dutyId: string;
+  originStationCode: string;
+  terminalStationCode: string;
+  plannedRunTimeS: number;
+  stops: Array<{
+    stationCode: string;
+    stationName: string;
+    stationIndex: number;
+    plannedArrivalS: number;
+    plannedDepartureS: number;
+    distanceFromOriginM: number;
+    isSkipped: boolean;
+  }>;
+}
+
+export interface OperationDutyState {
+  dutyId: string;
+  trainId: string;
+  serviceIds: string[];
+  plannedStartS: number;
+  plannedEndS: number;
+  lifecycleState: string;
+  activeServiceId: string | null;
+}
+
+export interface OperationPlanState {
+  enabled: boolean;
+  planHash?: string | null;
+  generationWindow?: {
+    startTimeMs: number;
+    endTimeMs: number;
+  };
+  experimentWindow?: {
+    phase?: string;
+    [key: string]: unknown;
+  };
+  profileWarmup?: {
+    ready?: boolean;
+    [key: string]: unknown;
+  };
+  acceptance?: {
+    status?: string;
+    completedDutyCount?: number;
+    totalDutyCount?: number;
+    maximumAbsoluteDeviationSec?: number;
+    scheduleWithinTolerance?: boolean;
+    [key: string]: unknown;
+  };
+  timetables: Array<{
+    timetableId: string;
+    lineId: string;
+    direction: 'UP' | 'DOWN';
+    validFromS: number;
+    validToS: number;
+    serviceCount: number;
+    runTimeSource: string;
+    services: OperationServiceState[];
+  }>;
+  services: OperationServiceState[];
+  duties: OperationDutyState[];
+  recentEvents: Array<Record<string, unknown>>;
+}
+
 export interface SimStateResponse {
+  sessionId: string | null;
+  runId: number | null;
+  snapshotSequence: number;
+  dataMode: 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
+  modelQuality?: string;
   clock: SimClock;
   trains: SimTrainState[];
   stations: SimStationInfo[];
@@ -548,7 +661,10 @@ export interface SimStateResponse {
   passengerFlow?: PassengerFlowConfiguration;
   passengerExchanges?: CurrentPassengerExchange[];
   kpi: SimKpi;
+  operations?: OperationPlanState;
   source: string;
+  recordedSource?: string;
+  replayReadOnly?: boolean;
 }
 
 export interface PassengerHistoryPoint {
@@ -764,6 +880,30 @@ export function simSetManualMode(enabled: boolean, trainId?: string): Promise<Ma
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     return resp.json() as Promise<ManualModeResponse>;
+  });
+}
+
+export interface DoorCommandResponse {
+  ok: boolean;
+  error?: string;
+  trainId?: string;
+  doorSystem?: TrainDoorSystem;
+  train?: SimTrainState;
+}
+
+export function simSendDoorCommand(
+  trainId: string,
+  action: 'OPEN' | 'CLOSE',
+  side: 'LEFT' | 'RIGHT' | 'NONE' = 'NONE',
+): Promise<DoorCommandResponse> {
+  return fetch('/api/sim/train/door-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, action, side }),
+  }).then(async (resp) => {
+    const body = await resp.json() as DoorCommandResponse;
+    if (!resp.ok) throw new Error(body.error ?? (resp.status + ' ' + resp.statusText));
+    return body;
   });
 }
 
@@ -987,6 +1127,139 @@ export function disconnectDriverCabEndpoint(
     return response.json() as Promise<DriverCabHardwareResponse>;
   });
 }
+
+// ═══════════════════════════════════════════════════════════
+//  仿真报告 API
+// ═══════════════════════════════════════════════════════════
+
+export interface SimReportDynamics {
+  totalEnergyKwh: number;
+  tractionEnergyKwh: number;
+  auxiliaryEnergyKwh: number;
+  regenGeneratedKwh: number;
+  regenAcceptedKwh: number;
+  regenWastedKwh: number;
+  regenUtilizationRate: number | null;
+  maxSpeedKmh: number;
+  avgSpeedKmh: number;
+  totalDistanceKm: number;
+}
+
+export interface SimReportPassenger {
+  totalArrivals: number;
+  totalBoardings: number;
+  totalAlightings: number;
+  totalLeftBehind: number;
+  avgWaitingSec: number | null;
+  maxWaitingSec: number | null;
+  maxWaitingPax?: number;
+  peakCrowdingStation: string | null;
+  peakCrowdingLevel: string | null;
+}
+
+export interface SimReportPower {
+  totalPowerConsumedKwh: number;
+  totalRegenGeneratedKwh: number;
+  totalRegenAbsorbedKwh: number;
+  totalRegenWastedKwh: number;
+  totalLossesKwh: number | null;
+  avgVoltageV: number | null;
+  minVoltageV: number | null;
+  maxVoltageV: number | null;
+  overloadEvents: number;
+}
+
+export interface SimReportKpi {
+  available: boolean;
+  onTimeRate: number | null;
+  avgWaitSec: number | null;
+  avgLoadFactor: number | null;
+  maxLoadFactor: number | null;
+  overloadEvents: number | null;
+  headwayViolations: number | null;
+  recoveryTimeSec: number | null;
+}
+
+export interface SimReportSummary {
+  runId: number;
+  scenarioName: string;
+  startTime: string;
+  startSimMs: number;
+  endSimMs: number;
+  durationMs: number;
+  durationStr: string;
+  trainCount: number;
+  stationCount: number;
+  totalEvents: number;
+  totalTicks: number;
+}
+
+export interface SimReport {
+  runId: number;
+  scenarioName: string;
+  generatedAt: string;
+  summary: SimReportSummary;
+  dynamics: SimReportDynamics;
+  passenger: SimReportPassenger;
+  power: SimReportPower;
+  kpi: SimReportKpi;
+  charts: {
+    dynamics: {
+      speedTimeSeries: Array<Record<string, number | string>>;
+      energyCumulative: Array<Record<string, number | string>>;
+      trainEnergyComparison: Array<{ trainId: string; energyKwh: number }>;
+      trainIds: string[];
+    };
+    passenger: {
+      arrivalTimeSeries: Array<Record<string, number | string>>;
+      stationPassengerRanking: Array<{ station: string; total: number }>;
+      boardingAlightingComparison: Array<{ station: string; boarding: number; alighting: number }>;
+    };
+    power: {
+      voltageTimeSeries: Array<Record<string, number | string | null>>;
+      powerTimeSeries: Array<Record<string, number | string>>;
+      substationLoad: Array<{ substation: string; avgLoad: number }>;
+    };
+  };
+}
+
+export interface SimReportResponse {
+  ok: boolean;
+  report?: SimReport;
+  error?: string;
+}
+
+export async function fetchSimReport(runId?: number): Promise<SimReportResponse> {
+  const suffix = runId !== undefined ? `/${runId}` : '';
+  const response = await fetch(`/api/sim/report${suffix}`);
+  return response.json() as Promise<SimReportResponse>;
+}
+
+export interface SimReportSummary {
+  runId: number;
+  scenarioName: string;
+  startedAt: string;
+  generatedAt: string | null;
+  durationStr: string;
+  trainCount: number;
+  stationCount: number;
+  totalEvents: number;
+}
+
+export interface SimReportsResponse {
+  ok: boolean;
+  reports?: SimReportSummary[];
+  error?: string;
+}
+
+export async function fetchSimReports(): Promise<SimReportsResponse> {
+  const response = await fetch('/api/sim/reports');
+  return response.json() as Promise<SimReportsResponse>;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Vision 硬件 API
+// ═══════════════════════════════════════════════════════════
 
 export type VisionConnectionState = 'DISCONNECTED' | 'STARTING' | 'CONNECTED' | 'RETRYING';
 export type VisionFrameLayout = 'compact' | 'fixed';

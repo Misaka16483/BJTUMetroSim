@@ -1,0 +1,102 @@
+{
+  "experimentId": "JOINT-POWER-OPTIMIZATION-V1",
+  "quality": "ENGINEERING_ESTIMATE",
+  "passed": true,
+  "topic": "Multi-train timing and supercapacitor control joint optimization",
+  "rawOutput": {
+    "path": "outputs/joint-power-optimization-v1.json",
+    "sha256": "33b44779f25981c3afde1bbda23055fd46f341b98ca8bbc48989eb349091ad6a",
+    "trackedByGit": false,
+    "reproducibleByRunner": true
+  },
+  "frozenInputs": {
+    "topologyPath": "data/scenarios/line9_power_topology.json",
+    "topologySha256": "985c6b1e91dd6a8e66ce2f9bf5b878d9cde80d27a3b4bbcb14d88acc6c0781ac",
+    "pointContractSha256": "41437805742988bae1f266c1392ae0911f2dbb8ad94fcbfd263a6c21295fb256"
+  },
+  "method": {
+    "algorithm": "constrained NSGA-II",
+    "seeds": [20260713, 20260717, 20260719],
+    "populationSize": 8,
+    "generations": 2,
+    "searchTimeStepSec": 2.5,
+    "independentValidationTimeStepSec": 1.25,
+    "trainCount": 12,
+    "horizonSec": 240,
+    "evaluationsPerMode": 72
+  },
+  "baselineObjectives": {
+    "gridImportKwh": 269.2436496196933,
+    "peakRectifierPowerKw": 6128.018594377804,
+    "wastedRegenKwh": 18.037791099026144
+  },
+  "recommendedCandidate": {
+    "departureSpreadSec": 0.255139,
+    "tractionTimingSec": -1.929013,
+    "brakeTimingSec": 0.002241,
+    "storageChargeLimitKw": 1877.823125,
+    "storageDischargeLimitKw": 1947.976527,
+    "storageTriggerKw": 2292.219964
+  },
+  "recommendedObjectives": {
+    "gridImportKwh": 256.83074394773433,
+    "peakRectifierPowerKw": 5521.014956017939,
+    "wastedRegenKwh": 17.045845795335314
+  },
+  "improvementPercent": {
+    "gridImportKwh": 4.610287258210999,
+    "peakRectifierPowerKw": 9.905381796928047,
+    "wastedRegenKwh": 5.499261512926523
+  },
+  "recommendedMetrics": {
+    "minimumTrainVoltageV": 771.1777150022,
+    "maximumSubstationLoadRatio": 0.46409676769317976,
+    "maximumPowerBalanceErrorRatio": 0.00009201179783987793,
+    "maximumRegenBalanceErrorKw": 7.73070496506989e-12,
+    "speedRmseMps": 0.38332679055152274,
+    "maximumDepartureDeviationSec": 0.255139,
+    "runtimeDeviationSec": 0.0,
+    "stopPositionErrorM": 0.0,
+    "initialStorageEnergyKwh": 10.0,
+    "finalStorageEnergyKwh": 8.96360703698688
+  },
+  "repeatedExperimentSummary": {
+    "TIMING_ONLY": {
+      "medianImprovementPercent": 7.709212064,
+      "minimumImprovementPercent": 4.023518,
+      "maximumImprovementPercent": 11.625851,
+      "feasibleRate": 0.9583333333333334
+    },
+    "STORAGE_ONLY": {
+      "medianImprovementPercent": 0.1322987,
+      "minimumImprovementPercent": 0.1313202,
+      "maximumImprovementPercent": 0.1329995,
+      "feasibleRate": 1.0
+    },
+    "JOINT": {
+      "medianImprovementPercent": 6.0949457,
+      "minimumImprovementPercent": 6.0040126,
+      "maximumImprovementPercent": 7.5502608,
+      "feasibleRate": 0.9305555555555556
+    },
+    "RANDOM": {
+      "medianImprovementPercent": 2.9296042,
+      "minimumImprovementPercent": 0.0,
+      "maximumImprovementPercent": 3.9799031,
+      "feasibleRate": 0.7916666666666666
+    }
+  },
+  "acceptance": {
+    "baselineFeasible": true,
+    "allRecommendedFeasibleAtSearchStep": true,
+    "allRecommendedFeasibleAtHalfStep": true,
+    "jointMedianImprovesBaseline": true,
+    "jointMedianBeatsRandom": true,
+    "balancedSolutionImprovesAllObjectives": true,
+    "balancedObjectiveDriftUnder5Percent": true,
+    "sensitivityCasesFeasible": "12/12",
+    "pythonRegression": "366/366",
+    "fullLifecycleAudit": "263/263"
+  },
+  "scopeStatement": "Results compare engineering-estimate scenarios in the parallel-world Line 9 model and are not claims about the real Beijing Line 9."
+}

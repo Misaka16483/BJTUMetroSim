@@ -25,6 +25,7 @@ class MovementAuthorityConfig:
     minimum_service_deceleration_mps2: float = 0.6
     minimum_emergency_deceleration_mps2: float = 0.8
     overspeed_tolerance_mps: float = 0.25
+    emergency_overspeed_tolerance_mps: float = 0.75
 
 
 @dataclass(frozen=True)
@@ -185,13 +186,24 @@ class MovementAuthorityService:
         position_m: float,
         speed_mps: float,
     ) -> ControlCommand:
-        if position_m >= authority.emergency_brake_start_m and speed_mps > authority.permitted_speed_mps:
+        # Do not turn a tiny numerical/tracking excess at a station endpoint
+        # into an emergency application.  A small excess first receives full
+        # service braking; crossing both the emergency curve and its higher
+        # speed threshold upgrades the intervention to emergency braking.
+        service_overspeed = speed_mps > (
+            authority.permitted_speed_mps + self.config.overspeed_tolerance_mps
+        )
+        emergency_overspeed = speed_mps > (
+            authority.permitted_speed_mps
+            + self.config.emergency_overspeed_tolerance_mps
+        )
+        if position_m >= authority.emergency_brake_start_m and emergency_overspeed:
             return ControlCommand(
                 train_id=command.train_id,
                 emergency_brake=True,
                 source=CommandSource.ATP_OVERRIDE,
             )
-        if speed_mps > authority.permitted_speed_mps + self.config.overspeed_tolerance_mps:
+        if service_overspeed:
             return ControlCommand(
                 train_id=command.train_id,
                 brake_percent=100.0,
@@ -211,16 +223,19 @@ class MovementAuthorityService:
         if not remaining_route_ids:
             return (), path_plan.total_length_m, "STATION_STOP"
 
+        # MA may only cross a continuous prefix of routes owned by this train.
+        # A later route can already be locked for operational reasons, but it
+        # must never bridge an unlocked route (or a route owned by another
+        # train) between the vehicle and that authority.
         locked: list[str] = []
-        last_locked_index: int | None = None
-        for index, route_id in enumerate(remaining_route_ids):
-            if self._route_service.locked_by(route_id) == train_id:
-                locked.append(route_id)
-                last_locked_index = index
+        for route_id in remaining_route_ids:
+            if self._route_service.locked_by(route_id) != train_id:
+                break
+            locked.append(route_id)
 
         if not locked:
             return (), position_m, "ROUTE_NOT_LOCKED"
-        if last_locked_index == len(remaining_route_ids) - 1:
+        if len(locked) == len(remaining_route_ids):
             return tuple(locked), path_plan.total_length_m, "STATION_STOP"
 
         route = self._catalog.get(locked[-1])

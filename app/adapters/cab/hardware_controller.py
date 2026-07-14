@@ -37,6 +37,14 @@ class ManualControlEngine(Protocol):
         emergency_brake: bool = False,
     ) -> dict[str, Any]: ...
 
+    def set_door_command(
+        self,
+        train_id: str,
+        action: str,
+        side: str = "NONE",
+        source: str = "PLC",
+    ) -> dict[str, Any]: ...
+
 
 ClientFactory = Callable[[str, int, float], MitsubishiPlcTcpClient]
 DisplayClientFactory = Callable[[str, int, float], TcpFrameClient]
@@ -196,6 +204,7 @@ class DriverCabHardwareController:
         self._ato_available_sent = False
         self._ato_active_sent = False
         self._last_plc_output: MitsubishiPlcCabOutputState | None = None
+        self._last_door_buttons = (False, False, False, False)
         self._log("plc", "READY", "PLC 连接控制器已就绪", details={"host": self._host, "port": self._port})
         self._log(
             "networkScreen",
@@ -403,6 +412,17 @@ class DriverCabHardwareController:
           ATO 模式     → 司机推手柄: 切回人工 + 发送 ATO 复位
         """
         emergency_brake_requested = input_state.emergency_brake_requested
+        door_buttons = (
+            input_state.open_left_door_triggered,
+            input_state.open_right_door_triggered,
+            input_state.close_left_door_triggered,
+            input_state.close_right_door_triggered,
+        )
+        door_edges = tuple(
+            current and not previous
+            for current, previous in zip(door_buttons, self._last_door_buttons)
+        )
+        self._last_door_buttons = door_buttons
 
         # —— ATO 激活: 系统已发送 ATO 可用 → 司机按启动按钮 → 系统发送 ATO 激活 ——
         if (
@@ -475,6 +495,22 @@ class DriverCabHardwareController:
             # Apply the first valid PLC frame below instead of replacing it
             # with a synthetic neutral command.
 
+        # Door buttons are edge-triggered because the PLC repeats its complete
+        # input image every cycle. Closing has priority over opening.
+        door_result: dict[str, Any] | None = None
+        if door_edges[2] or door_edges[3]:
+            door_result = self.engine.set_door_command(
+                self.train_id, "CLOSE", source="PLC",
+            )
+        elif door_edges[0]:
+            door_result = self.engine.set_door_command(
+                self.train_id, "OPEN", "LEFT", source="PLC",
+            )
+        elif door_edges[1]:
+            door_result = self.engine.set_door_command(
+                self.train_id, "OPEN", "RIGHT", source="PLC",
+            )
+
         # —— 人工模式下发司机操纵指令 ——
         driver_input = input_state.to_driver_input()
         command = self._control_service.command_from_driver_input(driver_input)
@@ -500,6 +536,8 @@ class DriverCabHardwareController:
                 self._last_error = str(result.get("error", "CONTROL_REJECTED"))
                 if result.get("error") == "TRAIN_NOT_FOUND":
                     self._manual_mode_armed = False
+        if door_result is not None:
+            result = {**result, "doorCommand": door_result}
         return result
 
     def _run(self, stop_event: threading.Event) -> None:
@@ -702,7 +740,9 @@ class DriverCabHardwareController:
     ) -> bytes:
         common = self._display_common_values(train)
         if endpoint == "networkScreen":
-            door_word = 0 if train.get("doorState", "CLOSED") == "CLOSED" else 0x11111111
+            cars = (train.get("doorSystem") or {}).get("cars", [])
+            door_words = [int(car.get("protocolWord", 0xFFFFFFFF)) for car in cars[:6]]
+            door_words.extend([0xFFFFFFFF] * (6 - len(door_words)))
             brake_active = common["brake_percent"] > 0
             stop_state = 0x10 if brake_active else 0x11
             state = NetworkScreenState(
@@ -719,7 +759,7 @@ class DriverCabHardwareController:
                 master_voltage=_clamp_u16(train.get("pantographVoltageV", 0.0)),
                 run_dir=1 if common["direction"] == "UP" else 2,
                 driver_room_state=1,
-                door_states=[door_word] * 6,
+                door_states=door_words,
                 elect_stop_forces=[_clamp_u16(float(train.get("electricBrakeForceN", 0.0)) / 6000.0)] * 6,
                 brake_pressures=[_clamp_u16(common["brake_percent"] * 10.0)] * 6,
                 usage_rates=[_clamp_u8(float(train.get("loadFactor", 0.0)) * 100.0)] * 6,
@@ -811,10 +851,12 @@ class DriverCabHardwareController:
 
     def _send_plc_output(self, client: MitsubishiPlcTcpClient) -> None:
         train = self._display_train_snapshot()
+        door_system = train.get("doorSystem", {}) if train else {}
         output = MitsubishiPlcCabOutputState(
             ato_available=self._ato_available_sent,
             ato_active=self._ato_active_sent,
-            doors_closed_light=train.get("doorState", "CLOSED") == "CLOSED" if train else False,
+            door_open_light=bool(door_system.get("anyDoorOpen", False)),
+            doors_closed_light=bool(door_system.get("allClosedAndLocked", False)),
             vehicle_speed_cmps=_clamp_u16(max(0.0, float(train.get("speedMps", 0.0))) * 100.0),
         )
         if self._last_plc_output == output:

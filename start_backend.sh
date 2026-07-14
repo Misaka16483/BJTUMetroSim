@@ -9,6 +9,11 @@ if [ ! -f "$PYTHON" ]; then
 fi
 
 echo "[backend] Using $("$PYTHON" --version) from .venv"
-export PYTHONPATH="$PWD"
+# WSL 下需将路径转为 Windows 格式供 Windows Python 使用
+if command -v wslpath &>/dev/null; then
+    export PYTHONPATH="$(wslpath -w "$PWD")"
+else
+    export PYTHONPATH="$PWD"
+fi
 echo "[backend] Starting API server on http://127.0.0.1:8000..."
 exec "$PYTHON" app/api_server.py

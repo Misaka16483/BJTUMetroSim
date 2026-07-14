@@ -121,47 +121,21 @@ class InterlockingRuntimeCoordinator:
     def request_departure(self, train_id: str, path_plan: Any, route_chain_ids: tuple[str, ...] | None = None) -> DepartureAuthority:
         """Lock the non-overlapping mainline routes needed by one station interval."""
         path_key = tuple(path_plan.cache_key())
+        route_ids = tuple(route_chain_ids) if route_chain_ids is not None else self.routes_for_path(path_plan)
         assigned = self._train_route_ids.get(train_id, ())
+        active = self._active_routes_by_owner()
+        retained_assignment = tuple(
+            route_id for route_id in assigned if active.get(route_id) == train_id
+        )
+        extending_existing_authority = bool(
+            self._train_path_keys.get(train_id) == path_key and retained_assignment
+        )
         if self._train_path_keys.get(train_id) == path_key and assigned:
-            active = self._active_routes_by_owner()
-            if all(active.get(route_id) == train_id for route_id in assigned):
+            if assigned == route_ids and all(active.get(route_id) == train_id for route_id in assigned):
                 authority = self._make_authority(train_id, assigned, granted=True)
                 self._last_authorities[train_id] = authority
                 return authority
 
-        section_ids = self._sections_for_path(path_plan)
-        if not section_ids:
-            authority = DepartureAuthority(
-                train_id=train_id,
-                granted=False,
-                failure_reason="NO_MAINLINE_ROUTE_MAPPING",
-            )
-            self._last_authorities[train_id] = authority
-            return authority
-
-        for reservation in self._interval_reservations.values():
-            if reservation["trainId"] != train_id and section_ids.intersection(reservation["sectionIds"]):
-                authority = DepartureAuthority(
-                    train_id=train_id,
-                    granted=False,
-                    authority_mode="INTERLOCKING_ROUTE",
-                    failure_reason="INTERVAL_RESERVED",
-                )
-                self._last_authorities[train_id] = authority
-                return authority
-        for section_id in section_ids:
-            occupying_trains = set(self.section_occupation.occupied_by(section_id)) - {train_id}
-            if occupying_trains:
-                authority = DepartureAuthority(
-                    train_id=train_id,
-                    granted=False,
-                    authority_mode="INTERLOCKING_ROUTE",
-                    failure_reason="SECTION_OCCUPIED",
-                )
-                self._last_authorities[train_id] = authority
-                return authority
-
-        route_ids = tuple(route_chain_ids) if route_chain_ids is not None else self.routes_for_path(path_plan)
         if not route_ids:
             authority = DepartureAuthority(
                 train_id=train_id,
@@ -172,8 +146,20 @@ class InterlockingRuntimeCoordinator:
             self._last_authorities[train_id] = authority
             return authority
 
+        # Reservations are dispatch diagnostics, not a second interlocking
+        # authority. RouteService below decides real detector, protection,
+        # hostile-route and point conflicts for the routes actually requested.
+        section_ids = self._sections_for_routes(route_ids)
+        if not section_ids:
+            authority = DepartureAuthority(
+                train_id=train_id,
+                granted=False,
+                failure_reason="NO_MAINLINE_ROUTE_MAPPING",
+            )
+            self._last_authorities[train_id] = authority
+            return authority
+
         newly_locked: list[str] = []
-        active = self._active_routes_by_owner()
         for route_id in route_ids:
             if active.get(route_id) == train_id:
                 continue
@@ -202,14 +188,6 @@ class InterlockingRuntimeCoordinator:
             newly_locked.append(route_id)
 
         assigned_routes = tuple(route_ids)
-        self._train_route_ids[train_id] = assigned_routes
-        self._train_path_keys[train_id] = path_key
-        self._interval_reservations[path_key] = {
-            "trainId": train_id,
-            "routeIds": assigned_routes,
-            "sectionIds": frozenset(section_ids),
-            "entered": False,
-        }
         self.signal_resolver.refresh()
         authority = self._make_authority(
             train_id,
@@ -217,20 +195,27 @@ class InterlockingRuntimeCoordinator:
             granted=True,
             authority_mode="INTERLOCKING_ROUTE",
         )
-        if assigned_routes:
-            first_route = self.catalog.get(assigned_routes[0])
+        signal_check_route_id = (
+            newly_locked[0]
+            if newly_locked
+            else (None if extending_existing_authority else assigned_routes[0])
+        ) if assigned_routes else None
+        if signal_check_route_id is not None:
+            first_route = self.catalog.get(signal_check_route_id)
             first_aspect = (
                 authority.signal_aspects.get(str(first_route.start_signal_id))
                 if first_route is not None
                 else "RED"
             )
             if first_aspect == "RED":
-                for route_id in assigned_routes:
+                routes_to_cancel = (
+                    tuple(newly_locked)
+                    if extending_existing_authority
+                    else assigned_routes
+                )
+                for route_id in routes_to_cancel:
                     if self._active_routes_by_owner().get(route_id) == train_id:
                         self.route_service.release(route_id, "CANCEL")
-                self._train_route_ids.pop(train_id, None)
-                self._train_path_keys.pop(train_id, None)
-                self._interval_reservations.pop(path_key, None)
                 authority = DepartureAuthority(
                     train_id=train_id,
                     granted=False,
@@ -239,10 +224,54 @@ class InterlockingRuntimeCoordinator:
                     signal_aspects=authority.signal_aspects,
                     failure_reason="SIGNAL_AT_STOP",
                 )
+                self.signal_resolver.refresh()
+                self._last_authorities[train_id] = authority
+                return authority
+        self._train_route_ids[train_id] = assigned_routes
+        self._train_path_keys[train_id] = path_key
+        self._interval_reservations[path_key] = {
+            "trainId": train_id,
+            "routeIds": assigned_routes,
+            "sectionIds": frozenset(section_ids),
+            "entered": False,
+        }
         self._last_authorities[train_id] = authority
         return authority
 
+    def complete_terminal_arrival(
+        self,
+        train_id: str,
+        route_ids: tuple[str, ...],
+    ) -> bool:
+        """Ask RouteService to apply its guarded reversing-point release."""
+        active_before = self._active_routes_by_owner()
+        complete = True
+        for route_id in route_ids:
+            if active_before.get(route_id) != train_id:
+                continue
+            if not self.route_service.release_terminal_arrival(route_id, train_id):
+                complete = False
+        self._drop_released_assignments()
+        self._drop_cleared_reservations()
+        self.signal_resolver.refresh()
+        return complete
+
     def release_train(self, train_id: str) -> None:
+        self._release_owned_authority(train_id, release_type="EMERGENCY")
+
+    def complete_interval(self, train_id: str) -> None:
+        """Release the route authority for a train that reached its destination platform.
+
+        Some station-to-station route chains include a terminal overlap beyond
+        the platform stopping point.  The train therefore cannot physically
+        occupy and clear the final protected section.  Arrival at the planned
+        platform is the explicit lifecycle boundary that completes that route.
+        Section occupation remains authoritative and is refreshed separately,
+        so following trains still cannot enter an occupied platform.
+        """
+        self._release_owned_authority(train_id, release_type="AUTO")
+
+    def _release_owned_authority(self, train_id: str, *, release_type: str) -> None:
         owned_route_ids = {
             str(item["routeId"])
             for item in self.route_service.snapshot()
@@ -252,7 +281,7 @@ class InterlockingRuntimeCoordinator:
         owned_route_ids.update(self._train_route_ids.pop(train_id, ()))
         for route_id in owned_route_ids:
             if self._active_routes_by_owner().get(route_id) == train_id:
-                self.route_service.release(route_id, "EMERGENCY")
+                self.route_service.release(route_id, release_type)
             self._entered_route_ids.discard(route_id)
         self._train_path_keys.pop(train_id, None)
         for path_key, reservation in list(self._interval_reservations.items()):
@@ -468,6 +497,18 @@ class InterlockingRuntimeCoordinator:
             for section_id, segment_ids in self._axle_segments.items()
             if segment_ids.intersection(path_segments)
         )
+
+    def _sections_for_routes(self, route_ids: tuple[str, ...]) -> frozenset[str]:
+        """Return detector sections belonging to the routes actually requested."""
+        section_ids: set[str] = set()
+        for route_id in route_ids:
+            route = self.catalog.get(route_id)
+            if route is None:
+                continue
+            section_ids.update(str(item) for item in route.axle_section_ids)
+            for protection_id in route.protection_section_ids:
+                section_ids.update(self.catalog.protection_axle_section_ids(protection_id))
+        return frozenset(section_ids)
 
     @staticmethod
     def _route_sort_key(route_id: str) -> tuple[int, str]:

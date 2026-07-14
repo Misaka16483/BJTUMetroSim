@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSimStore } from '../store/useSimStore';
+import type { ReactNode } from 'react';
 
 const START_STEPS = [
   '公共仿真内核与场景',
@@ -22,7 +23,11 @@ type Operation = 'start' | 'stop' | null;
 
 const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
-export default function SimulationLifecycleControls() {
+interface Props {
+  onReportRequested?: () => void;
+}
+
+export default function SimulationLifecycleControls({ onReportRequested }: Props) {
   const engineClockState = useSimStore((s) => s.engineClockState);
   const startBackendSim = useSimStore((s) => s.startBackendSim);
   const pauseBackendSim = useSimStore((s) => s.pauseBackendSim);
@@ -36,6 +41,7 @@ export default function SimulationLifecycleControls() {
   const [error, setError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [panelPosition, setPanelPosition] = useState({ top: 52, right: 12 });
+  const [waitingReportChoice, setWaitingReportChoice] = useState(false);
   const locked = useRef(false);
   const anchorRef = useRef<HTMLDivElement>(null);
 
@@ -64,6 +70,13 @@ export default function SimulationLifecycleControls() {
     return () => window.removeEventListener('resize', updatePosition);
   }, [operation]);
 
+  const finishPanel = () => {
+    locked.current = false;
+    setOperation(null);
+    setDone(false);
+    setWaitingReportChoice(false);
+  };
+
   const run = async (nextOperation: Exclude<Operation, null>) => {
     if (locked.current) return;
     locked.current = true;
@@ -78,6 +91,11 @@ export default function SimulationLifecycleControls() {
       await Promise.all([action(), delay(steps.length * 500)]);
       setStepIndex(steps.length - 1);
       setDone(true);
+      if (nextOperation === 'stop') {
+        // 停止完成后等待用户决定是否查看报告
+        setWaitingReportChoice(true);
+        return; // 不再自动关闭，等待用户点击
+      }
       await delay(900);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : `${nextOperation === 'start' ? '启动' : '停止'}失败`);
@@ -92,16 +110,26 @@ export default function SimulationLifecycleControls() {
   return (
     <div ref={anchorRef} className="relative flex items-center gap-1" style={{ minWidth: 72, minHeight: 32 }}>
       {engineClockState !== 'RUNNING' && engineClockState !== 'PAUSED' ? (
-        <ControlButton onClick={() => run('start')} color="#22c55e" label="▶" title="启动" />
+        <ControlButton onClick={() => run('start')} color="#22c55e" title="启动">
+          <PlayIcon />
+        </ControlButton>
       ) : engineClockState === 'RUNNING' ? (
         <>
-          <ControlButton onClick={pauseBackendSim} color="#eab308" label="⏸" title="暂停" />
-          <ControlButton onClick={() => run('stop')} color="#ef4444" label="⏹" title="停止" />
+          <ControlButton onClick={pauseBackendSim} color="#eab308" title="暂停">
+            <PauseIcon />
+          </ControlButton>
+          <ControlButton onClick={() => run('stop')} color="#ef4444" title="停止">
+            <StopIcon />
+          </ControlButton>
         </>
       ) : (
         <>
-          <ControlButton onClick={resumeBackendSim} color="#22c55e" label="▶" title="恢复" />
-          <ControlButton onClick={() => run('stop')} color="#ef4444" label="⏹" title="停止" />
+          <ControlButton onClick={resumeBackendSim} color="#22c55e" title="恢复">
+            <PlayIcon />
+          </ControlButton>
+          <ControlButton onClick={() => run('stop')} color="#ef4444" title="停止">
+            <StopIcon />
+          </ControlButton>
         </>
       )}
 
@@ -113,13 +141,17 @@ export default function SimulationLifecycleControls() {
           { multiplier: 10, label: '10×', detail: '每现实秒推进约 10 秒仿真时间' },
           { multiplier: 60, label: '60×', detail: '每现实秒推进约 1 分钟仿真时间' },
         ].map(({ multiplier, label, detail }) => {
-          const enabled = engineClockState === 'RUNNING' && !operation;
+          const enabled = (engineClockState === 'RUNNING' || engineClockState === 'PAUSED') && !operation;
           const active = speed === multiplier;
           return <button key={multiplier} type="button" disabled={!enabled} onClick={() => setSpeed(multiplier)} title={detail} style={{
             minWidth: 29, height: 24, padding: '0 4px', borderRadius: 4, cursor: enabled ? 'pointer' : 'not-allowed',
-            fontSize: 9, color: active && enabled ? '#58a6ff' : '#6e7681', opacity: enabled ? 1 : .5,
-            background: active && enabled ? 'rgba(88,166,255,.14)' : 'transparent',
-            border: `1px solid ${active && enabled ? 'rgba(88,166,255,.45)' : 'rgba(255,255,255,.10)'}`,
+            fontSize: 9, fontWeight: active && enabled ? 700 : 400,
+            color: active && enabled ? '#58a6ff' : enabled ? '#8b949e' : '#6e7681', opacity: enabled ? 1 : .5,
+            background: active && enabled ? 'rgba(88,166,255,.22)' : 'transparent',
+            border: `1px solid ${active && enabled ? '#58a6ff' : 'rgba(255,255,255,.10)'}`,
+            transition: 'all 0.15s ease',
+            boxShadow: active && enabled ? '0 0 8px rgba(88,166,255,.3)' : 'none',
+            transform: active && enabled ? 'scale(1.05)' : 'scale(1)',
           }}>{label}</button>;
         })}
       </div>
@@ -164,17 +196,89 @@ export default function SimulationLifecycleControls() {
           {detailsOpen && !error && <div style={{ marginTop: 7, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,.06)', color: '#8b949e', fontSize: 9 }}>
             操作完成前，仿真控制按钮已锁定。
           </div>}
+
+          {/* 停止完成后：询问是否查看报告 */}
+          {waitingReportChoice && (
+            <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(88,166,255,.25)' }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: '#e6edf3', marginBottom: 8 }}>
+                仿真已停止，是否查看运行报告？
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onReportRequested?.();
+                    finishPanel();
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '6px 0',
+                    borderRadius: 6,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    color: '#fff',
+                    background: 'rgba(88,166,255,0.25)',
+                    border: '1px solid rgba(88,166,255,0.45)',
+                  }}
+                >
+                  查看报告
+                </button>
+                <button
+                  type="button"
+                  onClick={finishPanel}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: 6,
+                    fontSize: 11,
+                    cursor: 'pointer',
+                    color: '#8b949e',
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                  }}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          )}
         </div>, document.body
       )}
     </div>
   );
 }
 
-function ControlButton({ onClick, color, label, title }: { onClick: () => void | Promise<void>; color: string; label: string; title: string }) {
+function ControlButton({ onClick, color, title, children }: { onClick: () => void | Promise<void>; color: string; title: string; children: ReactNode }) {
   return (
     <button type="button" onClick={() => { void onClick(); }} title={title} style={{
       width: 30, height: 28, borderRadius: 6, cursor: 'pointer', color,
       background: `${color}14`, border: `1px solid ${color}44`, fontSize: 12,
-    }}>{label}</button>
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>{children}</button>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+      <path d="M2.5 1.5L8 5L2.5 8.5V1.5Z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+      <rect x="2.5" y="1.5" width="2" height="7" rx="0.5" />
+      <rect x="5.5" y="1.5" width="2" height="7" rx="0.5" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+      <rect x="2" y="2" width="6" height="6" rx="1" />
+    </svg>
   );
 }

@@ -1,0 +1,178 @@
+{
+  "experimentId": "JOINT-POWER-OPTIMIZATION-V2",
+  "quality": "ENGINEERING_ESTIMATE",
+  "passed": true,
+  "rawOutput": {
+    "path": "outputs/joint-power-optimization-v2.json",
+    "sha256": "85d91f3174e05ddce228045a951caa7c7ebe4f15aa79fb71344cc58957ddc4a0",
+    "trackedByGit": false,
+    "reproducibleByRunner": true
+  },
+  "frozenInputs": {
+    "credibilityBaselineId": "POWER-CREDIBILITY-BASELINE-V1",
+    "topologySha256": "985c6b1e91dd6a8e66ce2f9bf5b878d9cde80d27a3b4bbcb14d88acc6c0781ac",
+    "pointContractSha256": "41437805742988bae1f266c1392ae0911f2dbb8ad94fcbfd263a6c21295fb256"
+  },
+  "method": {
+    "algorithm": "NSGA2-CONSTRAINT-DOMINATION",
+    "comparator": "RANDOM_SEARCH",
+    "seeds": [
+      20260713,
+      20260717,
+      20260719
+    ],
+    "populationSize": 8,
+    "generations": 2,
+    "decisionVariables": {
+      "departureSpreadSec": [
+        0.0,
+        15.0
+      ],
+      "tractionTimingSec": [
+        -3.0,
+        3.0
+      ],
+      "brakeTimingSec": [
+        -3.0,
+        3.0
+      ],
+      "storageChargeLimitKw": [
+        500.0,
+        2000.0
+      ],
+      "storageDischargeLimitKw": [
+        500.0,
+        2000.0
+      ],
+      "storageTriggerKw": [
+        3400.0,
+        3800.0
+      ]
+    },
+    "objectives": [
+      "netAcGridEnergyKwh",
+      "aggregateAcGridPeakKw",
+      "wastedRegenRatio"
+    ],
+    "configuration": {
+      "train_count": 12,
+      "horizon_sec": 240,
+      "time_step_sec": 1.25,
+      "cycle_sec": 120.0,
+      "cycle_distance_m": 1550.0,
+      "nominal_max_speed_mps": 20.0,
+      "train_mass_kg": 225000.0,
+      "max_traction_force_n": 300000.0,
+      "max_service_brake_force_n": 300000.0,
+      "max_acceleration_mps2": 1.1,
+      "max_service_deceleration_mps2": 1.0,
+      "minimum_same_direction_spacing_m": 500.0,
+      "max_terminal_soc_deviation": 0.05,
+      "rectifier_efficiency": 0.96,
+      "feedback_efficiency": 0.95,
+      "electrical_substeps": 2,
+      "min_voltage_v": 650.0,
+      "max_substation_load_ratio": 1.2,
+      "max_balance_error_ratio": 0.01,
+      "max_speed_tracking_rmse_mps": 1.5,
+      "max_departure_deviation_sec": 15.0
+    }
+  },
+  "baselineObjectives": {
+    "netAcGridEnergyKwh": 414.1937057980559,
+    "aggregateAcGridPeakKw": 10645.115942343997,
+    "wastedRegenRatio": 0.19223194987708167
+  },
+  "searchStepBaselineObjectives": {
+    "netAcGridEnergyKwh": 414.149495900582,
+    "aggregateAcGridPeakKw": 10540.530639819313,
+    "wastedRegenRatio": 0.1919956761484108
+  },
+  "noStorageBaselineObjectives": {
+    "netAcGridEnergyKwh": 424.54764984563377,
+    "aggregateAcGridPeakKw": 10540.530639819313,
+    "wastedRegenRatio": 0.24204724489387408
+  },
+  "recommendedCandidate": {
+    "departureSpreadSec": 0.0,
+    "tractionTimingSec": -3.0,
+    "brakeTimingSec": 3.0,
+    "storageChargeLimitKw": 2000.0,
+    "storageDischargeLimitKw": 2000.0,
+    "storageTriggerKw": 3500.0
+  },
+  "recommendedObjectives": {
+    "netAcGridEnergyKwh": 395.98651168168317,
+    "aggregateAcGridPeakKw": 9693.387928691705,
+    "wastedRegenRatio": 0.18054956332534353
+  },
+  "improvementPercent": {
+    "netAcGridEnergyKwh": 4.395816223544879,
+    "aggregateAcGridPeakKw": 8.940513366007796,
+    "wastedRegenRatio": 6.077234590404035
+  },
+  "modeSummaries": {
+    "TIMING_ONLY": {
+      "repeatCount": 3,
+      "medianImprovementPercent": 6.711234845264535,
+      "minImprovementPercent": 6.6896904905417,
+      "maxImprovementPercent": 7.101436417544649,
+      "totalEvaluations": 68,
+      "feasibleRate": 0.7941176470588235
+    },
+    "STORAGE_ONLY": {
+      "repeatCount": 3,
+      "medianImprovementPercent": 0.005028696568742941,
+      "minImprovementPercent": 0.004688344173242598,
+      "maxImprovementPercent": 0.0058790907517258795,
+      "totalEvaluations": 67,
+      "feasibleRate": 0.5671641791044776
+    },
+    "JOINT": {
+      "repeatCount": 3,
+      "medianImprovementPercent": 6.455523166567668,
+      "minImprovementPercent": 6.455523166567668,
+      "maxImprovementPercent": 7.335165307741642,
+      "totalEvaluations": 66,
+      "feasibleRate": 0.803030303030303
+    }
+  },
+  "noStorageTimingSummary": {
+    "repeatCount": 3,
+    "medianImprovementPercent": 6.061908610597955,
+    "minImprovementPercent": 5.8299830840481075,
+    "maxImprovementPercent": 6.425927933285925,
+    "totalEvaluations": 69,
+    "feasibleRate": 0.855072463768116
+  },
+  "randomComparatorSummary": {
+    "repeatCount": 3,
+    "medianImprovementPercent": 0.0,
+    "minImprovementPercent": 0.0,
+    "maxImprovementPercent": 0.0,
+    "totalEvaluations": 69,
+    "feasibleRate": 0.14492753623188406
+  },
+  "numericalConvergence": {
+    "halfToQuarterStepDriftRatio": {
+      "netAcGridEnergyKwh": 0.007794774132615715,
+      "aggregateAcGridPeakKw": 0.018225425466544348,
+      "wastedRegenRatio": 0.008548526093808483
+    }
+  },
+  "acceptance": {
+    "baselineFeasible": true,
+    "allRecommendedFeasibleAtSearchStep": true,
+    "allRecommendedFeasibleAtHalfStep": true,
+    "jointMedianImprovesBaseline": true,
+    "jointMedianBeatsRandom": true,
+    "balancedSolutionImprovesAllObjectives": true,
+    "balancedObjectiveDriftUnder5Percent": true,
+    "quarterStepObjectiveDriftUnder2Percent": true,
+    "sensitivityFeasibleRateAtLeast75Percent": true,
+    "dynamicsClosed": true,
+    "terminalSocEquivalent": true,
+    "trainSeparationMaintained": true
+  },
+  "scopeStatement": "Engineering-estimate comparison with dynamics-closed periodic segment trajectories; not a claim about real Beijing Line 9 performance or investment returns."
+}

@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.domain.station.services import (
-    DayType, DwellTimeConfig, FlowScenario, PoissonPassengerFlowGenerator,
-    StationFlowConfig, StationService, TrainLoadState,
+    PoissonPassengerFlowGenerator, StationService, TrainLoadState,
 )
+from app.domain.station.passenger_profiles import load_passenger_profile
 
 JsonDict = dict[str, Any]
 
@@ -20,11 +20,13 @@ class PassengerTrain:
     phase: str = "DWELL"
     remaining_sec: int = 30
     load_pax: int = 0
+    capacity_pax: int = 1460
+    average_passenger_mass_kg: float = 65.0
 
     @property
     def passenger_mass_kg(self) -> float:
         """Mass contribution exported for the future dynamics adapter only."""
-        return self.load_pax * 65.0
+        return self.load_pax * self.average_passenger_mass_kg
 
 
 class IndependentPassengerSimulation:
@@ -36,22 +38,36 @@ class IndependentPassengerSimulation:
         self.reset()
 
     def reset(self) -> None:
-        configs: list[StationFlowConfig] = []
-        for index, station in enumerate(self.stations):
-            code = str(station["code"])
-            base = 35.0 + (index % 5) * 12.0
-            configs.extend([
-                StationFlowConfig(code, base, 0.08 + (index % 4) * 0.03, "UP"),
-                StationFlowConfig(code, base * 0.8, 0.08 + (index % 4) * 0.03, "DOWN"),
-            ])
+        self.profile = load_passenger_profile()
         self.station_service = StationService(
-            PoissonPassengerFlowGenerator(configs, FlowScenario(DayType.MON_THU, random_seed=42)),
-            DwellTimeConfig(base_dwell_sec=30.0, door_capacity_pax_per_sec=3.0),
+            PoissonPassengerFlowGenerator(
+                list(self.profile.station_configs),
+                self.profile.flow_scenario,
+                use_poisson=self.profile.use_poisson,
+            ),
+            self.profile.dwell_config,
         )
         self.sim_time_ms = self.start_time_ms
         self.tick = 0
         self.state = "IDLE"
-        self.trains = [PassengerTrain("PAX-UP-01", "UP", 0, load_pax=280), PassengerTrain("PAX-DOWN-01", "DOWN", len(self.stations) - 1, load_pax=240)]
+        self.trains = [
+            PassengerTrain(
+                "PAX-UP-01",
+                "UP",
+                0,
+                load_pax=280,
+                capacity_pax=self.profile.train_capacity_pax,
+                average_passenger_mass_kg=self.profile.average_passenger_mass_kg,
+            ),
+            PassengerTrain(
+                "PAX-DOWN-01",
+                "DOWN",
+                len(self.stations) - 1,
+                load_pax=240,
+                capacity_pax=self.profile.train_capacity_pax,
+                average_passenger_mass_kg=self.profile.average_passenger_mass_kg,
+            ),
+        ]
         self.events: list[JsonDict] = []
 
     def start(self) -> None:
@@ -93,7 +109,12 @@ class IndependentPassengerSimulation:
         station = self.stations[train.station_index]
         result, plan = self.station_service.process_train_stop(
             sim_time_ms=self.sim_time_ms, station_id=str(station["code"]), direction=train.direction,
-            train_load=TrainLoadState(train.train_id, train.load_pax, 600),
+            train_load=TrainLoadState(
+                train.train_id,
+                train.load_pax,
+                train.capacity_pax,
+                train.average_passenger_mass_kg,
+            ),
         )
         train.load_pax = result.updated_load.onboard_pax
         train.remaining_sec = int(round(plan.estimated_dwell_sec))
@@ -115,6 +136,11 @@ class IndependentPassengerSimulation:
     def snapshot(self) -> JsonDict:
         return {
             "source": "independent-passenger-simulation",
+            "profile": {
+                "profileId": self.profile.profile_id,
+                "quality": self.profile.quality,
+                "trainCapacityPax": self.profile.train_capacity_pax,
+            },
             "clock": {"state": self.state, "tick": self.tick, "simTimeMs": self.sim_time_ms},
             "stations": [{"code": s["code"], "name": s["name"], "direction": direction, "waitingPax": platform.waiting_pax, "leftBehindPax": platform.left_behind_pax, "platformDensity": round(platform.platform_density_pax_per_m2, 3)} for (code, direction), platform in self.station_service.platforms.items() for s in self.stations if s["code"] == code],
             # Passenger load is intentionally exposed as an integration output.  The
