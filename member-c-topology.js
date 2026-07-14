@@ -4,6 +4,8 @@
   var switchByFrog = {};
   var switchConnectionByPair = {};
   var selectedSegmentId = null;
+  var selectedTrainId = null;
+  var trainHitBoxes = [];
   var chineseEvents = [];
   var seenServerEvents = {};
   var stationStartBySegment = {};
@@ -15,18 +17,23 @@
     try { window.sessionStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(chineseEvents)); } catch (error) { /* session storage is optional */ }
   }
 
+  function applyStartOptions(data) {
+    stationStartBySegment = {};
+    (data.startOptions || []).forEach(function (option) {
+      stationStartBySegment[option.segmentId] = {
+        code: option.stationCode,
+        name: option.stationName,
+        directions: option.directions || []
+      };
+    });
+  }
+
   function loadStationStarts() {
     if (!window.ENGINE_MODE) return;
     fetch(A + '/api/sim/topology-state')
       .then(function (response) { return response.json(); })
       .then(function (data) {
-        (data.startOptions || []).forEach(function (option) {
-          stationStartBySegment[option.segmentId] = {
-            code: option.stationCode,
-            name: option.stationName,
-            directions: option.directions || []
-          };
-        });
+        applyStartOptions(data);
         updateRouteList(document.getElementById('route-filter').value);
       })
       .catch(function (error) { console.error('station start data load failed', error); });
@@ -42,7 +49,14 @@
   function refreshEngineTopology() {
     return fetch(A + '/api/sim/topology-state')
       .then(function (response) { return response.json(); })
-      .then(function (data) { prev = S; S = data; updateRouteList(document.getElementById('route-filter').value); draw(); });
+      .then(function (data) {
+        prev = S;
+        S = data;
+        applyStartOptions(data);
+        updateRouteList(document.getElementById('route-filter').value);
+        renderTrainList();
+        draw();
+      });
   }
 
   // The outer React header and this iframe can both start the engine.  Keep one
@@ -89,7 +103,13 @@
 
   function engineStartControls() {
     var start = stationStartBySegment[selectedSegmentId];
-    if (!start) return '<div class="empty-note">主引擎仅允许从站台 Seg 加车；区间 Seg 仅用于查询进路。</div>';
+    if (!start) {
+      var segment = (RD.segments || []).find(function (item) { return item.id === selectedSegmentId; });
+      if (segment && segment.platformIds && segment.platformIds.length) {
+        return '<div class="empty-note">该站台是到达或折返站台，当前没有可向相邻站发车的进路。</div>';
+      }
+      return '<div class="empty-note">主引擎仅允许从站台 Seg 加车；区间 Seg 仅用于查询进路。</div>';
+    }
     var buttons = '';
     if (start.directions.indexOf('UP') >= 0) buttons += '<button onclick="addEngineTrain(\'UP\')">在 ' + start.name + ' 上行加 ATO 车</button>';
     if (start.directions.indexOf('DOWN') >= 0) buttons += '<button onclick="addEngineTrain(\'DOWN\')">在 ' + start.name + ' 下行加 ATO 车</button>';
@@ -271,6 +291,63 @@
       return '<div class="' + (event.category === '失败' ? 'occ' : event.category === '锁闭' ? 'lock' : event.category === '释放' ? 'rel' : 'sig') + '">[' + event.tick + '] ' + event.message + '</div>';
     }).join('') : '<div class="empty-note">暂无事件。可点击轨道放置小车，再选择进路办理。</div>';
     document.getElementById('lcnt').textContent = chineseEvents.length;
+  }
+
+  function doorStatusClass(status) {
+    if (status === 'OPEN') return 'open';
+    if (status === 'OPENING' || status === 'CLOSING') return 'moving';
+    if (status === 'CLOSED_LOCKED' || status === 'ISOLATED') return '';
+    return 'fault';
+  }
+
+  window.selectTopologyTrain = function (trainId) {
+    selectedTrainId = trainId;
+    renderTrainList();
+    draw();
+  };
+
+  window.topologyDoorCommand = function (event, trainId, action, side) {
+    event.stopPropagation();
+    fetch(A + '/api/sim/train/door-command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trainId: trainId, action: action, side: side || 'NONE' })
+    }).then(function (response) { return response.json(); }).then(function (data) {
+      if (!data.ok) addChineseEvent('失败', '列车 ' + trainId + ' 门控拒绝：' + (data.error || '未知原因'), S ? S.tick : 0);
+      else addChineseEvent('门控', '列车 ' + trainId + (action === 'OPEN' ? ' 开启' + (side === 'LEFT' ? '左侧' : '右侧') + '车门' : ' 关闭车门'), S ? S.tick : 0);
+      renderChineseLog();
+      refreshEngineTopology();
+    });
+  };
+
+  function renderTrainList() {
+    var list = document.getElementById('train-list');
+    if (!list) return;
+    var trains = (S && S.trains) || [];
+    document.getElementById('tcnt').textContent = trains.length;
+    if (!trains.length) {
+      list.innerHTML = '<div class="empty-note">暂无主引擎列车。请在站台 Seg 加车。</div>';
+      return;
+    }
+    list.innerHTML = trains.map(function (train) {
+      var doors = train.doorSystem;
+      var rows = doors ? (doors.cars || []).map(function (car) {
+        return '<div class="car-door-row"><span class="car-label">' + (car.carIndex + 1) + '车</span>' +
+          (car.doors || []).map(function (door) {
+            return '<span class="door-unit ' + doorStatusClass(door.status) + '" title="' +
+              (door.side === 'LEFT' ? '左' : '右') + '侧 ' + (door.doorIndex + 1) + '号门：' + door.status + '"></span>';
+          }).join('') + '</div>';
+      }).join('') : '<div class="train-meta">暂无逐门状态</div>';
+      var controls = doors && train.operationMode === 'MANUAL'
+        ? '<div class="door-controls"><button onclick="topologyDoorCommand(event,&quot;' + train.id + '&quot;,&quot;OPEN&quot;,&quot;LEFT&quot;)">开左门</button><button onclick="topologyDoorCommand(event,&quot;' + train.id + '&quot;,&quot;CLOSE&quot;,&quot;NONE&quot;)">关门</button><button onclick="topologyDoorCommand(event,&quot;' + train.id + '&quot;,&quot;OPEN&quot;,&quot;RIGHT&quot;)">开右门</button></div>'
+        : '';
+      return '<div class="train-card' + (selectedTrainId === train.id ? ' sel' : '') + '" onclick="selectTopologyTrain(&quot;' + train.id + '&quot;)">' +
+        '<div class="train-head"><b>' + train.id + '</b><span>' + (train.operationMode || 'ATO') + ' · ' + (train.phase || 'IDLE') + '</span></div>' +
+        '<div class="train-meta">S' + (train.segId == null ? '--' : train.segId) + ' + ' + Number(train.offsetM || 0).toFixed(1) + ' m　' +
+        Number(train.speedMps || 0).toFixed(2) + ' m/s　' + (train.directionCode === 'UP' ? '上行' : '下行') + '</div>' +
+        (doors ? '<div class="train-meta">允许侧 ' + doors.permittedSide + ' · ' + (doors.allClosedAndLocked ? '全部关闭锁闭' : '牵引联锁生效') + '</div>' : '') +
+        rows + controls + '</div>';
+    }).join('');
   }
 
   function postManual(path, payload) {
@@ -520,7 +597,9 @@
         cx.fillText('S' + segment.id, pos.x + pos.w / 2, pos.y + 13);
       }
       if (segment.platformIds && segment.platformIds.length) {
-        cx.fillStyle = 'rgba(143,195,31,0.32)';
+        cx.fillStyle = stationStartBySegment[segment.id]
+          ? 'rgba(143,195,31,0.38)'
+          : 'rgba(143,195,31,0.12)';
         cx.fillRect(pos.x, pos.y - 5, pos.w, 10);
       }
       var sw = switchByFrog[segment.id];
@@ -603,17 +682,25 @@
       });
     });
 
+    trainHitBoxes = [];
     trains.forEach(function (train) {
       var segment = byId[train.segId];
       if (!segment) return;
       var pos = topologyPosition(segment);
+      var segmentLength = Math.max(1, Number(segment.lengthM) || 1);
+      var ratio = Math.max(0, Math.min(1, Number(train.offsetM || 0) / segmentLength));
+      var trainX = pos.x + ratio * pos.w;
       cx.fillStyle = train.color || '#e74c3c';
-      cx.fillRect(pos.x + 7, pos.y - 10, 20, 7);
+      cx.strokeStyle = train.id === selectedTrainId ? '#ffffff' : '#0d1117';
+      cx.lineWidth = train.id === selectedTrainId ? 1.5 : 0.8;
+      cx.fillRect(trainX - 10, pos.y - 10, 20, 7);
+      cx.strokeRect(trainX - 10, pos.y - 10, 20, 7);
+      trainHitBoxes.push({ id: train.id, x: trainX - 12, y: pos.y - 13, w: 24, h: 14 });
       if (sc >= 0.45) {
         cx.fillStyle = '#ffffff';
         cx.font = '8px monospace';
         cx.textAlign = 'left';
-        cx.fillText(train.id, pos.x + 7, pos.y - 14);
+        cx.fillText(train.id, trainX - 10, pos.y - 14);
       }
     });
     cx.restore();
@@ -643,6 +730,16 @@
     var bounds = c.getBoundingClientRect();
     var x = (event.clientX - bounds.left - ox) / sc;
     var y = (event.clientY - bounds.top - oy) / sc;
+    var trainHit = trainHitBoxes.find(function (box) {
+      return x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
+    });
+    if (trainHit) {
+      selectedTrainId = trainHit.id;
+      switchTab('train');
+      renderTrainList();
+      draw();
+      return;
+    }
     var hit = null;
     (RD.segments || []).forEach(function (segment) {
       var pos = topologyPosition(segment);

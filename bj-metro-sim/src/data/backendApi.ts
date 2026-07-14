@@ -120,12 +120,50 @@ export async function fetchBackendBundle(): Promise<{
 //  仿真引擎 API
 // ═══════════════════════════════════════════════════════════
 
+export type DoorUnitStatus =
+  | 'CLOSED_LOCKED' | 'OPENING' | 'OPEN' | 'CLOSING'
+  | 'FAULT' | 'OBSTRUCTED' | 'ISOLATED' | 'EMERGENCY_UNLOCKED';
+
+export interface TrainDoorSystem {
+  carCount: number;
+  doorsPerCar: number;
+  controlMode: string;
+  permittedSide: 'LEFT' | 'RIGHT' | 'BOTH' | 'NONE';
+  activeSide: 'LEFT' | 'RIGHT' | 'BOTH' | 'NONE';
+  aggregateState: string;
+  allClosedAndLocked: boolean;
+  anyDoorOpen: boolean;
+  tractionInterlockActive: boolean;
+  transitionRemainingSec: number;
+  lastCommandSource?: string | null;
+  lastRejectionReason?: string | null;
+  cars: Array<{
+    carIndex: number;
+    protocolWord: number;
+    doors: Array<{
+      doorIndex: number;
+      side: 'LEFT' | 'RIGHT';
+      status: DoorUnitStatus;
+      protocolCode: number;
+    }>;
+  }>;
+}
+
 export interface SimTrainState {
   trainId: string;
   lineId: string;
   stationIndex: number;
   direction: 'UP' | 'DOWN';
   phase: string;
+  serviceId?: string | null;
+  nextServiceId?: string | null;
+  dutyId?: string | null;
+  lifecycleState?: string;
+  plannedDepartureMs?: number | null;
+  plannedArrivalMs?: number | null;
+  actualDepartureMs?: number | null;
+  actualArrivalMs?: number | null;
+  scheduleDeviationSec?: number | null;
   currentStationCode: string;
   nextStationCode: string;
   speedMps: number;
@@ -141,6 +179,7 @@ export interface SimTrainState {
   doorNotice?: string;
   doorPermission?: string;
   doorTransitionRemainingSec?: number;
+  doorSystem?: TrainDoorSystem;
   lastBoarding?: number;
   lastAlighting?: number;
   currentBoardingRatePaxPerSec?: number;
@@ -172,6 +211,7 @@ export interface SimTrainState {
   pathPositionM?: number;
   pathTotalLengthM?: number;
   currentSegmentId?: number | null;
+  currentSegmentOffsetM?: number;
   localSpeedLimitMps?: number;
   gradeRatio?: number;
   pathSegmentCount?: number;
@@ -528,6 +568,11 @@ export interface DispatchRuntimeState {
 }
 
 export interface SimStateResponse {
+  sessionId: string | null;
+  runId: number | null;
+  snapshotSequence: number;
+  dataMode: 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
+  modelQuality?: string;
   clock: SimClock;
   trains: SimTrainState[];
   stations: SimStationInfo[];
@@ -537,7 +582,16 @@ export interface SimStateResponse {
   dispatchRuntime?: DispatchRuntimeState;
   interlocking?: InterlockingRuntimeState;
   kpi: SimKpi;
+  operations?: {
+    enabled: boolean;
+    timetables: Array<Record<string, unknown>>;
+    services: Array<Record<string, unknown>>;
+    duties: Array<Record<string, unknown>>;
+    recentEvents: Array<Record<string, unknown>>;
+  };
   source: string;
+  recordedSource?: string;
+  replayReadOnly?: boolean;
 }
 
 export interface PassengerHistoryPoint {
@@ -682,6 +736,30 @@ export function simSetManualMode(enabled: boolean, trainId?: string): Promise<Ma
   }).then((resp) => {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     return resp.json() as Promise<ManualModeResponse>;
+  });
+}
+
+export interface DoorCommandResponse {
+  ok: boolean;
+  error?: string;
+  trainId?: string;
+  doorSystem?: TrainDoorSystem;
+  train?: SimTrainState;
+}
+
+export function simSendDoorCommand(
+  trainId: string,
+  action: 'OPEN' | 'CLOSE',
+  side: 'LEFT' | 'RIGHT' | 'NONE' = 'NONE',
+): Promise<DoorCommandResponse> {
+  return fetch('/api/sim/train/door-command', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, action, side }),
+  }).then(async (resp) => {
+    const body = await resp.json() as DoorCommandResponse;
+    if (!resp.ok) throw new Error(body.error ?? (resp.status + ' ' + resp.statusText));
+    return body;
   });
 }
 

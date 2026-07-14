@@ -217,6 +217,13 @@ class SectionOccupationService:
         - 当前只依赖 TrackQueryService.get_next_segments()，
           不需要 TrackNavigator（成员 A 尚未完成）
         """
+        # TrainTrackTrace supplies exact ordered occurrences, including the
+        # tail left on a previous PathPlan.  Prefer it over graph navigation:
+        # choosing the first predecessor from a turnout is unsafe.
+        rear_segment_ids = getattr(track_query, "rear_segment_ids", None)
+        if callable(rear_segment_ids):
+            return self._segments_covered_by_trace(train, rear_segment_ids)
+
         covered: set[int] = set()
         seg_id = int(train.seg_id)
         remaining = train.length_m  # 还需要回溯的剩余长度（米）
@@ -250,5 +257,28 @@ class SectionOccupationService:
             prev = prev_segs[0]
             current_seg = int(prev["id"])
             space_in_current = self._seg_lengths.get(current_seg, 0.0)
+
+        return covered
+
+    def _segments_covered_by_trace(self, train: Any, rear_segment_ids: Any) -> set[int]:
+        """Cover a train using its ordered, route-authorized physical trace."""
+        covered: set[int] = set()
+        remaining = float(train.length_m)
+        direction_sign = 1 if train.direction.upper() in ("FORWARD", "UP") else -1
+
+        for index, segment_id in enumerate(rear_segment_ids(train.seg_id, train.direction)):
+            current_seg = int(segment_id)
+            covered.add(current_seg)
+            if index == 0:
+                if direction_sign == 1:
+                    space_in_current = float(train.offset_m)
+                else:
+                    space_in_current = self._seg_lengths.get(current_seg, 0.0) - float(train.offset_m)
+            else:
+                space_in_current = self._seg_lengths.get(current_seg, 0.0)
+
+            if space_in_current >= remaining:
+                break
+            remaining -= max(0.0, space_in_current)
 
         return covered

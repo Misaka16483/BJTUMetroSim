@@ -211,16 +211,19 @@ class MovementAuthorityService:
         if not remaining_route_ids:
             return (), path_plan.total_length_m, "STATION_STOP"
 
+        # MA may only cross a continuous prefix of routes owned by this train.
+        # A later route can already be locked for operational reasons, but it
+        # must never bridge an unlocked route (or a route owned by another
+        # train) between the vehicle and that authority.
         locked: list[str] = []
-        last_locked_index: int | None = None
-        for index, route_id in enumerate(remaining_route_ids):
-            if self._route_service.locked_by(route_id) == train_id:
-                locked.append(route_id)
-                last_locked_index = index
+        for route_id in remaining_route_ids:
+            if self._route_service.locked_by(route_id) != train_id:
+                break
+            locked.append(route_id)
 
         if not locked:
             return (), position_m, "ROUTE_NOT_LOCKED"
-        if last_locked_index == len(remaining_route_ids) - 1:
+        if len(locked) == len(remaining_route_ids):
             return tuple(locked), path_plan.total_length_m, "STATION_STOP"
 
         route = self._catalog.get(locked[-1])

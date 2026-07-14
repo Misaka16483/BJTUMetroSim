@@ -382,6 +382,7 @@ class PathPlanner:
         destination_platform_id: int,
         segment_ids: list[int],
         direction: str,
+        train_length_m: float | None = None,
     ) -> PathPlan:
         """Build a path plan from a caller-authorized ordered Seg sequence.
 
@@ -401,7 +402,48 @@ class PathPlanner:
         if segment_ids[0] != start_segment_id or segment_ids[-1] != end_segment_id:
             raise ValueError("authorized sequence does not start/end at the requested platforms")
 
-        for current, following in zip(segment_ids, segment_ids[1:]):
+        start_offset_m = self._platform_stop_offset_m(
+            origin, direction, train_length_m
+        )
+        end_offset_m = self._platform_stop_offset_m(
+            destination, direction, train_length_m
+        )
+        return self.plan_for_authorized_segment_sequence(
+            segment_ids,
+            direction,
+            start_offset_m=start_offset_m,
+            end_offset_m=end_offset_m,
+            origin_platform_id=origin_platform_id,
+            destination_platform_id=destination_platform_id,
+        )
+
+    def plan_for_authorized_segment_sequence(
+        self,
+        segment_ids: list[int] | tuple[int, ...],
+        direction: str,
+        *,
+        start_offset_m: float,
+        end_offset_m: float,
+        origin_platform_id: int = -1,
+        destination_platform_id: int = -1,
+    ) -> PathPlan:
+        """Build a path from an already-authorized Seg sequence and endpoints.
+
+        This supports route-table movements whose endpoint is a siding or
+        reversing point. It validates the supplied corridor but never searches
+        for or substitutes a path.
+        """
+        if direction not in {"forward", "backward"}:
+            raise ValueError("direction must be 'forward' or 'backward'")
+        authorized_segments = [int(item) for item in segment_ids]
+        if not authorized_segments:
+            raise ValueError("authorized segment sequence is empty")
+        if self.allowed_segment_ids is not None:
+            outside_scope = sorted(set(authorized_segments) - self.allowed_segment_ids)
+            if outside_scope:
+                raise ValueError(f"authorized sequence leaves active line scope: {outside_scope}")
+
+        for current, following in zip(authorized_segments, authorized_segments[1:]):
             next_ids = {
                 int(segment["id"])
                 for segment in self.track.get_next_segments(current, direction)
@@ -409,25 +451,50 @@ class PathPlanner:
             if following not in next_ids:
                 raise ValueError(f"non-contiguous authorized sequence: {current} -> {following}")
 
-        start_offset_m = float(origin.get("offsetM") or 0.0)
-        end_offset_m = float(destination.get("offsetM") or 0.0)
-        portions = self._build_path_portions(segment_ids, start_offset_m, end_offset_m, direction)
+        portions = self._build_path_portions(
+            authorized_segments,
+            float(start_offset_m),
+            float(end_offset_m),
+            direction,
+        )
         total_length_m = portions[-1].path_end_m if portions else 0.0
         if total_length_m <= 0:
-            raise ValueError("authorized platform path has no travel distance")
+            raise ValueError("authorized path has no travel distance")
 
         return PathPlan(
             origin_platform_id=origin_platform_id,
             destination_platform_id=destination_platform_id,
             direction=direction,
-            segment_ids=tuple(segment_ids),
+            segment_ids=tuple(authorized_segments),
             constraints=self._build_constraints(portions, direction),
             total_length_m=round(total_length_m, 6),
-            start_segment_id=start_segment_id,
-            start_offset_m=start_offset_m,
-            end_segment_id=end_segment_id,
-            end_offset_m=end_offset_m,
+            start_segment_id=authorized_segments[0],
+            start_offset_m=float(start_offset_m),
+            end_segment_id=authorized_segments[-1],
+            end_offset_m=float(end_offset_m),
         )
+
+    def _platform_stop_offset_m(
+        self,
+        platform: JsonDict,
+        direction: str,
+        train_length_m: float | None,
+    ) -> float:
+        """Return the head position that centres a train in a platform Seg.
+
+        The source platform table associates a platform with the start of its
+        129 m Seg, rather than providing a stopping-board coordinate.  Without
+        a train length, retain that raw coordinate for compatibility.
+        """
+        raw_offset_m = float(platform.get("offsetM") or 0.0)
+        if train_length_m is None:
+            return raw_offset_m
+        segment_length_m = self._segment_length_m(int(platform["segmentId"]))
+        bounded_length_m = min(max(float(train_length_m), 0.0), segment_length_m)
+        end_clearance_m = (segment_length_m - bounded_length_m) / 2.0
+        if direction == "forward":
+            return end_clearance_m + bounded_length_m
+        return end_clearance_m
 
     def _plan_between_platforms(
         self,

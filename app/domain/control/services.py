@@ -30,10 +30,8 @@ class ATOController:
         self._filtered_derivative: float = 0.0
         self._profile_cache_key: tuple[object, ...] | None = None
         self._profile_cache: OptimizedSpeedProfile | None = None
-        # Fast-forward must keep the 250 ms physics lifecycle responsive.  A
-        # fresh DCDP solve can take seconds per interval, so the engine may
-        # temporarily use the deterministic braking curve while preserving an
-        # already-computed profile.
+        # Profile generation is asynchronous in the engine; this switch remains
+        # available for standalone controller use and is enabled for runtime ATO.
         self.allow_profile_compute: bool = True
         self.last_target_speed_mps: float = 0.0
         self.last_speed_error_mps: float = 0.0
@@ -42,6 +40,11 @@ class ATOController:
         self._last_command: ControlCommand | None = None
         self._last_command_sim_time_s: float | None = None
         self._terminal_braking_latched = False
+        self._terminal_braking_target_position_m: float | None = None
+        self._service_brake_active = False
+        self._creep_release_in_progress = False
+        self._creep_neutral_since_s: float | None = None
+        self._creep_mode_active = False
 
     def decide(self, state: TrainState, target: AtoTarget) -> ControlCommand:
         if target.emergency_brake_required:
@@ -50,6 +53,8 @@ class ATOController:
 
         target_position_m = self._target_position_m(target)
         distance_to_target_m = max(0.0, target_position_m - state.position_m)
+        if distance_to_target_m > self.config.creep_distance_m:
+            self._reset_creep_transition()
         if distance_to_target_m <= self.config.stop_tolerance_m:
             self.reset()
             self.last_target_speed_mps = 0.0
@@ -70,22 +75,12 @@ class ATOController:
                 source=CommandSource.ATO,
             ))
 
-        if (
+        creep_entry_allowed = (
             distance_to_target_m <= self.config.creep_distance_m
             and state.speed_mps <= self.config.creep_speed_threshold_mps
-        ):
-            self.last_target_speed_mps = self.config.creep_speed_threshold_mps
-            self.last_speed_error_mps = self.config.creep_speed_threshold_mps - state.speed_mps
-            self.last_pid_output_percent = self.config.creep_traction_percent
-            self.last_profile_mode = "CREEP"
-            command = ControlCommand(
-                state.train_id,
-                traction_percent=self.config.creep_traction_percent,
-                source=CommandSource.ATO,
-            )
-            self._last_command = command
-            self._last_command_sim_time_s = state.sim_time_s
-            return command
+        )
+        if self._creep_mode_active or creep_entry_allowed:
+            return self._creep_command(state, target)
 
         target_speed_mps = self.target_speed_mps(state, target)
         brake_distance_m = state.speed_mps * state.speed_mps / (2.0 * self.config.expected_deceleration_mps2)
@@ -99,6 +94,7 @@ class ATOController:
             self.last_target_speed_mps = target_speed_mps
             self.last_speed_error_mps = target_speed_mps - state.speed_mps
             self.last_pid_output_percent = -brake_percent
+            self._update_brake_hysteresis(self.last_speed_error_mps, brake_requested=True)
             return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
                 brake_percent=brake_percent,
@@ -107,6 +103,15 @@ class ATOController:
 
         pid_output_percent = self._pid_output_percent(state, target_speed_mps)
         pid_output_percent = self._apply_profile_feedforward(state, target, target_speed_mps, pid_output_percent)
+        self._update_brake_hysteresis(
+            self.last_speed_error_mps,
+            brake_requested=pid_output_percent < 0,
+        )
+        if self._service_brake_active:
+            pid_output_percent = min(
+                pid_output_percent,
+                -self.config.brake_hysteresis_hold_percent,
+            )
         if pid_output_percent > 0:
             return self._stabilize_command(state, target, ControlCommand(
                 state.train_id,
@@ -137,6 +142,9 @@ class ATOController:
         self._last_command = None
         self._last_command_sim_time_s = None
         self._terminal_braking_latched = False
+        self._terminal_braking_target_position_m = None
+        self._service_brake_active = False
+        self._reset_creep_transition()
 
     @property
     def current_profile(self) -> OptimizedSpeedProfile | None:
@@ -354,6 +362,17 @@ class ATOController:
             dt_s = max(state.sim_time_s - self._last_command_sim_time_s, 1e-6)
         target_position_m = self._target_position_m(target)
         remaining_distance_m = max(0.0, target_position_m - state.position_m)
+        # A route-end movement authority is a temporary stopping target.  Once
+        # CI extends that authority, the old terminal-brake latch must not keep
+        # suppressing traction for the rest of the station interval.
+        if (
+            self._terminal_braking_latched
+            and self._terminal_braking_target_position_m is not None
+            and target_position_m
+            > self._terminal_braking_target_position_m + self.config.stop_tolerance_m
+        ):
+            self._terminal_braking_latched = False
+            self._terminal_braking_target_position_m = None
         braking_distance_m = state.speed_mps * state.speed_mps / (
             2.0 * self.config.expected_deceleration_mps2
         )
@@ -363,6 +382,7 @@ class ATOController:
         )
         if requested.brake_percent > 0 and in_terminal_braking_zone:
             self._terminal_braking_latched = True
+            self._terminal_braking_target_position_m = target_position_m
 
         creep_allowed = (
             remaining_distance_m <= self.config.creep_distance_m
@@ -373,6 +393,16 @@ class ATOController:
         if self._terminal_braking_latched and desired_traction > 0 and not creep_allowed:
             desired_traction = 0.0
             desired_brake = 0.0
+        terminal_floor_active = (
+            self._terminal_braking_latched
+            and not self._creep_release_in_progress
+            and not self._creep_mode_active
+            and remaining_distance_m <= self.config.creep_distance_m
+            and state.speed_mps <= self.config.terminal_brake_floor_speed_mps
+        )
+        if terminal_floor_active:
+            desired_traction = 0.0
+            desired_brake = max(desired_brake, self.config.terminal_brake_floor_percent)
 
         previous_traction = self._last_command.traction_percent if self._last_command is not None else 0.0
         previous_brake = self._last_command.brake_percent if self._last_command is not None else 0.0
@@ -411,6 +441,65 @@ class ATOController:
         self._last_command = stabilized
         self._last_command_sim_time_s = state.sim_time_s
         return stabilized
+
+    def _update_brake_hysteresis(self, speed_error_mps: float, *, brake_requested: bool) -> None:
+        if self._service_brake_active:
+            if speed_error_mps >= self.config.brake_release_error_mps:
+                self._service_brake_active = False
+            return
+        if brake_requested or speed_error_mps <= -self.config.brake_engage_error_mps:
+            self._service_brake_active = True
+
+    def _creep_command(self, state: TrainState, target: AtoTarget) -> ControlCommand:
+        """Release brake fully, dwell in neutral, then enter traction-only creep."""
+        self.last_target_speed_mps = self.config.creep_speed_threshold_mps
+        self.last_speed_error_mps = self.config.creep_speed_threshold_mps - state.speed_mps
+        self.last_profile_mode = "CREEP" if self._creep_mode_active else "CREEP_RELEASE"
+
+        if not self._creep_mode_active:
+            self._creep_release_in_progress = True
+            previous_brake = self._last_command.brake_percent if self._last_command is not None else 0.0
+            if previous_brake > 0:
+                self._creep_neutral_since_s = None
+                self.last_pid_output_percent = 0.0
+                return self._stabilize_command(
+                    state,
+                    target,
+                    ControlCommand.coast(state.train_id, source=CommandSource.ATO),
+                )
+
+            if self._creep_neutral_since_s is None:
+                self._creep_neutral_since_s = state.sim_time_s
+            neutral_elapsed_s = max(0.0, state.sim_time_s - self._creep_neutral_since_s)
+            if neutral_elapsed_s < self.config.creep_neutral_time_s:
+                self.last_pid_output_percent = 0.0
+                return self._stabilize_command(
+                    state,
+                    target,
+                    ControlCommand.coast(state.train_id, source=CommandSource.ATO),
+                )
+
+            self._creep_mode_active = True
+            self._creep_release_in_progress = False
+            self._service_brake_active = False
+            self.last_profile_mode = "CREEP"
+
+        if state.speed_mps < self.config.creep_speed_threshold_mps:
+            self.last_pid_output_percent = self.config.creep_traction_percent
+            requested = ControlCommand(
+                state.train_id,
+                traction_percent=self.config.creep_traction_percent,
+                source=CommandSource.ATO,
+            )
+        else:
+            self.last_pid_output_percent = 0.0
+            requested = ControlCommand.coast(state.train_id, source=CommandSource.ATO)
+        return self._stabilize_command(state, target, requested)
+
+    def _reset_creep_transition(self) -> None:
+        self._creep_release_in_progress = False
+        self._creep_neutral_since_s = None
+        self._creep_mode_active = False
 
     def _control_period_s(self, state: TrainState) -> float:
         if self._last_train_id != state.train_id or self._last_sim_time_s is None:

@@ -220,8 +220,8 @@ class VisionUdpPublisherTests(unittest.TestCase):
 
         self.assertEqual(received, expected)
         decoded = VisionFrameParser().parse(received)
-        self.assertEqual(len(decoded.signal_states), 77)
-        self.assertEqual(len(decoded.switch_states), 29)
+        self.assertEqual(len(decoded.signal_states), 92)
+        self.assertEqual(len(decoded.switch_states), 40)
         status = publisher.status()["status"]
         self.assertEqual(status["framesSent"], 1)
         self.assertEqual(status["state"], "DISCONNECTED")

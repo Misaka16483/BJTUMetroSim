@@ -82,6 +82,24 @@ class MovementAuthorityTests(unittest.TestCase):
         self.assertEqual(authority.end_position_m, 300.0)
         self.assertEqual(authority.locked_route_ids, ("1", "2"))
 
+    def test_later_locked_route_cannot_bridge_an_unlocked_first_route(self) -> None:
+        self.assertTrue(
+            self.routes.request(RouteRequest("req-2", "2", "T1")).accepted
+        )
+
+        authority = self.service.calculate(
+            train_id="T1",
+            path_plan=self.path,
+            route_chain_ids=("1", "2"),
+            position_m=0.0,
+            speed_mps=0.0,
+            vehicle=self.vehicle,
+        )
+
+        self.assertEqual(authority.end_reason, "ROUTE_NOT_LOCKED")
+        self.assertEqual(authority.end_position_m, 0.0)
+        self.assertEqual(authority.locked_route_ids, ())
+
     def test_station_authority_keeps_a_usable_creep_speed_near_stop(self) -> None:
         self._lock_chain()
         authority = self.service.calculate(

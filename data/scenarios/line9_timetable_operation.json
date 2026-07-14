@@ -1,0 +1,19 @@
+{
+  "lineId": "9",
+  "name": "9号线运行图与交路生命周期验证",
+  "startTimeMs": 21600000,
+  "tickSeconds": 0.25,
+  "useDynamicProgrammingProfile": true,
+  "autoSpawnTrains": false,
+  "lineScopeFile": "line9_mainline_scope.json",
+  "operationPlan": {
+    "enabled": true,
+    "direction": "UP",
+    "startTimeMs": 21600000,
+    "endTimeMs": 23400000,
+    "maxDuties": 4,
+    "readyLeadSec": 30,
+    "turnbackLayoverSec": 60
+  },
+  "trains": []
+}

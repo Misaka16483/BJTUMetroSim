@@ -92,7 +92,7 @@ class RouteService:
 
         # 防重复：同一进路已锁闭 → 直接拒绝
         existing = self._routes.get(route_id)
-        if existing is not None and existing.state == "LOCKED":
+        if existing is not None and existing.state in ("LOCKED", "APPROACH_LOCKED"):
             return RouteResult(
                 accepted=False,
                 route_id=route_id,
@@ -241,6 +241,45 @@ class RouteService:
 
             # ── 状态3：列车已在进路中 → 逐区段检查释放 ──
             self._release_cleared_sections(route_id, state)
+
+    def release_terminal_arrival(self, route_id: str, train_id: str) -> bool:
+        """End an arrival route while its train remains in the terminal berth.
+
+        Normal sequential release waits for the train tail to clear the final
+        detector.  A terminal movement may instead continue into a turnback
+        siding before changing ends, so the occupied arrival route must first
+        be ended by this guarded path.  Some terminal berths span more than
+        one detector (GTG uses JZ184/S219 and JZ185/S220); detector count is
+        therefore not itself proof that the train has failed to arrive.
+
+        The historical single-detector rule is retained.  A multi-detector
+        berth is accepted only when every remaining detector is occupied
+        exclusively by the assigned train and the arrival route has no locked
+        switches.  That last restriction prevents this generic fallback from
+        unlocking points beneath a consist; terminals with such geometry need
+        explicit release-zone metadata rather than another heuristic.
+        """
+        state = self._routes.get(str(route_id))
+        if state is None or state.state not in {"LOCKED", "APPROACH_LOCKED"}:
+            return False
+        if state.train_id != train_id or not state.has_entered:
+            return False
+        if not state.locked_sections:
+            return False
+        if any(
+            set(self._section_occ.axle_occupied_by(section_id)) != {train_id}
+            for section_id in state.locked_sections
+        ):
+            return False
+        if len(state.locked_sections) > 1 and state.locked_switches:
+            return False
+        release_type = (
+            "TERMINAL_ARRIVAL"
+            if len(state.locked_sections) == 1
+            else "TERMINAL_ARRIVAL_MULTI_SECTION"
+        )
+        self._do_release(str(route_id), state, release_type)
+        return True
 
     def _do_release(self, route_id: str, state: RouteState, release_type: str) -> None:
         """执行进路实际释放操作：解锁道岔，清除锁闭状态，转入 IDLE。"""
