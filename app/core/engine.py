@@ -7,6 +7,7 @@ from collections import deque
 import math
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ from app.domain.control.speed_profile import stopping_target_speed_mps
 from app.domain.dispatch.kpi import DispatchKpiTracker
 from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
-from app.domain.dispatch.timetable import HeadwayConfig, TimetableService
+from app.domain.dispatch.timetable import HeadwayConfig, Timetable, TimetableService, TrainDuty, TrainService
 from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
 from app.domain.interlocking.route_chain_planner import (
     RouteChainPlan,
@@ -153,6 +154,16 @@ class SimTrainState:
     active_route_ids: tuple[str, ...] = ()
     route_retry_at_ms: int | None = None
     turnback_count: int = 0
+    service_id: str | None = None
+    next_service_id: str | None = None
+    duty_id: str | None = None
+    lifecycle_state: str = "UNPLANNED"
+    planned_departure_ms: int | None = None
+    planned_arrival_ms: int | None = None
+    actual_departure_ms: int | None = None
+    actual_arrival_ms: int | None = None
+    schedule_deviation_sec: float | None = None
+    lifecycle_updated_ms: int | None = None
     turnback_state: str | None = None
     turnback_phase_index: int | None = None
     movement_authority_end_m: float = 0.0
@@ -265,6 +276,19 @@ class SimTrainState:
             "turnbackCount": self.turnback_count,
             "turnbackState": self.turnback_state,
             "turnbackPhaseIndex": self.turnback_phase_index,
+            "serviceId": self.service_id,
+            "nextServiceId": self.next_service_id,
+            "dutyId": self.duty_id,
+            "lifecycleState": self.lifecycle_state,
+            "plannedDepartureMs": self.planned_departure_ms,
+            "plannedArrivalMs": self.planned_arrival_ms,
+            "actualDepartureMs": self.actual_departure_ms,
+            "actualArrivalMs": self.actual_arrival_ms,
+            "scheduleDeviationSec": (
+                round(self.schedule_deviation_sec, 3)
+                if self.schedule_deviation_sec is not None else None
+            ),
+            "lifecycleUpdatedMs": self.lifecycle_updated_ms,
             "movementAuthorityEndM": round(self.movement_authority_end_m, 1),
             "movementAuthorityReason": self.movement_authority_reason,
             "movementAuthoritySpeedMps": round(self.movement_authority_speed_mps, 2),
@@ -303,6 +327,10 @@ class TickSnapshot:
     sim_time_str: str = "06:00:00"
     clock_state: str = "IDLE"
     speed_multiplier: int = 1
+    session_id: str = ""
+    run_id: int | None = None
+    snapshot_sequence: int = 0
+    model_quality: str = "UNKNOWN"
     trains: list[dict[str, Any]] = field(default_factory=list)
     stations: list[dict[str, Any]] = field(default_factory=list)
     power: list[dict[str, Any]] = field(default_factory=list)
@@ -311,6 +339,34 @@ class TickSnapshot:
     dispatch_runtime: dict[str, Any] = field(default_factory=dict)
     interlocking: dict[str, Any] = field(default_factory=dict)
     kpi: dict[str, Any] = field(default_factory=dict)
+    operations: dict[str, Any] = field(default_factory=dict)
+
+    def to_api_dict(self, *, tick_interval_ms: int) -> JsonDict:
+        return {
+            "sessionId": self.session_id,
+            "runId": self.run_id,
+            "snapshotSequence": self.snapshot_sequence,
+            "dataMode": "LIVE_SIM",
+            "modelQuality": self.model_quality,
+            "clock": {
+                "state": self.clock_state,
+                "simTime": self.sim_time_str,
+                "tick": self.tick,
+                "simTimeMs": self.sim_time_ms,
+                "speedMultiplier": self.speed_multiplier,
+                "tickIntervalMs": tick_interval_ms,
+            },
+            "trains": self.trains,
+            "stations": self.stations,
+            "power": self.power,
+            "powerNetwork": self.power_network,
+            "dispatchDecisions": self.dispatch_decisions,
+            "dispatchRuntime": self.dispatch_runtime,
+            "interlocking": self.interlocking,
+            "kpi": self.kpi,
+            "operations": self.operations,
+            "source": "simulation-engine",
+        }
 
 
 class SimulationEngine:
@@ -378,6 +434,9 @@ class SimulationEngine:
             for cfg in scenario.trains
         } if scenario.auto_spawn_trains else {})
         self._run_id: int | None = None
+        self._session_id = str(uuid.uuid4())
+        self._snapshot_sequence = 0
+        self._snapshot_interval_ticks = max(1, round(5.0 / scenario.tick_seconds))
 
         # 鈹€鈹€ 鍩熸湇鍔?鈹€鈹€
         self.station_service = self._build_station_service()
@@ -413,6 +472,11 @@ class SimulationEngine:
         self.timetable_service = TimetableService(
             headway_config=HeadwayConfig(min_headway_sec=90.0),
         )
+        self._operation_timetables: list[Timetable] = []
+        self._operation_services: dict[str, TrainService] = {}
+        self._operation_duties: dict[str, TrainDuty] = {}
+        self._operation_events: list[JsonDict] = []
+        self._pending_operation_events: list[JsonDict] = []
         self._last_arrivals_by_platform: dict[tuple[str, str], int] = {}
         self._station_history: dict[tuple[str, str], deque[JsonDict]] = {}
         self._station_history_arrivals: dict[tuple[str, str], int] = {}
@@ -822,6 +886,9 @@ class SimulationEngine:
 
     def load(self) -> None:
         """Load a clean runtime from the persistent configured fleet."""
+        self._session_id = str(uuid.uuid4())
+        self._snapshot_sequence = 0
+        self._run_id = None
         self.clock.load()
         self.station_service = self._build_station_service()
         self._reset_station_history()
@@ -871,8 +938,7 @@ class SimulationEngine:
         for train in self.trains:
             self._train_power_geometry(train, self._make_vehicle_config(train.train_id, train.onboard_pax))
             self.dispatch_runtime.register_train(train)
-        self._snapshot = self._build_snapshot()
-
+        self._initialize_operation_plan()
         if self.recorder is not None:
             self._run_id = self.recorder.start_run(
                 self.scenario.name,
@@ -881,6 +947,9 @@ class SimulationEngine:
                     "lineId": self.scenario.line_id,
                     "startTimeMs": self.scenario.start_time_ms,
                     "trainCount": len(self.trains),
+                    "operationPlanEnabled": self.scenario.operation_plan.enabled,
+                    "dutyCount": len(self._operation_duties),
+                    "serviceCount": len(self._operation_services),
                     "powerModelVersion": (
                         self.power_service.network.model_version
                         if self.power_service.network is not None else None
@@ -893,6 +962,8 @@ class SimulationEngine:
             )
             if self.power_service.network is not None:
                 self.recorder.upsert_power_topology(self.power_service.network.topology_dict())
+        self._snapshot = self._build_snapshot()
+        self._persist_snapshot(self._snapshot)
 
     def start(self) -> str:
         """鍚姩浠跨湡锛堝悗鍙扮嚎绋嬶級."""
@@ -909,6 +980,8 @@ class SimulationEngine:
             elif self.clock.state.value == "STOPPED":
                 self.clock.load()
                 self.kpi_tracker.reset()
+                if self.scenario.operation_plan.enabled:
+                    self._initialize_operation_plan()
                 self._snapshot = self._build_snapshot()
             self.clock.start()
             # Publish RUNNING synchronously before the first tick. Otherwise a GET
@@ -1225,6 +1298,10 @@ class SimulationEngine:
         tick = self.clock.current_tick
         sim_time_ms = self._absolute_sim_time_ms()
 
+        # ATS promotes due duties from the abstract depot queue to a physical
+        # departure request before CI scans and authorizes the route.
+        self._advance_operation_lifecycle(sim_time_ms)
+
         # External topology operations are serialized at the tick boundary.
         self._apply_power_commands(sim_time_ms)
 
@@ -1306,6 +1383,7 @@ class SimulationEngine:
             self.trains,
             self.clock.sim_time_seconds,
         )
+        self._record_operation_departures(departures, sim_time_ms)
 
         # 5) 璋冨害鍐崇瓥
         decisions = self._make_dispatch_decisions(sim_time_ms, power_states)
@@ -1333,6 +1411,7 @@ class SimulationEngine:
 
         # 7) 璁板綍鍒?SQLite
         if self.recorder is not None and self._run_id is not None:
+            self.recorder.begin_batch()
             for train in self.trains:
                 self.recorder.record_event(
                     self._run_id,
@@ -1345,6 +1424,13 @@ class SimulationEngine:
                     self._run_id,
                     "dispatch.departed",
                     departure.to_dict(),
+                    tick=tick,
+                )
+            for operation_event in self._pending_operation_events:
+                self.recorder.record_event(
+                    self._run_id,
+                    "operations.lifecycle",
+                    operation_event,
                     tick=tick,
                 )
             for decision in decisions:
@@ -1505,10 +1591,15 @@ class SimulationEngine:
                             alert,
                             tick=tick,
                         )
+            self.recorder.commit_batch()
+
+        self._pending_operation_events = []
 
         self._record_station_history(sim_time_ms)
         # 8) 鏇存柊蹇収
         self._snapshot = self._build_snapshot()
+        if tick % self._snapshot_interval_ticks == 0:
+            self._persist_snapshot(self._snapshot)
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  鍒楄溅鎺ㄨ繘閫昏緫
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -1565,6 +1656,11 @@ class SimulationEngine:
         sim_time_ms: int,
     ) -> tuple[bool, PreparedTrainStep | None]:
         """Prepare a PathPlan train without advancing physics; return whether the train was handled."""
+        if train.lifecycle_state in {"IN_DEPOT", "READY", "RETURN_REQUESTED", "STORED"}:
+            train.speed_mps = 0.0
+            train.traction_percent = 0.0
+            train.brake_percent = 0.0
+            return True, None
         stations = self._station_list
         n = len(stations)
         if train._terminal_arrival_release_route_ids:
@@ -2216,6 +2312,12 @@ class SimulationEngine:
         train.traction_percent = 0.0
         train.brake_percent = 20.0
         train.target_speed_mps = 0.0
+        self._record_operation_arrival(train, sim_time_ms)
+
+        # The station platform is the explicit end of the previous interval.
+        # Release any terminal-overlap route that cannot be tail-cleared by
+        # physical occupation before preparing the next station interval.
+        self.interlocking_runtime.complete_interval(train.train_id)
 
         self._dcdp_curve_data.pop(train.train_id, None)
         self._dcdp_curve_meta.pop(train.train_id, None)
@@ -2224,8 +2326,8 @@ class SimulationEngine:
         self._ato_for_train(train.train_id).reset()
 
         stations = self._station_list
-        if (train.direction == "UP" and next_idx == len(stations) - 1) or (
-            train.direction == "DOWN" and next_idx == 0
+        if((train.direction == "UP" and next_idx == len(stations) - 1) or (
+            train.direction == "DOWN" and next_idx == 0)
         ):
             # The inbound route ends in the occupied terminal platform. It
             # must pass the same guarded terminal-arrival release before an
@@ -3318,6 +3420,8 @@ class SimulationEngine:
         """Apply CI authority at the dwell/departure boundary without owning dwell logic."""
         station_count = len(self._station_list)
         for train in self.trains:
+            if train.lifecycle_state in {"IN_DEPOT", "READY", "RETURN_REQUESTED", "STORED"}:
+                continue
             if train.phase != DWELLING or train.dwell_remaining_sec > self.clock.tick_seconds:
                 continue
             if train.departure_authorized and train.active_route_ids:
@@ -3341,6 +3445,14 @@ class SimulationEngine:
                     self.clock.tick_seconds,
                 )
                 continue
+            if (
+                train.planned_departure_ms is not None
+                and self._absolute_sim_time_ms() < train.planned_departure_ms
+            ):
+                train.departure_authorized = False
+                train.interlocking_hold_reason = "TIMETABLE_NOT_DUE"
+                train.active_route_ids = ()
+                continue
             next_idx = train.station_index + 1 if train.direction == "UP" else train.station_index - 1
             if next_idx < 0 or next_idx >= station_count:
                 continue
@@ -3349,14 +3461,12 @@ class SimulationEngine:
                 train.departure_authorized = False
                 train.interlocking_hold_reason = "NO_MAINLINE_PATH"
                 train.active_route_ids = ()
-                train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
                 continue
             route_chain_ids = train._planned_route_ids
             if not route_chain_ids:
                 train.departure_authorized = False
                 train.interlocking_hold_reason = "NO_ROUTE_CHAIN"
                 train.active_route_ids = ()
-                train.dwell_remaining_sec = max(train.dwell_remaining_sec, self.clock.tick_seconds)
                 continue
             self._update_train_path_context(train)
             if train.route_retry_at_ms is not None and sim_time_ms < train.route_retry_at_ms:
@@ -3379,6 +3489,8 @@ class SimulationEngine:
         states: list[TrainState] = []
         occupied_platform_queues: set[tuple[int, str]] = set()
         for train in self.trains:
+            if train.lifecycle_state in {"IN_DEPOT", "READY", "RETURN_REQUESTED", "STORED"}:
+                continue
             if train.phase in {DWELLING, IDLE}:
                 queue_key = (train.station_index, train.direction)
                 if queue_key in occupied_platform_queues:
@@ -3434,7 +3546,257 @@ class SimulationEngine:
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  蹇収鏋勫缓
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+    def _initialize_operation_plan(self) -> None:
+        self._operation_timetables = []
+        self._operation_services = {}
+        self._operation_duties = {}
+        self._operation_events = []
+        self._pending_operation_events = []
+        self.timetable_service.reset()
+        config = self.scenario.operation_plan
+        if not config.enabled:
+            return
+        if config.direction not in {"UP", "DOWN"}:
+            raise ValueError("INVALID_OPERATION_PLAN_DIRECTION")
+
+        indexed_stations = [
+            {**station, "stationIndex": index}
+            for index, station in enumerate(self._station_list)
+        ]
+        outbound_stations = (
+            indexed_stations if config.direction == "UP" else list(reversed(indexed_stations))
+        )
+        start_ms = config.start_time_ms or self.scenario.start_time_ms
+        end_ms = config.end_time_ms or (start_ms + 30 * 60 * 1000)
+        if end_ms <= start_ms:
+            raise ValueError("INVALID_OPERATION_PLAN_WINDOW")
+        outbound = self.timetable_service.generate(
+            timetable_id=f"TT-{self.scenario.line_id}-{config.direction}",
+            line_id=self.scenario.line_id,
+            direction=config.direction,
+            stations=outbound_stations,
+            start_time_s=start_ms / 1000.0,
+            end_time_s=end_ms / 1000.0,
+        )
+        outbound.services = outbound.services[: config.max_duties]
+        self._operation_timetables.append(outbound)
+
+        for index, outbound_service in enumerate(outbound.services, start=1):
+            train_id = f"EMU-{self.scenario.line_id}-{index:03d}"
+            duty_id = f"DUTY-{self.scenario.line_id}-{index:03d}"
+            outbound_service.train_id = train_id
+            outbound_service.duty_id = duty_id
+            return_start_s = (
+                outbound_service.stops[-1].planned_arrival_s
+                + config.turnback_layover_sec
+            )
+            return_direction = "DOWN" if config.direction == "UP" else "UP"
+            return_tt = self.timetable_service.generate(
+                timetable_id=f"TT-{self.scenario.line_id}-{return_direction}-{index:03d}",
+                line_id=self.scenario.line_id,
+                direction=return_direction,
+                stations=list(reversed(outbound_stations)),
+                start_time_s=return_start_s,
+                end_time_s=return_start_s + 1.0,
+            )
+            return_service = return_tt.services[0]
+            return_service.train_id = train_id
+            return_service.duty_id = duty_id
+            self._operation_services[outbound_service.service_id] = outbound_service
+            self._operation_services[return_service.service_id] = return_service
+            duty = TrainDuty(
+                duty_id=duty_id,
+                train_id=train_id,
+                service_ids=[outbound_service.service_id, return_service.service_id],
+                planned_start_s=outbound_service.stops[0].planned_departure_s,
+                planned_end_s=return_service.stops[-1].planned_arrival_s,
+            )
+            self._operation_duties[duty_id] = duty
+
+            train = self._create_train(TrainConfig(
+                train_id=train_id,
+                line_id=self.scenario.line_id,
+                initial_station_code=outbound_service.origin_station_code,
+                direction=config.direction,
+                capacity_pax=600,
+                initial_load_pax=0,
+            ))
+            train.phase = IDLE
+            train.door_state = "CLOSED"
+            train.door_notice = "CLOSED"
+            train.door_side = "NONE"
+            train.dwell_remaining_sec = 0.0
+            train._passenger_service_pending = False
+            train.service_id = outbound_service.service_id
+            train.next_service_id = return_service.service_id
+            train.duty_id = duty_id
+            train.lifecycle_state = "IN_DEPOT"
+            train.planned_departure_ms = round(outbound_service.stops[0].planned_departure_s * 1000)
+            train.planned_arrival_ms = round(outbound_service.stops[-1].planned_arrival_s * 1000)
+            train.lifecycle_updated_ms = self._absolute_sim_time_ms()
+            self._train_power_geometry(train, self._make_vehicle_config(train_id, 0))
+            self.trains.append(train)
+            self.dispatch_runtime.register_train(train, outbound_service)
+
+    def _set_lifecycle(self, train: SimTrainState, state: str, sim_time_ms: int) -> None:
+        previous_state = train.lifecycle_state
+        if previous_state == state:
+            return
+        train.lifecycle_state = state
+        train.lifecycle_updated_ms = sim_time_ms
+        if train.duty_id and train.duty_id in self._operation_duties:
+            duty = self._operation_duties[train.duty_id]
+            duty.lifecycle_state = state
+            duty.active_service_id = train.service_id
+        self._append_operation_event({
+            "event": "LIFECYCLE_TRANSITION",
+            "trainId": train.train_id,
+            "dutyId": train.duty_id,
+            "serviceId": train.service_id,
+            "fromState": previous_state,
+            "toState": state,
+            "actualTimeMs": sim_time_ms,
+        })
+
+    def _append_operation_event(self, event: JsonDict) -> None:
+        self._operation_events.append(event)
+        self._operation_events = self._operation_events[-500:]
+        self._pending_operation_events.append(event)
+        self.bus.publish(
+            "operations.lifecycle",
+            event,
+            source="ats",
+            tick=self.clock.current_tick,
+        )
+
+    def _advance_operation_lifecycle(self, sim_time_ms: int) -> None:
+        config = self.scenario.operation_plan
+        for train in self.trains:
+            if train.duty_id is None:
+                continue
+            if train.lifecycle_state == "RETURN_REQUESTED":
+                self._set_lifecycle(train, "STORED", sim_time_ms)
+                continue
+            planned_departure_ms = train.planned_departure_ms
+            if planned_departure_ms is None:
+                continue
+            if (
+                train.lifecycle_state == "IN_DEPOT"
+                and sim_time_ms >= planned_departure_ms - round(config.ready_lead_sec * 1000)
+            ):
+                self._set_lifecycle(train, "READY", sim_time_ms)
+            if train.lifecycle_state in {"READY", "TURNBACK"} and sim_time_ms >= planned_departure_ms:
+                self._set_lifecycle(train, "DEPARTURE_REQUESTED", sim_time_ms)
+                train.phase = DWELLING
+                train.dwell_remaining_sec = 0.0
+                train.door_state = "CLOSED"
+                train.door_notice = "CLOSED"
+                train.door_side = "NONE"
+                train._passenger_service_pending = False
+                self._anchor_train_at_current_platform(train)
+
+    def _record_operation_departures(self, departures: list[Any], sim_time_ms: int) -> None:
+        by_id = {train.train_id: train for train in self.trains}
+        for departure in departures:
+            train = by_id.get(departure.train_id)
+            if train is None or train.duty_id is None:
+                continue
+            service = self._operation_services.get(train.service_id or "")
+            planned_ms = None
+            if service is not None:
+                planned_s = service.planned_departure_at_station(departure.station_index)
+                planned_ms = round(planned_s * 1000) if planned_s is not None else None
+            train.actual_departure_ms = sim_time_ms
+            train.planned_departure_ms = planned_ms
+            train.schedule_deviation_sec = (
+                (sim_time_ms - planned_ms) / 1000.0 if planned_ms is not None else None
+            )
+            self._set_lifecycle(train, "IN_SERVICE", sim_time_ms)
+            self._append_operation_event({
+                "event": "DEPARTURE",
+                "trainId": train.train_id,
+                "dutyId": train.duty_id,
+                "serviceId": train.service_id,
+                "stationIndex": departure.station_index,
+                "plannedTimeMs": planned_ms,
+                "actualTimeMs": sim_time_ms,
+                "deviationSec": train.schedule_deviation_sec,
+            })
+
+    def _record_operation_arrival(self, train: SimTrainState, sim_time_ms: int) -> None:
+        if train.duty_id is None:
+            return
+        service = self._operation_services.get(train.service_id or "")
+        planned_ms = None
+        if service is not None:
+            planned_s = service.planned_arrival_at_station(train.station_index)
+            planned_ms = round(planned_s * 1000) if planned_s is not None else None
+            planned_departure_s = service.planned_departure_at_station(train.station_index)
+            train.planned_departure_ms = (
+                round(planned_departure_s * 1000)
+                if planned_departure_s is not None else None
+            )
+        train.actual_arrival_ms = sim_time_ms
+        train.planned_arrival_ms = planned_ms
+        train.schedule_deviation_sec = (
+            (sim_time_ms - planned_ms) / 1000.0 if planned_ms is not None else None
+        )
+        if planned_ms is not None:
+            self.kpi_tracker.record_arrival(
+                train.train_id,
+                train.station_index,
+                train.current_station_code,
+                planned_arrival_s=planned_ms / 1000.0,
+                actual_arrival_s=sim_time_ms / 1000.0,
+            )
+        self._append_operation_event({
+            "event": "ARRIVAL",
+            "trainId": train.train_id,
+            "dutyId": train.duty_id,
+            "serviceId": train.service_id,
+            "stationIndex": train.station_index,
+            "plannedTimeMs": planned_ms,
+            "actualTimeMs": sim_time_ms,
+            "deviationSec": train.schedule_deviation_sec,
+        })
+
+    def _handle_planned_terminal(self, train: SimTrainState, sim_time_ms: int) -> bool:
+        """Return True when the duty has returned to depot and must not turn again."""
+        if train.duty_id is None:
+            return False
+        duty = self._operation_duties[train.duty_id]
+        if train.service_id == duty.service_ids[-1]:
+            self.interlocking_runtime.release_train(train.train_id)
+            train.phase = IDLE
+            train.next_station_code = ""
+            train.next_station_name = ""
+            train.departure_authorized = False
+            train.active_route_ids = ()
+            self._set_lifecycle(train, "RETURN_REQUESTED", sim_time_ms)
+            return True
+
+        self._turn_train_at_terminal(train)
+        train.service_id = train.next_service_id
+        train.next_service_id = None
+        return_service = self._operation_services.get(train.service_id or "")
+        if return_service is not None:
+            train.planned_departure_ms = round(return_service.stops[0].planned_departure_s * 1000)
+            train.planned_arrival_ms = round(return_service.stops[-1].planned_arrival_s * 1000)
+            self.dispatch_runtime.assign_service(train.train_id, return_service)
+        self._set_lifecycle(train, "TURNBACK", sim_time_ms)
+        return False
+
+    def operation_plan_state(self) -> JsonDict:
+        return {
+            "enabled": self.scenario.operation_plan.enabled,
+            "timetables": [item.to_dict() for item in self._operation_timetables],
+            "services": [item.to_dict() for item in self._operation_services.values()],
+            "duties": [item.to_dict() for item in self._operation_duties.values()],
+            "recentEvents": list(self._operation_events[-100:]),
+        }
+
     def _build_snapshot(self) -> TickSnapshot:
+        self._snapshot_sequence += 1
         total_sec = self._absolute_sim_time_ms() // 1000
         h = (total_sec // 3600) % 24
         m = (total_sec % 3600) // 60
@@ -3448,6 +3810,13 @@ class SimulationEngine:
             sim_time_str=time_str,
             clock_state=self.clock.state.value,
             speed_multiplier=self._speed_multiplier,
+            session_id=self._session_id,
+            run_id=self._run_id,
+            snapshot_sequence=self._snapshot_sequence,
+            model_quality=(
+                str(self.power_service.network.quality)
+                if self.power_service.network is not None else "SIMULATED"
+            ),
             trains=[t.to_dict() for t in self.trains],
             stations=[
                 s
@@ -3459,6 +3828,7 @@ class SimulationEngine:
             dispatch_decisions=[self._dispatch_snapshot(item) for item in self._last_dispatch_decisions],
             dispatch_runtime=self.dispatch_runtime.snapshot(),
             interlocking=self.interlocking_runtime.snapshot(),
+            operations=self.operation_plan_state(),
             kpi=dict({
                 "activeTrains": len(active),
                 "totalTrains": len(self.trains),
@@ -3503,6 +3873,19 @@ class SimulationEngine:
                 "lineScopeId": self.line_scope.scope_id if self.line_scope is not None else None,
                 "lineScopeSegmentCount": len(self.line_scope.segment_ids) if self.line_scope is not None else 0,
             }, **self.kpi_tracker.snapshot(self._absolute_sim_time_ms() / 1000.0).to_dict()),
+        )
+
+    def _persist_snapshot(self, snapshot: TickSnapshot | None) -> None:
+        if snapshot is None or self.recorder is None or self._run_id is None:
+            return
+        self.recorder.record_world_snapshot(
+            self._run_id,
+            sequence=snapshot.snapshot_sequence,
+            tick=snapshot.tick,
+            sim_time_ms=snapshot.sim_time_ms,
+            snapshot=snapshot.to_api_dict(
+                tick_interval_ms=round(self._tick_interval_seconds * 1000),
+            ),
         )
 
     # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?    #  鍒濆鍖栬緟鍔?    # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?

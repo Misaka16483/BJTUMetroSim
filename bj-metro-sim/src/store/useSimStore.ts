@@ -19,6 +19,8 @@ import type {
 import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow' | 'memberCDemo';
+export type DataMode = 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
+export type SnapshotUpdateResult = 'accepted' | 'stale' | 'gap';
 
 /**
  * 从 Amap 9号线数据中提取站名列表（去"站"后缀）。
@@ -48,6 +50,12 @@ interface SimState {
   linesLoading: boolean;
   linesError: string | null;
   backendStatus: 'idle' | 'connected' | 'fallback' | 'error';
+  dataMode: DataMode;
+  dataStale: boolean;
+  sessionId: string | null;
+  runId: number | null;
+  snapshotSequence: number;
+  snapshotGapCount: number;
   hiddenLines: Set<string>;
   line9Stations: string[];
   trackMap: TrackMapData | null;
@@ -152,7 +160,7 @@ interface SimState {
 
   // 后端仿真引擎
   engineClockState: string;
-  updateFromBackend: (data: SimStateResponse) => void;
+  updateFromBackend: (data: SimStateResponse, transport?: 'REST' | 'WS') => SnapshotUpdateResult;
   startBackendSim: () => Promise<void>;
   pauseBackendSim: () => Promise<void>;
   resumeBackendSim: () => Promise<void>;
@@ -190,6 +198,7 @@ interface SimState {
   setLinesLoading: (loading: boolean) => void;
   setLinesError: (error: string | null) => void;
   setBackendStatus: (status: 'idle' | 'connected' | 'fallback' | 'error') => void;
+  setDataMode: (mode: DataMode) => void;
   setTrackMap: (trackMap: TrackMapData | null) => void;
   setPowerTopology: (powerTopology: PowerTopology | null) => void;
   setViewMode: (viewMode: ViewMode) => void;
@@ -433,6 +442,12 @@ export const useSimStore = create<SimState>((set, get) => ({
   linesLoading: false,
   linesError: null,
   backendStatus: 'idle',
+  dataMode: 'DISCONNECTED',
+  dataStale: false,
+  sessionId: null,
+  runId: null,
+  snapshotSequence: 0,
+  snapshotGapCount: 0,
   hiddenLines: new Set<string>(),
   line9Stations: [],
   viewMode: 'macro' as ViewMode,
@@ -532,7 +547,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
   toggleRunning: () => {
     const state = get();
-    if (state.backendStatus === 'connected') {
+    if (state.dataMode !== 'DEMO') {
       // 后端模式: 不直接切换, 由 App 层的 useEffect 处理
       return;
     }
@@ -616,7 +631,22 @@ export const useSimStore = create<SimState>((set, get) => ({
   },
   setLinesLoading: (loading) => set({ linesLoading: loading }),
   setLinesError: (error) => set({ linesError: error, linesLoading: false }),
-  setBackendStatus: (status) => set({ backendStatus: status }),
+  setBackendStatus: (status) => set((state) => ({
+    backendStatus: status,
+    ...(status === 'connected' ? {} : {
+      dataMode: 'DISCONNECTED' as DataMode,
+      dataStale: state.snapshotSequence > 0,
+      isRunning: false,
+    }),
+  })),
+  setDataMode: (mode) => set((state) => {
+    if (mode === 'DEMO' && import.meta.env.VITE_ENABLE_DEMO_MODE !== 'true') return state;
+    return {
+      dataMode: mode,
+      dataStale: mode === 'DISCONNECTED' && state.snapshotSequence > 0,
+      isRunning: mode === 'DEMO' ? state.isRunning : mode === 'LIVE_SIM' ? state.isRunning : false,
+    };
+  }),
   setTrackMap: (trackMap) => set({ trackMap }),
   setPowerTopology: (powerTopology) => set({ powerTopology }),
   setViewMode: (viewMode) => set({ viewMode }),
@@ -645,8 +675,8 @@ export const useSimStore = create<SimState>((set, get) => ({
     const state = get();
     if (!state.isRunning) return;
 
-    // 后端模式下不跑本地 tick
-    if (state.backendStatus === 'connected') return;
+    // 本地推进只能由显式 DEMO 模式启用；断线状态必须冻结最后快照。
+    if (state.dataMode !== 'DEMO') return;
 
     const stations = state.line9Stations;
     if (stations.length === 0) return;
@@ -728,8 +758,9 @@ export const useSimStore = create<SimState>((set, get) => ({
     const targetDist = segDist - offsetInSegment;
 
     // KPI 平滑波动
-    const kpiWait = 100 + Math.floor(Math.random() * 80);
-    const kpiPunct = 96 + Math.random() * 3;
+    const kpiWave = (Math.sin(tickCount / 30) + 1) / 2;
+    const kpiWait = 100 + Math.floor(kpiWave * 80);
+    const kpiPunct = 96 + kpiWave * 3;
 
     // 当前区间进度 0~1
     const segProgress = segDist > 0 ? offsetInSegment / segDist : 0;
@@ -767,9 +798,9 @@ export const useSimStore = create<SimState>((set, get) => ({
       // KPI
       punctuality: Math.round(kpiPunct * 10) / 10,
       avgWaitTime: kpiWait,
-      avgLoadRate: 60 + Math.floor(Math.random() * 30),
-      totalPassengers: state.totalPassengers + Math.floor(Math.random() * 100),
-      totalBoarded: state.totalBoarded + Math.floor(Math.random() * 60),
+      avgLoadRate: 60 + Math.floor(kpiWave * 30),
+      totalPassengers: state.totalPassengers + Math.floor(kpiWave * 100),
+      totalBoarded: state.totalBoarded + Math.floor(kpiWave * 60),
     });
   },
 
@@ -777,12 +808,22 @@ export const useSimStore = create<SimState>((set, get) => ({
   //  后端仿真引擎
   // ═══════════════════════════════════════════════════
 
-  updateFromBackend: (data: SimStateResponse) => {
+  updateFromBackend: (data: SimStateResponse, transport = 'REST') => {
     const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions } = data;
     const state = get();
+    const sameStream = state.sessionId === data.sessionId && state.runId === data.runId;
+    if (sameStream && data.snapshotSequence <= state.snapshotSequence) return 'stale';
+    const hasGap = sameStream
+      && state.snapshotSequence > 0
+      && data.snapshotSequence > state.snapshotSequence + 1;
+    if (hasGap && transport === 'WS') {
+      set({ snapshotGapCount: state.snapshotGapCount + 1 });
+      return 'gap';
+    }
+    const streamChanged = state.sessionId !== null && !sameStream;
     // A GET started before POST /start may arrive later with a stale LOADED or
     // STOPPED snapshot. Do not let it overwrite the acknowledged start state.
-    if (awaitingRunConfirmation && clock.state !== 'RUNNING') return;
+    if (awaitingRunConfirmation && clock.state !== 'RUNNING') return 'stale';
     if (clock.state === 'RUNNING') awaitingRunConfirmation = false;
     const isEngineRunning = clock.state === 'RUNNING';
 
@@ -794,6 +835,13 @@ export const useSimStore = create<SimState>((set, get) => ({
     const selTrain = selId ? trains.find((t) => t.trainId === selId) : null;
 
     set({
+      backendStatus: 'connected',
+      dataMode: data.dataMode,
+      dataStale: false,
+      sessionId: data.sessionId,
+      runId: data.runId,
+      snapshotSequence: data.snapshotSequence,
+      snapshotGapCount: hasGap ? state.snapshotGapCount + 1 : state.snapshotGapCount,
       engineClockState: clock.state,
       isRunning: isEngineRunning,
       speed: clock.speedMultiplier ?? state.speed,
@@ -814,6 +862,17 @@ export const useSimStore = create<SimState>((set, get) => ({
       totalWastedRegenKw: kpi.totalWastedRegenKw ?? 0,
       powerLossesKw: kpi.powerLossesKw ?? 0,
       lastDispatchAction: kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
+      ...(streamChanged ? {
+        speedHistory: [],
+        speedTimeHistory: [],
+        speedProfile: [],
+        speedProfileMeta: null,
+        speedHistoryByTrain: {},
+        speedTimeHistoryByTrain: {},
+        speedRunsByTrain: {},
+        activeSpeedRunIdByTrain: {},
+        viewedSpeedRunIdByTrain: {},
+      } : {}),
     });
 
     // 为新出现的列车自动分配颜色
@@ -866,7 +925,7 @@ export const useSimStore = create<SimState>((set, get) => ({
 
     // 速度曲线档案 — 每次轮询采集全部列车，并按站间运行分段。
     // 这样切换车辆不会中断采样，也不会把上一站末点与下一站首点连起来。
-    if (isEngineRunning || clock.state === 'PAUSED') {
+    if (data.dataMode === 'LIVE_SIM' && (isEngineRunning || clock.state === 'PAUSED')) {
       const curState = get();
       const nextRuns = { ...curState.speedRunsByTrain };
       const nextActiveIds = { ...curState.activeSpeedRunIdByTrain };
@@ -950,6 +1009,7 @@ export const useSimStore = create<SimState>((set, get) => ({
         speedProfileMeta: selectedRun?.profileMeta ?? null,
       });
     }
+    return 'accepted';
   },
 
   startBackendSim: async () => {

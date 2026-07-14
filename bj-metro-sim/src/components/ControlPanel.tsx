@@ -27,17 +27,16 @@ export default function ControlPanel() {
   const {
     isRunning, toggleRunning, speed, setSpeed,
     simTime, showOnlyLines, showAllLines, tick,
-    backendStatus, engineClockState,
+    backendStatus, engineClockState, dataMode,
     startBackendSim, pauseBackendSim, resumeBackendSim, stopBackendSim,
   } = useSimStore();
 
   useEffect(() => {
-    // 后端模式下不跑本地 tick（由 App 层轮询后端）
-    if (backendStatus === 'connected') return;
+    if (dataMode !== 'DEMO') return;
     if (!isRunning) return;
     const interval = setInterval(tick, 100);
     return () => clearInterval(interval);
-  }, [isRunning, tick, backendStatus]);
+  }, [isRunning, tick, dataMode]);
 
   useEffect(() => {
     if (!starting && !stopping) return;
