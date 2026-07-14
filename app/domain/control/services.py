@@ -286,7 +286,44 @@ class ATOController:
         target_position_m = self._target_position_m(target)
         remaining_distance_m = max(0.0, target_position_m - state.position_m)
         lookahead_m = min(self.config.profile_lookahead_m, remaining_distance_m * 0.35)
-        return min(target_position_m, state.position_m + lookahead_m)
+        nominal_position_m = min(target_position_m, state.position_m + lookahead_m)
+        profile = self._profile_cache
+        if profile is None or state.speed_mps <= 0.0:
+            return nominal_position_m
+
+        # Positive timing bias delays the corresponding DCDP phase transition
+        # by looking behind the nominal profile position; negative bias looks
+        # ahead and advances it. Brake transition has priority so an early
+        # brake request cannot be hidden by an overlapping traction bias.
+        reference_speed_mps = max(state.speed_mps, 1.0)
+        traction_position_m = min(
+            target_position_m,
+            max(
+                0.0,
+                nominal_position_m
+                - self.config.profile_traction_timing_bias_s * reference_speed_mps,
+            ),
+        )
+        brake_position_m = min(
+            target_position_m,
+            max(
+                0.0,
+                nominal_position_m
+                - self.config.profile_brake_timing_bias_s * reference_speed_mps,
+            ),
+        )
+        nominal_mode = profile.mode_at_position(nominal_position_m)
+        brake_mode = profile.mode_at_position(brake_position_m)
+        if self._is_profile_brake_mode(nominal_mode) or self._is_profile_brake_mode(brake_mode):
+            return brake_position_m
+        traction_mode = profile.mode_at_position(traction_position_m)
+        if nominal_mode == "MAX_TRACTION" or traction_mode == "MAX_TRACTION":
+            return traction_position_m
+        return nominal_position_m
+
+    @staticmethod
+    def _is_profile_brake_mode(mode: str) -> bool:
+        return mode == "MAX_BRAKE" or mode.startswith("BRAKE_")
 
     def _apply_profile_feedforward(
         self,

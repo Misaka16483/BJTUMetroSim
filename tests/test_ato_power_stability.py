@@ -6,6 +6,8 @@ from app.domain.control import (
     ATOController,
     AtoConfig,
     AtoTarget,
+    OptimizedSpeedProfile,
+    SpeedProfilePoint,
     estimate_scheduled_run_time_s,
     optimize_speed_profile_dcdp,
 )
@@ -21,6 +23,48 @@ def _command_group(point: object) -> str:
 
 
 class AtoPowerStabilityTests(unittest.TestCase):
+    @staticmethod
+    def _phase_test_profile() -> OptimizedSpeedProfile:
+        return OptimizedSpeedProfile(
+            points=(
+                SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0),
+                SpeedProfilePoint(5.0, 50.0, 10.0, "MAX_TRACTION", 100.0, 0.0, 1.0),
+                SpeedProfilePoint(7.0, 70.0, 10.0, "COAST", 0.0, 0.0, 1.0),
+                SpeedProfilePoint(9.0, 90.0, 5.0, "BRAKE_40", 0.0, 40.0, 1.0),
+                SpeedProfilePoint(10.0, 100.0, 0.0, "STOP", 0.0, 0.0, 1.0),
+            ),
+            target_position_m=100.0,
+            permitted_speed_mps=12.0,
+            scheduled_run_time_s=10.0,
+            terminal_score=0.0,
+        )
+
+    def test_profile_timing_bias_moves_real_phase_lookup(self) -> None:
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+
+        traction = ATOController(AtoConfig(
+            profile_lookahead_m=0.0,
+            profile_traction_timing_bias_s=1.0,
+        ))
+        traction._profile_cache = self._phase_test_profile()
+        traction_position = traction._profile_lookup_position_m(
+            TrainState("T1", position_m=55.0, speed_mps=10.0),
+            target,
+        )
+
+        braking = ATOController(AtoConfig(
+            profile_lookahead_m=0.0,
+            profile_brake_timing_bias_s=-2.0,
+        ))
+        braking._profile_cache = self._phase_test_profile()
+        brake_position = braking._profile_lookup_position_m(
+            TrainState("T1", position_m=60.0, speed_mps=10.0),
+            target,
+        )
+
+        self.assertEqual(traction_position, 45.0)
+        self.assertEqual(brake_position, 80.0)
+
     def test_dcdp_profile_has_no_direct_traction_brake_chatter(self) -> None:
         scheduled_time_s = estimate_scheduled_run_time_s(
             target_position_m=200.0,

@@ -95,6 +95,8 @@ class AtoConfig:
     profile_position_step_m: float = 5.0
     profile_speed_step_mps: float = 0.5
     profile_lookahead_m: float = 5.0
+    profile_traction_timing_bias_s: float = 0.0
+    profile_brake_timing_bias_s: float = 0.0
     profile_max_states_per_stage: int = 1800
 
     def __post_init__(self) -> None:
@@ -172,6 +174,10 @@ class AtoConfig:
             raise ValueError("profile_speed_step_mps must be positive")
         if self.profile_lookahead_m < 0:
             raise ValueError("profile_lookahead_m must be non-negative")
+        if abs(self.profile_traction_timing_bias_s) > 5.0:
+            raise ValueError("profile_traction_timing_bias_s must be within +/- 5 seconds")
+        if abs(self.profile_brake_timing_bias_s) > 5.0:
+            raise ValueError("profile_brake_timing_bias_s must be within +/- 5 seconds")
         if self.profile_max_states_per_stage <= 0:
             raise ValueError("profile_max_states_per_stage must be positive")
 

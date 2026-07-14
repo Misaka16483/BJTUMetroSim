@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +59,49 @@ LIVE_STORAGE_VARIABLE_BOUNDS = {
     "storageDischargeLimitKw": (0.0, 2000.0),
     "storageTriggerKw": (0.0, 2500.0),
 }
+
+
+def configure_engine_timing_candidate(
+    engine: SimulationEngine,
+    candidate: Mapping[str, float] | None,
+) -> dict[str, Any]:
+    """Apply experiment timing variables before the operation plan is built."""
+    values = dict(candidate or {})
+    departure_spread_sec = float(values.get("departureSpreadSec", 0.0))
+    traction_timing_sec = float(values.get("tractionTimingSec", 0.0))
+    brake_timing_sec = float(values.get("brakeTimingSec", 0.0))
+    if not 0.0 <= departure_spread_sec <= 30.0:
+        raise ValueError("departureSpreadSec must be within [0, 30]")
+    if abs(traction_timing_sec) > 5.0 or abs(brake_timing_sec) > 5.0:
+        raise ValueError("tractionTimingSec and brakeTimingSec must be within +/- 5")
+
+    engine._ato_config = replace(
+        engine._ato_config,
+        profile_traction_timing_bias_s=traction_timing_sec,
+        profile_brake_timing_bias_s=brake_timing_sec,
+    )
+    headway = engine.timetable_service.headway_config
+    adjusted_periods = {
+        name: float(seconds) + departure_spread_sec
+        for name, seconds in headway.period_headway_sec.items()
+    }
+    engine.timetable_service.headway_config = replace(
+        headway,
+        period_headway_sec=adjusted_periods,
+    )
+    return {
+        "candidate": {
+            "departureSpreadSec": departure_spread_sec,
+            "tractionTimingSec": traction_timing_sec,
+            "brakeTimingSec": brake_timing_sec,
+        },
+        "semantics": {
+            "departureSpreadSec": "ADDED_TO_PERIOD_HEADWAY",
+            "tractionTimingSec": "DCDP_TRACTION_PHASE_DELAY_POSITIVE",
+            "brakeTimingSec": "DCDP_BRAKE_PHASE_DELAY_POSITIVE",
+        },
+        "periodHeadwaySec": adjusted_periods,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -227,6 +270,7 @@ def capture_timetable_trajectory(
     capture_seconds: int,
     tick_seconds: float,
     wall_timeout_sec: float,
+    timing_candidate: Mapping[str, float] | None = None,
 ) -> tuple[list[TrajectoryFrame], dict[str, Any]]:
     engine = SimulationEngine.load_from_files(
         scenario_path=scenario_path,
@@ -244,6 +288,7 @@ def capture_timetable_trajectory(
     )
     engine.clock.tick_seconds = engine.scenario.tick_seconds
     engine._snapshot_interval_ticks = 1
+    timing_control = configure_engine_timing_candidate(engine, timing_candidate)
 
     frames: list[TrajectoryFrame] = []
     captured_snapshots: list[Any] = []
@@ -345,6 +390,7 @@ def capture_timetable_trajectory(
             "profileWarmup": final_state["profileWarmup"],
             "coverage": coverage,
             "controlQuality": control_quality,
+            "timingControl": timing_control,
         }
         return frames, metadata
     finally:
