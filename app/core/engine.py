@@ -45,6 +45,7 @@ from app.domain.station.services import (
     TrainLoadState,
 )
 from app.domain.vehicle.models import ControlCommand, TrainState, VehicleConfig, CommandSource
+from app.domain.vehicle.doors import DoorSide, TrainDoorSystem
 from app.domain.vehicle.services import (
     BrakeBlendService,
     SimpleVehicleModel,
@@ -88,6 +89,9 @@ class SimTrainState:
     door_notice: str = "CLOSED"
     door_permission: str = "SIMULATED_GRANTED"
     door_transition_remaining_sec: float = 0.0
+    # Per-door state is authoritative. Legacy door_* fields remain as an
+    # aggregate compatibility contract for existing passenger and UI code.
+    door_system: TrainDoorSystem = field(default_factory=TrainDoorSystem.line9_default)
     last_boarding: int = 0
     last_alighting: int = 0
     current_boarding_rate_pax_per_sec: float = 0.0
@@ -169,6 +173,10 @@ class SimTrainState:
     # 鈹€鈹€ 鎵嬪姩椹鹃┒ per-train 鎸囦护 鈹€鈹€
     _manual_command: ControlCommand | None = field(default=None, repr=False, compare=False)
     _passenger_service_pending: bool = field(default=False, repr=False, compare=False)
+    # Path planning may clear current_platform_id before a terminal turnback
+    # starts. Keep the physical door-stop platform until the train actually
+    # departs so door permission is independent from route planning state.
+    _door_stop_platform_id: int | None = field(default=None, repr=False, compare=False)
     _planned_alighting_total: int = field(default=0, repr=False, compare=False)
     _boarding_credit_pax: float = field(default=0.0, repr=False, compare=False)
     _passenger_stop_started_ms: int | None = field(default=None, repr=False, compare=False)
@@ -195,6 +203,7 @@ class SimTrainState:
             "doorNotice": self.door_notice,
             "doorPermission": self.door_permission,
             "doorTransitionRemainingSec": round(self.door_transition_remaining_sec, 1),
+            "doorSystem": self.door_system.to_dict(),
             "lastBoarding": self.last_boarding,
             "lastAlighting": self.last_alighting,
             "currentBoardingRatePaxPerSec": round(self.current_boarding_rate_pax_per_sec, 2),
@@ -484,6 +493,7 @@ class SimulationEngine:
         for train in self.trains:
             if train.train_id == train_id:
                 train.operation_mode = "MANUAL" if enabled else "ATO"
+                train.door_system.control_mode = train.operation_mode
                 if not enabled:
                     train._manual_command = None
                 self._manual_mode_by_train[train_id] = enabled
@@ -518,6 +528,80 @@ class SimulationEngine:
                     "emergencyBrake": train._manual_command.emergency_brake,
                 }
         return {"ok": False, "error": "TRAIN_NOT_FOUND"}
+
+    def set_door_command(
+        self,
+        train_id: str,
+        action: str,
+        side: str = "NONE",
+        source: str = "FRONTEND",
+    ) -> JsonDict:
+        """Apply an external CM/PLC door command through the vehicle interlock."""
+        train = next((item for item in self.trains if item.train_id == train_id), None)
+        if train is None:
+            return {"ok": False, "error": "TRAIN_NOT_FOUND"}
+        action = str(action).upper()
+        source = str(source).upper()
+        if action == "CLOSE":
+            accepted = train.door_system.request_close(source)
+        else:
+            if action != "OPEN":
+                return {"ok": False, "error": "INVALID_DOOR_ACTION"}
+            if train.operation_mode != "MANUAL":
+                return {"ok": False, "error": "DOOR_MANUAL_COMMAND_REQUIRES_CM"}
+            door_platform_id = train._door_stop_platform_id or train.current_platform_id
+            if train.phase != DWELLING or train.speed_mps > 0.05 or door_platform_id is None:
+                return {"ok": False, "error": "DOOR_OPEN_REQUIRES_PLATFORM_STOP"}
+            try:
+                requested_side = DoorSide(str(side).upper())
+            except ValueError:
+                return {"ok": False, "error": "INVALID_DOOR_SIDE"}
+            accepted = train.door_system.request_open(requested_side, source)
+        self._sync_legacy_door_state(train)
+        self._snapshot = self._build_snapshot()
+        if not accepted:
+            return {
+                "ok": False,
+                "error": train.door_system.last_rejection_reason or "DOOR_COMMAND_REJECTED",
+                "train": train.to_dict(),
+            }
+        return {
+            "ok": True,
+            "trainId": train_id,
+            "doorSystem": train.door_system.to_dict(),
+            "train": train.to_dict(),
+        }
+
+    @staticmethod
+    def _sync_legacy_door_state(train: SimTrainState) -> None:
+        """Keep the pre-door-model aggregate fields stable for old consumers."""
+        doors = train.door_system
+        train.door_state = doors.aggregate_state
+        train.door_transition_remaining_sec = doors.transition_remaining_sec
+        shown_side = doors.active_side if doors.active_side != DoorSide.NONE else doors.permitted_side
+        train.door_side = shown_side.value
+        if (
+            doors.aggregate_state in {"OPENING", "OPEN", "CLOSING"}
+            and train.door_notice not in {"PREPARE_CLOSE", "WAITING_MANUAL_CLOSE"}
+        ):
+            train.door_notice = doors.aggregate_state
+        elif doors.all_closed_and_locked and train.phase != DWELLING:
+            train.door_notice = "CLOSED"
+
+    @staticmethod
+    def _enforce_door_interlock(
+        train: SimTrainState,
+        command: ControlCommand,
+    ) -> ControlCommand:
+        if train.door_system.all_closed_and_locked:
+            return command
+        return ControlCommand(
+            train_id=train.train_id,
+            traction_percent=0.0,
+            brake_percent=max(20.0, command.brake_percent),
+            emergency_brake=command.emergency_brake,
+            source=command.source,
+        )
 
     def _make_vehicle_config(self, train_id: str, onboard_pax: int = 0) -> VehicleConfig:
         """Build a per-train configuration including the current passenger mass."""
@@ -558,6 +642,7 @@ class SimulationEngine:
                     train_id=train_id,
                     traction_percent=mc.traction_percent,
                     brake_percent=mc.brake_percent,
+                    emergency_brake=mc.emergency_brake,
                     source=CommandSource.MANUAL,
                 )
         return ato_cmd
@@ -644,6 +729,10 @@ class SimulationEngine:
         train.operation_mode = operation_mode
         if operation_mode == "MANUAL":
             self._manual_mode_by_train[train_id] = True
+        # Make the physical platform stop authoritative immediately. Otherwise
+        # a CM door command sent between add_train() and the first tick would
+        # see no permitted side even though the train is already at a platform.
+        self._begin_station_stop(train)
 
         # 如有用户车辆参数，应用之
         vehicle_data = payload.get("vehicleConfig")
@@ -1558,24 +1647,37 @@ class SimulationEngine:
             train.local_speed_limit_mps = path_plan.speed_limit_at(0.0, train.permitted_speed_mps)
             if not train._profile_triggered:
                 train._profile_triggered = self._prime_path_profile(train, path_plan)
+            # Door state advances on simulation time, independently from UI or
+            # hardware polling. Passenger dwell starts only after doors prove open.
+            train.door_system.control_mode = train.operation_mode
+            if (
+                train._passenger_service_pending
+                and train._door_stop_platform_id is None
+                and train.current_platform_id is not None
+            ):
+                train._door_stop_platform_id = train.current_platform_id
+            permitted_side = (
+                self._door_side_for(train.direction)
+                if train._door_stop_platform_id is not None
+                else DoorSide.NONE
+            )
+            train.door_system.set_permission(permitted_side)
+            train.door_system.advance(dt)
+            self._sync_legacy_door_state(train)
             if train._passenger_service_pending:
-                train.door_transition_remaining_sec = max(0.0, train.door_transition_remaining_sec - dt)
-                if train.door_transition_remaining_sec > 0:
+                if train.operation_mode == "ATO" and train.door_system.all_closed_and_locked:
+                    train.door_system.request_open(train.door_system.permitted_side, "ATO")
+                    self._sync_legacy_door_state(train)
+                elif train.operation_mode == "MANUAL" and train.door_system.all_closed_and_locked:
+                    train.door_notice = "WAITING_MANUAL_OPEN"
+                if train.door_system.aggregate_state != "OPEN":
                     return True, None
-                train.door_state = "OPEN"
-                train.door_notice = "OPEN"
                 self._process_station_stop(train, sim_time_ms)
                 train._passenger_service_pending = False
+                self._sync_legacy_door_state(train)
                 return True, None
-            if train.door_state == "CLOSING":
-                train.door_transition_remaining_sec = max(0.0, train.door_transition_remaining_sec - dt)
-                if train.door_transition_remaining_sec > 0:
-                    return True, None
-                train.door_state = "CLOSED"
-                train.door_notice = "CLOSED"
-                train.door_side = "NONE"
             if train.dwell_remaining_sec > 0:
-                if train.door_state == "OPEN":
+                if train.door_system.aggregate_state == "OPEN":
                     self._advance_open_door_passengers(train, sim_time_ms, dt)
                 train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - dt)
                 if 0 < train.dwell_remaining_sec <= 5.0:
@@ -1584,16 +1686,23 @@ class SimulationEngine:
                     self._record_completed_station_stop(train, sim_time_ms)
                     train.current_boarding_rate_pax_per_sec = 0.0
                     train.current_alighting_rate_pax_per_sec = 0.0
-                    train.door_state = "CLOSING"
-                    train.door_notice = "CLOSING"
-                    train.door_transition_remaining_sec = 1.0
+                    if train.operation_mode == "ATO":
+                        train.door_system.request_close("ATO")
+                    else:
+                        train.door_notice = "WAITING_MANUAL_CLOSE"
+                    self._sync_legacy_door_state(train)
                 return True, None
             train.dwell_remaining_sec = 0.0
-            if train.door_state != "CLOSED":
-                train.door_state = "CLOSING"
-                train.door_notice = "CLOSING"
-                train.door_transition_remaining_sec = 1.0
+            if not train.door_system.all_closed_and_locked:
+                if train.operation_mode == "ATO" and train.door_system.aggregate_state != "CLOSING":
+                    train.door_system.request_close("ATO")
+                    self._sync_legacy_door_state(train)
+                elif train.operation_mode == "MANUAL":
+                    train.door_notice = "WAITING_MANUAL_CLOSE"
                 return True, None
+            train.door_system.set_permission(DoorSide.NONE)
+            train._door_stop_platform_id = None
+            self._sync_legacy_door_state(train)
             train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
             train.phase = DEPARTING
 
@@ -1628,6 +1737,10 @@ class SimulationEngine:
                 position_m=path_position_m,
                 speed_mps=train.speed_mps,
             )
+        # Vehicle-side door interlock is the final authority for ATO and CM.
+        # An open, moving, obstructed or emergency-unlocked door removes
+        # traction regardless of the command source.
+        command = self._enforce_door_interlock(train, command)
         demand = TractionDriveModel(vehicle_config).demand(command, train.speed_mps)
         power_demand = TractionDriveModel(vehicle_config).electrical_power_demand(
             demand,
@@ -2374,6 +2487,7 @@ class SimulationEngine:
             train.door_state = "CLOSED"
             train.door_notice = "CLOSED"
             train.door_side = "NONE"
+            train._door_stop_platform_id = None
             train.current_platform_id = None
             train.departure_authorized = False
             train._profile_triggered = False
@@ -2971,10 +3085,11 @@ class SimulationEngine:
 
     def _begin_station_stop(self, train: SimTrainState) -> None:
         train.phase = DWELLING
-        train.door_state = "PREPARE_OPEN"
-        train.door_side = self._door_side_for(train.direction)
-        train.door_notice = "PREPARE_OPEN"
-        train.door_transition_remaining_sec = 1.0
+        train.door_system.control_mode = train.operation_mode
+        train._door_stop_platform_id = train.current_platform_id
+        train.door_system.set_permission(self._door_side_for(train.direction))
+        train.door_notice = "PREPARE_OPEN" if train.operation_mode == "ATO" else "WAITING_MANUAL_OPEN"
+        self._sync_legacy_door_state(train)
         train.dwell_remaining_sec = 0.0
         train._passenger_service_pending = True
 

@@ -16,7 +16,7 @@ import type {
   AddTrainPayload,
   DriverCabHardwareStatus,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow' | 'memberCDemo';
 
@@ -116,6 +116,7 @@ interface SimState {
   pathPositionM: number;
   pathTotalLengthM: number;
   currentSegmentId: number | null;
+  currentSegmentOffsetM: number;
   localSpeedLimitMps: number;
   gradeRatio: number;
   pathSegmentCount: number;
@@ -177,6 +178,7 @@ interface SimState {
   manualBrake: number;
   setManualMode: (enabled: boolean, trainId?: string) => Promise<void>;
   sendManualCommand: (traction: number, brake: number) => void;
+  sendDoorCommand: (action: 'OPEN' | 'CLOSE', side?: 'LEFT' | 'RIGHT' | 'NONE') => Promise<boolean>;
   _lastManualSend: number;
 
   // 司机台硬件状态 (PLC)
@@ -379,6 +381,7 @@ function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimSto
     stationIndex: t.stationIndex,
     segmentProgress: t.segmentProgress,
     driveMode: t.phase === 'DWELLING' ? 'CM' : manualMode ? 'RM' : 'AM',
+    manualMode,
     tractionPercent: t.tractionPercent ?? 0,
     brakePercent: t.brakePercent ?? 0,
     energyKwh: t.energyKwh ?? 0,
@@ -391,6 +394,7 @@ function _applyTrainDetail(t: SimTrainState, state?: ReturnType<typeof useSimSto
     pathPositionM: t.pathPositionM ?? 0,
     pathTotalLengthM: t.pathTotalLengthM ?? 0,
     currentSegmentId: t.currentSegmentId ?? null,
+    currentSegmentOffsetM: t.currentSegmentOffsetM ?? 0,
     localSpeedLimitMps: t.localSpeedLimitMps ?? t.permittedSpeedMps,
     gradeRatio: t.gradeRatio ?? 0,
     pathSegmentCount: t.pathSegmentCount ?? 0,
@@ -483,6 +487,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   pathPositionM: 0,
   pathTotalLengthM: 0,
   currentSegmentId: null,
+  currentSegmentOffsetM: 0,
   localSpeedLimitMps: 22.22,
   gradeRatio: 0,
   pathSegmentCount: 0,
@@ -825,9 +830,12 @@ export const useSimStore = create<SimState>((set, get) => ({
     }
     if (changed) set({ trainColors: newColors });
 
-    if (selTrain && (isEngineRunning || clock.state === 'PAUSED')) {
+    if (selTrain) {
+      // LOADED snapshots are already authoritative for a newly placed train.
+      // Applying details only after RUNNING left SEG, offset and CM mode stale
+      // on the first frame of both the driver and topology workflows.
       const sel = _applyTrainDetail(selTrain, get());
-      set({ ...sel, manualMode: selTrain.operationMode === 'MANUAL' });
+      set({ ...sel });
     }
 
     // 全部列车地图位置
@@ -1090,6 +1098,43 @@ export const useSimStore = create<SimState>((set, get) => ({
     if (enabled) next.add(id);
     else next.delete(id);
     set({ manualMode: enabled, manualTrainIds: next, manualTraction: 0, manualBrake: 0 });
+  },
+
+  sendDoorCommand: async (action, side = 'NONE') => {
+    const id = get().selectedTrainId;
+    if (!id) return false;
+    try {
+      const response = await simSendDoorCommand(id, action, side);
+      if (response.ok && (response.train || response.doorSystem)) {
+        set((state) => {
+          const current = state.trains.find((train) => train.trainId === id);
+          const updated = response.train ?? (
+            current && response.doorSystem
+              ? {
+                  ...current,
+                  doorSystem: response.doorSystem,
+                  doorState: response.doorSystem.aggregateState,
+                  doorSide: response.doorSystem.activeSide !== 'NONE'
+                    ? response.doorSystem.activeSide
+                    : response.doorSystem.permittedSide,
+                  doorTransitionRemainingSec: response.doorSystem.transitionRemainingSec,
+                }
+              : null
+          );
+          if (!updated) return {};
+          const trains = state.trains.map((train) => (
+            train.trainId === id ? updated : train
+          ));
+          const selected = updated.trainId === state.selectedTrainId
+            ? _applyTrainDetail(updated, state)
+            : {};
+          return { trains, ...selected };
+        });
+      }
+      return response.ok;
+    } catch {
+      return false;
+    }
   },
 
   sendManualCommand: (traction, brake) => {

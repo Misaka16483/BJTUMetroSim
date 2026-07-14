@@ -98,8 +98,8 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
     energyKwh, tractionEnergyKwh, regenGeneratedKwh, regenAcceptedKwh, regenWastedKwh,
     targetSpeedMps, permittedSpeedMps, speedProfile, speedProfileMeta, speedHistory,
     speedTimeHistory, estimatedRunTimeS, pathPositionM, pathTotalLengthM,
-    currentSegmentId, localSpeedLimitMps, gradeRatio,
-    manualMode, setManualMode,
+    currentSegmentId, currentSegmentOffsetM, localSpeedLimitMps, gradeRatio,
+    manualMode, setManualMode, sendDoorCommand,
     selectedTrainId, trains, selectTrain, trainColors,
     speedRunsByTrain, activeSpeedRunIdByTrain, viewedSpeedRunIdByTrain, selectSpeedRun,
     cabStatus, fetchCabStatus,
@@ -129,6 +129,8 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
   // 改用仿真引擎回传的 ATO 牵引/制动输出。
   const displayTraction = plcCommand ? plcCommand.tractionPercent : tractionPercent;
   const displayBrake = plcCommand ? plcCommand.brakePercent : brakePercent;
+  const selectedTrain = trains.find((train) => train.trainId === selectedTrainId);
+  const doorSystem = selectedTrain?.doorSystem;
 
   const trainRuns = selectedTrainId ? (speedRunsByTrain[selectedTrainId] ?? []) : [];
   const activeRunId = selectedTrainId ? activeSpeedRunIdByTrain[selectedTrainId] : undefined;
@@ -242,11 +244,19 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
           <div className="px-4 py-3">
             <CabPIS stations={line9Stations} currentIdx={stationIndex} direction={runDirection} color={color} />
           </div>
+          {doorSystem && (
+            <TrainDoorPanel
+              doorSystem={doorSystem}
+              manualMode={manualMode}
+              controlsDisabled={plcControlsSelectedTrain}
+              onCommand={sendDoorCommand}
+            />
+          )}
         </div>
 
         {/* 右列：控制面板 */}
-        <div className="flex flex-col justify-between py-4 px-4"
-          style={{ width: 200, borderLeft: '1px solid rgba(255,255,255,0.08)', gap: 20 }}>
+        <div className="flex flex-col justify-between py-4 px-4 min-h-0 overflow-y-auto"
+          style={{ width: 200, borderLeft: '1px solid rgba(255,255,255,0.08)', gap: 12, scrollbarWidth: 'thin' }}>
           <div className="flex flex-col items-center py-3 px-4 rounded"
             style={{ border: '1px solid rgba(255,255,255,0.04)', background: 'rgba(255,255,255,0.015)' }}>
             <span className="text-[7px] font-semibold uppercase tracking-[0.18em] text-[#6b7280] mb-1.5">SIM TIME</span>
@@ -323,6 +333,7 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
             <InfoRow label="TARGET" value={`${Math.round(targetSpeedMps * 3.6)} km/h`} color="#8FC31F" />
             <InfoRow label="PATH" value={`${pathPositionM.toFixed(0)}/${pathTotalLengthM.toFixed(0)} m`} color="#94a3b8" />
             <InfoRow label="SEG" value={currentSegmentId === null ? '--' : String(currentSegmentId)} color="#cbd5e1" />
+            <InfoRow label="OFFSET" value={currentSegmentId === null ? '--' : currentSegmentOffsetM.toFixed(1) + ' m'} color="#cbd5e1" />
             <InfoRow label="GRADE" value={`${(gradeRatio * 10000).toFixed(1)}/10000`} color="#c084fc" />
           </div>
 
@@ -339,6 +350,80 @@ function ActiveCab({ line9 }: { line9: MetroLineData }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function TrainDoorPanel({
+  doorSystem,
+  manualMode,
+  controlsDisabled,
+  onCommand,
+}: {
+  doorSystem: NonNullable<import('../data/backendApi').SimTrainState['doorSystem']>;
+  manualMode: boolean;
+  controlsDisabled: boolean;
+  onCommand: (action: 'OPEN' | 'CLOSE', side?: 'LEFT' | 'RIGHT' | 'NONE') => Promise<boolean>;
+}) {
+  const statusColor: Record<string, string> = {
+    CLOSED_LOCKED: '#22c55e',
+    OPENING: '#f59e0b',
+    OPEN: '#ef4444',
+    CLOSING: '#f59e0b',
+    FAULT: '#dc2626',
+    OBSTRUCTED: '#fb7185',
+    ISOLATED: '#64748b',
+    EMERGENCY_UNLOCKED: '#c084fc',
+  };
+  const canControl = manualMode && !controlsDisabled;
+  const permittedText = {
+    LEFT: '左侧',
+    RIGHT: '右侧',
+    BOTH: '双侧',
+    NONE: '无',
+  }[doorSystem.permittedSide];
+
+  return (
+    <div className="mx-4 mb-4 px-4 py-3 rounded" style={{ border: '1px solid rgba(255,255,255,0.07)', background: 'rgba(255,255,255,0.02)' }}>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <div className="text-[9px] font-semibold text-[#cbd5e1]">列车车门 6×8</div>
+          <div className="text-[8px] mt-0.5" style={{ color: doorSystem.allClosedAndLocked ? '#22c55e' : '#f59e0b' }}>
+            {doorSystem.allClosedAndLocked ? '全部关闭锁闭' : '牵引联锁生效'} · 允许侧 {permittedText}
+          </div>
+        </div>
+        {canControl && (
+          <div className="flex gap-1.5">
+            <button type="button" title="打开左侧车门" onClick={() => void onCommand('OPEN', 'LEFT')} className="px-2 py-1 rounded text-[9px] text-[#e2e8f0]" style={{ border: '1px solid rgba(255,255,255,0.1)' }}>开左门</button>
+            <button type="button" title="关闭全部车门" onClick={() => void onCommand('CLOSE')} className="px-2 py-1 rounded text-[9px] text-[#e2e8f0]" style={{ border: '1px solid rgba(255,255,255,0.1)' }}>关门</button>
+            <button type="button" title="打开右侧车门" onClick={() => void onCommand('OPEN', 'RIGHT')} className="px-2 py-1 rounded text-[9px] text-[#e2e8f0]" style={{ border: '1px solid rgba(255,255,255,0.1)' }}>开右门</button>
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-x-5 gap-y-2">
+        {doorSystem.cars.map((car) => (
+          <div key={car.carIndex} className="flex items-center gap-2">
+            <span className="w-5 text-[8px] text-[#64748b]">{car.carIndex + 1}车</span>
+            <div className="grid grid-cols-8 gap-1 flex-1">
+              {car.doors.map((door) => (
+                <span
+                  key={door.doorIndex}
+                  title={(door.side === 'LEFT' ? '左' : '右') + '侧 ' + (door.doorIndex + 1) + '号门：' + door.status}
+                  className="block h-3 rounded-sm"
+                  style={{
+                    background: statusColor[door.status] ?? '#475569',
+                    opacity: door.status === 'CLOSED_LOCKED' ? 0.6 : 1,
+                    borderLeft: door.doorIndex === 4 ? '2px solid #111827' : undefined,
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      {doorSystem.lastRejectionReason && (
+        <div className="mt-2 text-[8px] text-[#fb7185]">门控拒绝：{doorSystem.lastRejectionReason}</div>
+      )}
     </div>
   );
 }

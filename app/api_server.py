@@ -1020,6 +1020,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(self._set_train_manual_mode())
             elif path == "/api/sim/train/manual-command":
                 self._send_json(self._send_train_manual_command())
+            elif path == "/api/sim/train/door-command":
+                self._send_json(self._send_train_door_command())
             elif path == "/api/sim/vehicle-config":
                 payload = self._read_json_body()
                 vcfg = self.engine.set_vehicle_config(payload)
@@ -1264,6 +1266,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "nextStation": train.get("nextStation"),
                 "nextStationCode": train.get("nextStationCode"),
                 "dwellRemainingSec": train.get("dwellRemainingSec", 0.0),
+                "operationMode": train.get("operationMode", "ATO"),
+                "doorState": train.get("doorState", "CLOSED"),
+                "doorSide": train.get("doorSide", "NONE"),
+                "doorNotice": train.get("doorNotice", "CLOSED"),
+                "doorSystem": train.get("doorSystem"),
                 "routeRetryAtMs": train.get("routeRetryAtMs"),
             })
         signals = [{**item, "aspect": aspect_by_signal.get(str(item.get("id")), "RED")} for item in static.get("signals", [])]
@@ -1546,6 +1553,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             train_id,
             float(payload.get("tractionPercent", 0)),
             float(payload.get("brakePercent", 0)),
+        )
+
+    def _send_train_door_command(self) -> JsonDict:
+        if self.engine is None:
+            return {"ok": False, "error": "ENGINE_NOT_INITIALIZED"}
+        payload = self._read_json_body()
+        train_id = str(payload.get("trainId", ""))
+        if not train_id:
+            return {"ok": False, "error": "MISSING_TRAIN_ID"}
+        return self.engine.set_door_command(
+            train_id,
+            str(payload.get("action", "")),
+            str(payload.get("side", "NONE")),
+            source="FRONTEND",
         )
 
     def _speed_profile(self) -> JsonDict:
