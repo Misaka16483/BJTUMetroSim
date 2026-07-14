@@ -1,0 +1,19 @@
+{
+  "lineId": "9",
+  "name": "9号线20车早高峰高密度压力测试",
+  "startTimeMs": 25200000,
+  "tickSeconds": 0.25,
+  "useDynamicProgrammingProfile": false,
+  "autoSpawnTrains": false,
+  "lineScopeFile": "line9_mainline_scope.json",
+  "operationPlan": {
+    "enabled": true,
+    "direction": "UP",
+    "startTimeMs": 25200000,
+    "endTimeMs": 27600000,
+    "maxDuties": 20,
+    "readyLeadSec": 30,
+    "turnbackLayoverSec": 45
+  },
+  "trains": []
+}

@@ -3256,6 +3256,13 @@ class SimulationEngine:
         requests: list[TrainPowerRequest] = []
         prepared_steps = prepared_steps or {}
         for train in self.trains:
+            # Operation-plan trainsets remain outside the simulated main-line
+            # traction network until a departure has actually been requested.
+            # Charging every depot train at the origin node makes a dense
+            # timetable look like twenty co-located 80 kW line loads and can
+            # stop the solver before the first service leaves the depot.
+            if train.lifecycle_state in {"IN_DEPOT", "READY", "RETURN_REQUESTED", "STORED"}:
+                continue
             prepared = prepared_steps.get(train.train_id)
             if prepared is not None:
                 traction_force_n = prepared.demand.traction_force_n
