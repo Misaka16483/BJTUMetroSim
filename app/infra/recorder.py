@@ -1375,6 +1375,39 @@ class RunRecorder:
         )
         self._commit_if_needed()
 
+    def list_reports(self, limit: int = 3) -> list[dict[str, Any]]:
+        """返回最近 N 次运行的报告摘要（按 run_id 倒序），不包含完整报告 JSON。"""
+        rows = self.connection.execute(
+            """
+            SELECT r.id, r.name, r.started_at,
+                   COALESCE(sr.generated_at, '') AS generated_at,
+                   COALESCE(sr.report_json, '{}') AS report_json
+            FROM runs r
+            LEFT JOIN sim_reports sr ON sr.run_id = r.id
+            ORDER BY r.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        results: list[dict[str, Any]] = []
+        for run_id, name, started_at, generated_at, report_json in rows:
+            try:
+                report = json.loads(report_json) if report_json else {}
+            except (json.JSONDecodeError, TypeError):
+                report = {}
+            summary = report.get("summary", {})
+            results.append({
+                "runId": run_id,
+                "scenarioName": name,
+                "startedAt": started_at,
+                "generatedAt": generated_at or None,
+                "durationStr": summary.get("durationStr", "—"),
+                "trainCount": summary.get("trainCount", 0),
+                "stationCount": summary.get("stationCount", 0),
+                "totalEvents": summary.get("totalEvents", 0),
+            })
+        return results
+
     def save_report(self, run_id: int, report: dict[str, Any]) -> None:
         """保存（或覆盖）一次运行的仿真报告。"""
         self.connection.execute(

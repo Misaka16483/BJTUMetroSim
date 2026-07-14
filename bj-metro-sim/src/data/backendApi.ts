@@ -1153,6 +1153,28 @@ export async function fetchSimReport(runId?: number): Promise<SimReportResponse>
   return response.json() as Promise<SimReportResponse>;
 }
 
+export interface SimReportSummary {
+  runId: number;
+  scenarioName: string;
+  startedAt: string;
+  generatedAt: string | null;
+  durationStr: string;
+  trainCount: number;
+  stationCount: number;
+  totalEvents: number;
+}
+
+export interface SimReportsResponse {
+  ok: boolean;
+  reports?: SimReportSummary[];
+  error?: string;
+}
+
+export async function fetchSimReports(): Promise<SimReportsResponse> {
+  const response = await fetch('/api/sim/reports');
+  return response.json() as Promise<SimReportsResponse>;
+}
+
 // ═══════════════════════════════════════════════════════════
 //  Vision 硬件 API
 // ═══════════════════════════════════════════════════════════

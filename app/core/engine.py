@@ -1332,6 +1332,12 @@ class SimulationEngine:
             return None
         return self.recorder.get_report(rid)
 
+    def list_reports(self, limit: int = 3) -> list[dict]:
+        """返回最近 N 次运行的报告摘要列表。"""
+        if self.recorder is None:
+            return []
+        return self.recorder.list_reports(limit)
+
     def snapshot(self) -> TickSnapshot | None:
         """绾跨▼瀹夊叏璇诲彇褰撳墠蹇収."""
         with self._lock:
