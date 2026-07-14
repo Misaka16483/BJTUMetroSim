@@ -229,7 +229,15 @@ def validate_trajectory_frames(
                         frame.sim_time_ms,
                         sample.train_id,
                     ))
-                if abs(sample.acceleration_mps2 - observed_acceleration) > 0.25:
+                stopped_at_reference = (
+                    sample.phase in {"DWELLING", "IDLE"}
+                    and previous.phase not in {"DWELLING", "IDLE"}
+                    and sample.speed_mps <= 0.05
+                )
+                if (
+                    not stopped_at_reference
+                    and abs(sample.acceleration_mps2 - observed_acceleration) > 0.25
+                ):
                     issues.append(TrajectoryIssue(
                         "ACCELERATION_MISMATCH",
                         f"recorded acceleration differs from the observed value by "
@@ -442,6 +450,14 @@ class EngineSnapshotTrajectoryAdapter:
             acceleration = 0.0
             if previous is not None and sim_time_ms > previous[0]:
                 acceleration = (speed_mps - previous[1]) / ((sim_time_ms - previous[0]) / 1000.0)
+            recorded_acceleration = _mapping_value(
+                train,
+                "accelerationMps2",
+                "acceleration_mps2",
+                default=None,
+            )
+            if recorded_acceleration is not None:
+                acceleration = float(recorded_acceleration)
             self._previous[train_id] = (sim_time_ms, speed_mps)
             permitted_speed = _mapping_value(
                 train,
@@ -467,11 +483,26 @@ class EngineSnapshotTrajectoryAdapter:
                 "resistance_force_n",
                 default=None,
             )
+            pantograph_mileages = tuple(float(value) for value in _mapping_value(
+                train,
+                "pantographMileagesM",
+                "pantograph_mileages_m",
+                default=(),
+            ))
+            electrical_mileage_m = (
+                sum(pantograph_mileages) / len(pantograph_mileages)
+                if pantograph_mileages
+                else float(_mapping_value(train, "headMileageM", "head_mileage_m", default=0.0))
+            )
             samples.append(TrainTrajectorySample(
                 sim_time_ms=sim_time_ms,
                 train_id=train_id,
                 direction=str(_mapping_value(train, "direction", "direction", default="")),
-                mileage_m=float(_mapping_value(train, "headMileageM", "head_mileage_m", default=0.0)),
+                # Power flow is solved at the collection point, not at the
+                # vehicle head. End-platform heads can legitimately extend
+                # beyond the electrical network boundary while pantographs
+                # remain clamped to the supplied line.
+                mileage_m=electrical_mileage_m,
                 speed_mps=speed_mps,
                 acceleration_mps2=acceleration,
                 mass_kg=float(_mapping_value(train, "massKg", "mass_kg", default=225_000.0)),
@@ -482,7 +513,12 @@ class EngineSnapshotTrajectoryAdapter:
                 traction_power_request_kw=float(_mapping_value(train, "tractionPowerRequestKw", "traction_power_request_kw", default=0.0)),
                 regen_power_available_kw=float(_mapping_value(train, "regenPowerAvailableKw", "regen_power_available_kw", default=0.0)),
                 permitted_speed_mps=effective_speed_limit,
-                grade_ratio=float(_mapping_value(train, "gradeRatio", "grade_ratio", default=0.0)),
+                grade_ratio=float(_mapping_value(
+                    train,
+                    "dynamicsGradeRatio",
+                    "applied_grade_ratio",
+                    default=_mapping_value(train, "gradeRatio", "grade_ratio", default=0.0),
+                )),
                 resistance_force_n=float(resistance_force) if resistance_force is not None else None,
                 phase=str(_mapping_value(train, "phase", "phase", default="UNKNOWN")),
                 current_station_code=str(_mapping_value(train, "currentStationCode", "current_station_code", default="")),

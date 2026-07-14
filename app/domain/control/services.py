@@ -432,6 +432,22 @@ class ATOController:
             brake = 0.0
             traction = max(0.0, previous_traction - traction_step)
 
+        # Outside the explicit creep-release sequence, do not let a small
+        # terminal brake command cross directly to zero at low speed. The next
+        # control sample may request braking again, which appears as a brief
+        # release/reapplication pulse in the force trace. Holding the existing
+        # hysteresis floor preserves the normal 18 %/s actuator release rate
+        # everywhere else and still permits a full release before creep.
+        if (
+            brake <= 0.0
+            and desired_brake <= 0.0
+            and previous_brake > 0.0
+            and self._terminal_braking_latched
+            and not creep_allowed
+            and state.speed_mps <= self.config.low_speed_brake_guard_speed_mps
+        ):
+            brake = min(previous_brake, self.config.brake_hysteresis_hold_percent)
+
         stabilized = ControlCommand(
             state.train_id,
             traction_percent=traction,

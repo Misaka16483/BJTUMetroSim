@@ -172,6 +172,42 @@ class AtoPowerStabilityTests(unittest.TestCase):
         self.assertGreaterEqual(command.brake_percent, controller.config.terminal_brake_floor_percent)
         self.assertEqual(command.traction_percent, 0.0)
 
+    def test_terminal_low_speed_brake_release_does_not_cross_zero_in_one_tick(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+        controller._terminal_braking_latched = True
+        controller._terminal_braking_target_position_m = 100.0
+        controller._last_command = ControlCommand(
+            "T1",
+            brake_percent=4.0,
+            source=CommandSource.ATO,
+        )
+        controller._last_command_sim_time_s = 0.0
+
+        releasing = controller._stabilize_command(
+            TrainState("T1", position_m=90.0, speed_mps=1.3, sim_time_s=0.25),
+            target,
+            ControlCommand.coast("T1", source=CommandSource.ATO),
+        )
+        reapplied = controller._stabilize_command(
+            TrainState("T1", position_m=90.3, speed_mps=1.28, sim_time_s=0.5),
+            target,
+            ControlCommand(
+                "T1",
+                brake_percent=8.0,
+                source=CommandSource.ATO,
+            ),
+        )
+
+        self.assertGreater(releasing.brake_percent, 0.0)
+        self.assertEqual(
+            releasing.brake_percent,
+            controller.config.brake_hysteresis_hold_percent,
+        )
+        self.assertEqual(releasing.traction_percent, 0.0)
+        self.assertGreater(reapplied.brake_percent, releasing.brake_percent)
+        self.assertEqual(reapplied.traction_percent, 0.0)
+
     def test_creep_waits_for_full_brake_release_and_neutral_dwell(self) -> None:
         controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
         target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)

@@ -80,6 +80,7 @@ class AtoConfig:
     traction_slew_rate_percent_per_s: float = 30.0
     brake_apply_slew_rate_percent_per_s: float = 40.0
     brake_release_slew_rate_percent_per_s: float = 18.0
+    low_speed_brake_guard_speed_mps: float = 2.0
     terminal_brake_guard_margin_m: float = 35.0
     terminal_brake_floor_percent: float = 8.0
     terminal_brake_floor_speed_mps: float = 1.0
@@ -143,6 +144,8 @@ class AtoConfig:
             raise ValueError("brake_apply_slew_rate_percent_per_s must be positive")
         if self.brake_release_slew_rate_percent_per_s <= 0:
             raise ValueError("brake_release_slew_rate_percent_per_s must be positive")
+        if self.low_speed_brake_guard_speed_mps <= self.creep_speed_threshold_mps:
+            raise ValueError("low_speed_brake_guard_speed_mps must exceed creep_speed_threshold_mps")
         if self.terminal_brake_guard_margin_m < 0:
             raise ValueError("terminal_brake_guard_margin_m must be non-negative")
         _require_percent(self.terminal_brake_floor_percent, "terminal_brake_floor_percent")

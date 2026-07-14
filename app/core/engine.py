@@ -131,9 +131,12 @@ class SimTrainState:
     current_segment_offset_m: float = 0.0
     local_speed_limit_mps: float = 22.22
     grade_ratio: float = 0.0
+    applied_grade_ratio: float = 0.0
     path_segment_count: int = 0
     path_constraint_count: int = 0
     mass_kg: float = 225_000.0
+    acceleration_mps2: float = 0.0
+    resistance_force_n: float = 0.0
     traction_force_n: float = 0.0
     electric_brake_force_n: float = 0.0
     pneumatic_brake_force_n: float = 0.0
@@ -249,9 +252,12 @@ class SimTrainState:
             "currentSegmentOffsetM": round(self.current_segment_offset_m, 1),
             "localSpeedLimitMps": round(self.local_speed_limit_mps, 2),
             "gradeRatio": round(self.grade_ratio, 7),
+            "dynamicsGradeRatio": round(self.applied_grade_ratio, 7),
             "pathSegmentCount": self.path_segment_count,
             "pathConstraintCount": self.path_constraint_count,
             "massKg": round(self.mass_kg, 1),
+            "accelerationMps2": round(self.acceleration_mps2, 6),
+            "resistanceForceN": round(self.resistance_force_n, 3),
             "tractionForceN": round(self.traction_force_n, 1),
             "electricBrakeForceN": round(self.electric_brake_force_n, 1),
             "pneumaticBrakeForceN": round(self.pneumatic_brake_force_n, 1),
@@ -1849,6 +1855,9 @@ class SimulationEngine:
             train.traction_percent = 0.0
             train.brake_percent = 0.0 if train.phase == IDLE else 20.0
             train.target_speed_mps = 0.0
+            train.acceleration_mps2 = 0.0
+            train.resistance_force_n = 0.0
+            train.applied_grade_ratio = 0.0
             train.traction_force_n = 0.0
             train.electric_brake_force_n = 0.0
             train.pneumatic_brake_force_n = 0.0
@@ -2012,6 +2021,11 @@ class SimulationEngine:
                 dt_s=self.clock.tick_seconds,
                 gradient_force_n=prepared.gradient_force_n,
             )
+            resistance_force_n = model.running_resistance_n(
+                prepared.state.speed_mps,
+                traction_force_n,
+                blend.total_brake_force_n,
+            )
 
             path_plan = prepared.path_plan
             new_position_m = min(max(0.0, result.position_m), path_plan.total_length_m)
@@ -2026,6 +2040,12 @@ class SimulationEngine:
             train.brake_percent = prepared.command.brake_percent
             train.target_speed_mps = self._ato_for_train(train.train_id).last_target_speed_mps
             train.mass_kg = prepared.vehicle_config.mass_kg
+            train.acceleration_mps2 = result.acceleration_mps2
+            train.resistance_force_n = resistance_force_n
+            train.applied_grade_ratio = (
+                prepared.gradient_force_n
+                / max(prepared.vehicle_config.mass_kg * 9.80665, 1.0)
+            )
             train.traction_force_n = traction_force_n
             train.electric_brake_force_n = blend.electric_brake_force_n
             train.pneumatic_brake_force_n = blend.pneumatic_brake_force_n
@@ -2075,6 +2095,9 @@ class SimulationEngine:
             print(f"[Engine] Prepared advancement failed for {train.train_id}: {exc}")
             train.traction_percent = 0.0
             train.brake_percent = 0.0
+            train.acceleration_mps2 = 0.0
+            train.resistance_force_n = 0.0
+            train.applied_grade_ratio = 0.0
             train.traction_force_n = 0.0
             train.electric_brake_force_n = 0.0
             train.pneumatic_brake_force_n = 0.0
@@ -2448,6 +2471,12 @@ class SimulationEngine:
         train.traction_percent = 0.0
         train.brake_percent = 20.0
         train.target_speed_mps = 0.0
+        train.acceleration_mps2 = 0.0
+        train.resistance_force_n = 0.0
+        train.applied_grade_ratio = 0.0
+        train.traction_force_n = 0.0
+        train.electric_brake_force_n = 0.0
+        train.pneumatic_brake_force_n = 0.0
         self._record_operation_arrival(train, sim_time_ms)
 
         # The station platform is the explicit end of the previous interval.

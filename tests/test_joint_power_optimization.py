@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.domain.power.joint_optimization import (
     BASELINE_CANDIDATE,
+    VARIABLE_BOUNDS,
     JointExperimentConfig,
     JointPowerEvaluator,
     Nsga2JointOptimizer,
@@ -115,6 +116,44 @@ class JointPowerOptimizationTests(unittest.TestCase):
         self.assertLessEqual(result["metrics"]["maxDynamicsResidualN"], 1e-6)
         self.assertLessEqual(result["metrics"]["maxTractionForceN"], self.evaluator.config.max_traction_force_n)
         self.assertLessEqual(result["metrics"]["maxBrakeForceN"], self.evaluator.config.max_service_brake_force_n)
+
+    def test_optimizer_honors_experiment_specific_storage_domain(self) -> None:
+        bounds = {
+            **VARIABLE_BOUNDS,
+            "storageChargeLimitKw": (0.0, 250.0),
+            "storageDischargeLimitKw": (0.0, 300.0),
+            "storageTriggerKw": (0.0, 1000.0),
+        }
+        baseline = {
+            **BASELINE_CANDIDATE,
+            "storageChargeLimitKw": 0.0,
+            "storageDischargeLimitKw": 0.0,
+            "storageTriggerKw": 500.0,
+        }
+        evaluator = JointPowerEvaluator(
+            TOPOLOGY,
+            JointExperimentConfig(
+                train_count=6,
+                horizon_sec=120,
+                time_step_sec=10.0,
+                max_terminal_soc_deviation=0.15,
+            ),
+            variable_bounds=bounds,
+            baseline_candidate=baseline,
+        )
+
+        result = Nsga2JointOptimizer(evaluator).run(
+            "STORAGE_ONLY",
+            seed=11,
+            population_size=4,
+            generations=1,
+        )
+
+        self.assertEqual(result["baseline"]["candidate"], baseline)
+        for trial in result["trials"]:
+            for name, (lower, upper) in bounds.items():
+                self.assertGreaterEqual(trial["candidate"][name], lower)
+                self.assertLessEqual(trial["candidate"][name], upper)
 
 
 if __name__ == "__main__":

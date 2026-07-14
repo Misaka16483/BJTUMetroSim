@@ -95,10 +95,18 @@ class JointExperimentConfig:
             raise ValueError("grid conversion efficiencies must be in (0, 1]")
 
 
-def normalize_candidate(candidate: JsonDict) -> JsonDict:
+def normalize_candidate(
+    candidate: JsonDict,
+    variable_bounds: dict[str, tuple[float, float]] | None = None,
+    baseline_candidate: JsonDict | None = None,
+) -> JsonDict:
+    bounds = variable_bounds or VARIABLE_BOUNDS
+    baseline = baseline_candidate or BASELINE_CANDIDATE
     normalized: JsonDict = {}
-    for name, (lower, upper) in VARIABLE_BOUNDS.items():
-        value = float(candidate.get(name, BASELINE_CANDIDATE[name]))
+    for name, (lower, upper) in bounds.items():
+        if lower > upper:
+            raise ValueError(f"invalid bounds for {name}: {lower} > {upper}")
+        value = float(candidate.get(name, baseline[name]))
         normalized[name] = round(min(upper, max(lower, value)), 6)
     return normalized
 
@@ -111,9 +119,19 @@ class JointPowerEvaluator:
         topology_path: str | Path,
         config: JointExperimentConfig | None = None,
         trajectory_provider: TrajectoryProvider | None = None,
+        *,
+        variable_bounds: dict[str, tuple[float, float]] | None = None,
+        baseline_candidate: JsonDict | None = None,
     ) -> None:
         self.topology_path = Path(topology_path)
         self.config = config or JointExperimentConfig()
+        self.variable_bounds = dict(variable_bounds or VARIABLE_BOUNDS)
+        baseline = dict(baseline_candidate or BASELINE_CANDIDATE)
+        self.baseline_candidate = normalize_candidate(
+            baseline,
+            self.variable_bounds,
+            baseline,
+        )
         self.vehicle_config = VehicleConfig(
             train_id="JOINT-PROFILE",
             mass_kg=self.config.train_mass_kg,
@@ -135,8 +153,16 @@ class JointPowerEvaluator:
         time_step_sec: float | None = None,
         storage_enabled: bool = True,
     ) -> JsonDict:
-        candidate = normalize_candidate(candidate)
-        assert_candidate_supported(self.trajectory_provider, candidate, BASELINE_CANDIDATE)
+        candidate = normalize_candidate(
+            candidate,
+            self.variable_bounds,
+            self.baseline_candidate,
+        )
+        assert_candidate_supported(
+            self.trajectory_provider,
+            candidate,
+            self.baseline_candidate,
+        )
         dt = float(time_step_sec or self.config.time_step_sec)
         if self.config.horizon_sec % dt:
             raise ValueError("evaluation step must divide horizon")
@@ -572,7 +598,7 @@ class JointPowerEvaluator:
     def _tracking_metrics(self, candidate: JsonDict) -> JsonDict:
         squared_error = 0.0
         samples = 0
-        baseline = normalize_candidate(BASELINE_CANDIDATE)
+        baseline = self.baseline_candidate
         for second in range(round(self.config.cycle_sec)):
             speed, _ = self._speed_and_distance(candidate, float(second))
             nominal, _ = self._speed_and_distance(baseline, float(second))
@@ -679,8 +705,12 @@ class Nsga2JointOptimizer:
         trials: list[JsonDict] = []
 
         def evaluate(candidate: JsonDict) -> JsonDict:
-            normalized = normalize_candidate(candidate)
-            key = tuple(normalized[name] for name in VARIABLE_BOUNDS)
+            normalized = normalize_candidate(
+                candidate,
+                self.evaluator.variable_bounds,
+                self.evaluator.baseline_candidate,
+            )
+            key = tuple(normalized[name] for name in self.evaluator.variable_bounds)
             if key not in cache:
                 result = self.evaluator.evaluate(normalized, storage_enabled=storage_enabled)
                 result["trialIndex"] = len(trials)
@@ -688,17 +718,22 @@ class Nsga2JointOptimizer:
                 trials.append(result)
             return cache[key]
 
-        baseline = evaluate(BASELINE_CANDIDATE)
-        population = [dict(BASELINE_CANDIDATE)]
+        baseline_candidate = self.evaluator.baseline_candidate
+        baseline = evaluate(baseline_candidate)
+        population = [dict(baseline_candidate)]
         if "tractionTimingSec" in variables:
             for traction_timing, brake_timing in ((-1.0, 1.0), (-2.0, 2.0), (-3.0, 3.0)):
                 population.append({
-                    **BASELINE_CANDIDATE,
+                    **baseline_candidate,
                     "tractionTimingSec": traction_timing,
                     "brakeTimingSec": brake_timing,
                 })
         if "storageTriggerKw" in variables:
-            population.append({**BASELINE_CANDIDATE, "storageTriggerKw": 3600.0})
+            trigger_low, trigger_high = self.evaluator.variable_bounds["storageTriggerKw"]
+            population.append({
+                **baseline_candidate,
+                "storageTriggerKw": (trigger_low + trigger_high) / 2.0,
+            })
         population = population[:population_size]
         while len(population) < population_size:
             population.append(self._random_candidate(variables, rng))
@@ -761,24 +796,26 @@ class Nsga2JointOptimizer:
             "trials": trials,
         }
 
-    @staticmethod
-    def _random_candidate(variables: tuple[str, ...], rng: random.Random) -> JsonDict:
-        candidate = dict(BASELINE_CANDIDATE)
+    def _random_candidate(self, variables: tuple[str, ...], rng: random.Random) -> JsonDict:
+        candidate = dict(self.evaluator.baseline_candidate)
         for name in variables:
-            low, high = VARIABLE_BOUNDS[name]
+            low, high = self.evaluator.variable_bounds[name]
             candidate[name] = rng.uniform(low, high)
         return candidate
 
-    @staticmethod
     def _crossover_mutate(
+        self,
         first: JsonDict,
         second: JsonDict,
         variables: tuple[str, ...],
         rng: random.Random,
     ) -> list[JsonDict]:
-        children = [dict(BASELINE_CANDIDATE), dict(BASELINE_CANDIDATE)]
+        children = [
+            dict(self.evaluator.baseline_candidate),
+            dict(self.evaluator.baseline_candidate),
+        ]
         for name in variables:
-            low, high = VARIABLE_BOUNDS[name]
+            low, high = self.evaluator.variable_bounds[name]
             alpha = rng.uniform(-0.10, 1.10)
             values = (
                 alpha * first[name] + (1.0 - alpha) * second[name],
@@ -831,9 +868,10 @@ def run_random_search(
     mode = mode.upper()
     variables = MODE_VARIABLES[mode]
     rng = random.Random(seed)
-    candidates = [dict(BASELINE_CANDIDATE)]
+    optimizer = Nsga2JointOptimizer(evaluator)
+    candidates = [dict(evaluator.baseline_candidate)]
     candidates.extend(
-        Nsga2JointOptimizer._random_candidate(variables, rng)
+        optimizer._random_candidate(variables, rng)
         for _ in range(evaluation_count - 1)
     )
     trials = [evaluator.evaluate(item, storage_enabled=storage_enabled) for item in candidates]
