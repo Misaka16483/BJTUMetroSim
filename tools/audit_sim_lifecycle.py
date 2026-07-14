@@ -50,7 +50,7 @@ def main() -> int:
         check(all(int(station.get("waitingPax", 0)) == 0 for station in stopped.stations), "passenger queues reset", stopped.stations),
         check(all(float(section.get("requestedPowerKw", 0)) == 0 for section in stopped.power), "power section transients reset", stopped.power),
         check(len(stopped.dispatch_decisions) == 0, "dispatch reset", stopped.dispatch_decisions),
-        check(len(stopped_train_ids) == 2, "configured roster retained after stop", stopped_train_ids),
+        check(stopped_train_ids == [], "runtime roster cleared after stop", stopped_train_ids),
     ])
 
     third = engine.add_train({"trainId": "AUDIT-UP-2", "initialStationCode": "GGZ", "direction": "UP"})
@@ -61,7 +61,7 @@ def main() -> int:
     restarted_ids = [t["trainId"] for t in restarted.trains]
     results.extend([
         check(restarted.clock_state == "RUNNING", "restart", restarted.clock_state),
-        check(set(restarted_ids) == {"AUDIT-UP", "AUDIT-DOWN", "AUDIT-UP-2"}, "roster survives restart", restarted_ids),
+        check(restarted_ids == ["AUDIT-UP-2"], "stopped-state roster starts the next run", restarted_ids),
     ])
     engine.stop()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from app.core.engine import SimulationEngine
@@ -17,11 +18,19 @@ SINGLE_SCENARIO = ROOT / "data" / "scenarios" / "line9_single.json"
 
 
 def load_engine(scenario_path: Path = INTERACTIVE_SCENARIO) -> SimulationEngine:
-    return SimulationEngine.load_from_files(
+    engine = SimulationEngine.load_from_files(
         scenario_path=scenario_path,
         line_map_path=LINE_MAP,
         stations_csv_path=STATIONS_CSV,
     )
+    # These contract tests exercise engine, CI and turnback state transitions.
+    # DCDP has dedicated coverage; using the deterministic controller here
+    # avoids coupling simulated time to an asynchronous wall-clock worker.
+    engine._ato_config = replace(
+        engine._ato_config,
+        use_dynamic_programming_profile=False,
+    )
+    return engine
 
 
 class EngineStateContractTests(unittest.TestCase):

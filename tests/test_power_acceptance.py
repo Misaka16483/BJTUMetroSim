@@ -25,6 +25,14 @@ def five_train_loads() -> list[TrainElectricalLoad]:
 
 
 class PowerAcceptanceTests(unittest.TestCase):
+    @staticmethod
+    def _use_deterministic_ato(engine: SimulationEngine) -> None:
+        """Keep power tests independent from asynchronous DCDP wall time."""
+        engine._ato_config = replace(
+            engine._ato_config,
+            use_dynamic_programming_profile=False,
+        )
+
     def _advance_until_any_train_moves(
         self,
         engine: SimulationEngine,
@@ -134,6 +142,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                     line_map_path=ROOT / "data" / "cache" / "line_map.json",
                     stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
                 )
+                self._use_deterministic_ato(engine)
                 engine.load()
                 engine.clock.start()
                 peak_power_kw = 0.0
@@ -167,6 +176,7 @@ class PowerAcceptanceTests(unittest.TestCase):
                     line_map_path=ROOT / "data" / "cache" / "line_map.json",
                     stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
                 )
+                self._use_deterministic_ato(stressed)
                 stressed.load()
                 network = stressed.power_service.network
                 assert network is not None
@@ -285,6 +295,7 @@ class PowerAcceptanceTests(unittest.TestCase):
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
             stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
+        self._use_deterministic_ato(engine)
         engine.load()
         network = engine.power_service.network
         assert network is not None
@@ -307,6 +318,7 @@ class PowerAcceptanceTests(unittest.TestCase):
             line_map_path=ROOT / "data" / "cache" / "line_map.json",
             stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
         )
+        self._use_deterministic_ato(engine)
         engine.load()
         network = engine.power_service.network
         assert network is not None

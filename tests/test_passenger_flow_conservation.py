@@ -151,13 +151,22 @@ class PassengerFlowConservationTests(unittest.TestCase):
         engine = make_engine()
         engine.add_train({
             "trainId": "T-TERM",
-            "initialStationCode": "GTG",
+            "initialStationCode": "KYL",
             "direction": "DOWN",
             "initialLoadPax": 240,
         })
         train = engine.trains[0]
 
-        engine._turn_train_at_terminal(train)
+        # Stage a completed physical turnback at Gongzhuzhuang. The production
+        # turnback intentionally does not flip direction in place; passenger
+        # discharge begins only after the route-backed movement completes.
+        train.station_index = 0
+        train.current_station_code = "GGZ"
+        train.current_station_name = str(engine._station_list[0]["name"])
+        train.direction = "DOWN"
+        engine._anchor_train_at_platform(train, 1)
+        plan = engine.route_chain_planner.plan_turnback("GGZ", 1)
+        engine._finish_terminal_turnback(train, plan, 6 * 3600 * 1000)
 
         self.assertEqual(train.direction, "UP")
         self.assertTrue(train._terminal_turnback_pending)

@@ -203,6 +203,10 @@ class EngineMemberDLoopTests(unittest.TestCase):
 
     def test_train_continues_to_next_station_path_plan_after_arrival(self) -> None:
         engine = self._engine()
+        engine._ato_config = replace(
+            engine._ato_config,
+            use_dynamic_programming_profile=False,
+        )
         engine.clock.tick_seconds = 1.0
         engine.clock.start()
 
@@ -221,14 +225,8 @@ class EngineMemberDLoopTests(unittest.TestCase):
         train = engine.trains[0]
         self.assertGreater(train.path_total_length_m, 0)
         self.assertGreater(train.path_segment_count, 0)
-        profile = engine.export_speed_profile(train.train_id)
-        source = engine.export_speed_profile_meta(train.train_id)["source"]
-        self.assertIn(source, {"DCDP_PENDING", "DCDP_STRICT"})
-        if source == "DCDP_PENDING":
-            self.assertEqual(profile, [])
-            self.assertEqual(train.phase, "DWELLING")
-        else:
-            self.assertGreater(len(profile), 0)
+        self.assertEqual(train._path_origin_station_index, 1)
+        self.assertEqual(train._path_destination_station_index, 2)
 
     def test_station_stop_uses_station_code_for_passenger_flow(self) -> None:
         engine = self._engine()

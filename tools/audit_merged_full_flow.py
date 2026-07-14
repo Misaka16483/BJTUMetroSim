@@ -62,7 +62,15 @@ def main() -> int:
     up_train.current_station_name = str(engine._station_list[-1]["name"])
     up_train.direction = "UP"
     engine._turn_train_at_terminal(up_train)
-    verify("terminal turnback switches UP to DOWN", up_train.direction == "DOWN" and up_train.phase == "DWELLING", up_train.to_dict())
+    verify(
+        "terminal turnback schedules a route-backed reversal",
+        (
+            up_train.direction == "UP"
+            and up_train._turnback_plan is not None
+            and up_train.turnback_state in {"RUNNING", "WAITING_ROUTE"}
+        ),
+        up_train.to_dict(),
+    )
 
     engine.stop()
     stopped = engine.snapshot()

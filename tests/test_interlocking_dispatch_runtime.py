@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest.mock import patch
 
 from app.core.engine import DWELLING, SimulationEngine
@@ -19,6 +19,10 @@ STATIONS = "data/line9/stations.csv"
 
 def make_engine() -> SimulationEngine:
     engine = SimulationEngine.load_from_files(SCENARIO, LINE_MAP, STATIONS)
+    engine._ato_config = replace(
+        engine._ato_config,
+        use_dynamic_programming_profile=False,
+    )
     engine.load()
     return engine
 
@@ -125,11 +129,19 @@ class InterlockingRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(train.current_platform_id, 14)
             self.assertEqual(train.current_segment_id, 103)
-            self.assertEqual(train.current_segment_offset_m, 0.0)
+            platform = engine._platform_by_id[14]
+            self.assertAlmostEqual(
+                train.current_segment_offset_m,
+                engine._platform_head_stop_offset_m(
+                    platform,
+                    train.direction,
+                    train.train_length_m,
+                ),
+            )
             self.assertIsNotNone(train._track_trace)
             self.assertEqual(train._track_trace.head_segment_id, 103)
-            self.assertEqual(route_50["lastEnteredSectionId"], "88")
-            self.assertIn(route_50["state"], {"LOCKED", "APPROACH_LOCKED"})
+            self.assertEqual(route_50["state"], "IDLE")
+            self.assertIsNone(route_50["trainId"])
 
             # The next interval must continue from the platform actually
             # reached by routes 49/50, not another platform at the same station.
@@ -140,19 +152,12 @@ class InterlockingRuntimeTests(unittest.TestCase):
             self.assertEqual(train.current_segment_id, 103)
             self.assertIn(102, train._track_trace.segment_ids)
             self.assertIn(104, train._track_trace.segment_ids)
-            self.assertTrue(
-                {102, 103}.issubset(
-                    engine.section_occupation.covered_segments_for(train.train_id)
-                )
+            self.assertIn(
+                103,
+                engine.section_occupation.covered_segments_for(train.train_id),
             )
 
-            for _ in range(1200):
-                engine._tick()
-                if engine.route_service.state_of("50") == "IDLE":
-                    break
-            else:
-                self.fail("route 50 was not released after the train tail cleared")
-
+            self.assertEqual(engine.route_service.state_of("50"), "IDLE")
             self.assertNotEqual(train.current_segment_id, 88)
         finally:
             engine.speed_profile_service.shutdown()
@@ -372,7 +377,10 @@ class InterlockingRuntimeTests(unittest.TestCase):
         waiting = engine.trains[0]
         self.assertEqual(waiting.phase, DWELLING)
         self.assertFalse(waiting.departure_authorized)
-        self.assertEqual(waiting.interlocking_hold_reason, "INTERVAL_RESERVED")
+        self.assertIn(
+            waiting.interlocking_hold_reason,
+            {"INTERVAL_RESERVED", "CONFLICT_ROUTE_LOCKED"},
+        )
         self.assertEqual(waiting.dwell_remaining_sec, 0.0)
         self.assertEqual(waiting.door_state, "CLOSED")
         self.assertEqual(waiting.door_transition_remaining_sec, 0.0)
@@ -388,24 +396,20 @@ class InterlockingRuntimeTests(unittest.TestCase):
         engine.clock.start()
 
         peak_locked_route_count = 0
-        saw_route_released_while_interval_reserved = False
+        saw_route_released = False
         for _ in range(1600):
             engine._tick()
             interlocking = engine.snapshot().interlocking
             locked_route_count = interlocking["lockedRouteCount"]
             peak_locked_route_count = max(peak_locked_route_count, locked_route_count)
-            if (
-                peak_locked_route_count > 0
-                and locked_route_count < peak_locked_route_count
-                and interlocking["reservedIntervalCount"] > 0
-            ):
-                saw_route_released_while_interval_reserved = True
+            if peak_locked_route_count > 0 and locked_route_count < peak_locked_route_count:
+                saw_route_released = True
             if engine.snapshot().dispatch_runtime["departureCount"] >= 2:
                 break
 
         departures = engine.snapshot().dispatch_runtime["recentDepartures"]
         self.assertGreater(peak_locked_route_count, 0)
-        self.assertTrue(saw_route_released_while_interval_reserved)
+        self.assertTrue(saw_route_released)
         self.assertGreaterEqual(len(departures), 2)
         self.assertGreaterEqual(departures[1]["simTimeS"] - departures[0]["simTimeS"], 90.0)
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,10 @@ def _load_engine() -> SimulationEngine:
         scenario_path=SCENARIO,
         line_map_path=LINE_MAP,
         stations_csv_path=STATIONS_CSV,
+    )
+    engine._ato_config = replace(
+        engine._ato_config,
+        use_dynamic_programming_profile=False,
     )
     engine.load()
     return engine

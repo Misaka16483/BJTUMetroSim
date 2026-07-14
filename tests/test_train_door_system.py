@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from app.adapters.cab import DriverCabHardwareController, MitsubishiPlcCabParser
@@ -18,6 +19,10 @@ def load_engine() -> SimulationEngine:
         scenario_path=ROOT / "data" / "scenarios" / "line9_interactive.json",
         line_map_path=ROOT / "data" / "cache" / "line_map.json",
         stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
+    )
+    engine._ato_config = replace(
+        engine._ato_config,
+        use_dynamic_programming_profile=False,
     )
     engine.load()
     return engine

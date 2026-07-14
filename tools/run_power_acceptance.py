@@ -31,13 +31,26 @@ def percentile(values: list[float], ratio: float) -> float:
     return ordered[max(0, math.ceil(len(ordered) * ratio) - 1)]
 
 
-def build_engine(scenario_path: Path = SCENARIO, recorder: RunRecorder | None = None) -> SimulationEngine:
+def build_engine(
+    scenario_path: Path = SCENARIO,
+    recorder: RunRecorder | None = None,
+    *,
+    deterministic_ato: bool = False,
+) -> SimulationEngine:
     engine = SimulationEngine.load_from_files(
         scenario_path=scenario_path,
         line_map_path=LINE_MAP,
         stations_csv_path=STATIONS,
         recorder=recorder,
     )
+    if deterministic_ato:
+        # Quantitative acceptance advances simulated time in a tight loop.
+        # Keep it independent from the asynchronous DCDP worker's wall clock;
+        # dedicated speed-profile tests cover that worker separately.
+        engine._ato_config = replace(
+            engine._ato_config,
+            use_dynamic_programming_profile=False,
+        )
     engine.load()
     engine.clock.start()
     return engine
@@ -236,7 +249,7 @@ def one_hour_continuous_check() -> dict:
 
 
 def engine_benchmark() -> dict:
-    engine = build_engine()
+    engine = build_engine(deterministic_ato=True)
     durations_ms: list[float] = []
     for _tick in range(240):
         started = time.perf_counter()
@@ -309,7 +322,7 @@ def n_minus_one_check() -> dict:
     restored = DCTractionPowerFlowSolver(load_line9_power_network(TOPOLOGY)).solve(loads, dt_sec=0.25)
     outage_limit = min(item.traction_limit_ratio for item in outage.trains)
 
-    engine = build_engine()
+    engine = build_engine(deterministic_ato=True)
     network = engine.power_service.network
     assert network is not None
     network.substations = {
@@ -390,7 +403,7 @@ def passenger_check(output_dir: Path) -> dict:
                 train["initialLoadPax"] = passengers
             path = output_dir / f"acceptance-passengers-{passengers}.json"
             path.write_text(json.dumps(scenario, ensure_ascii=False), encoding="utf-8")
-            engine = build_engine(path)
+            engine = build_engine(path, deterministic_ato=True)
             peak_power_kw = 0.0
             min_voltage_v = 1000.0
             reach_tick = None
@@ -415,7 +428,7 @@ def passenger_check(output_dir: Path) -> dict:
                 "timeTo1000mSec": reach_tick * engine.clock.tick_seconds,
             }
 
-            stressed = build_engine(path)
+            stressed = build_engine(path, deterministic_ato=True)
             stressed_network = stressed.power_service.network
             assert stressed_network is not None
             stressed_network.substations = {

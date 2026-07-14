@@ -43,7 +43,12 @@ from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.passenger_profiles import load_passenger_profile
-from app.domain.station.services import DayType, DwellTimeConfig, FlowScenario, PoissonPassengerFlowGenerator, StationFlowConfig, StationService, TrainLoadState
+from app.domain.station.services import (
+    FlowScenario,
+    PoissonPassengerFlowGenerator,
+    StationService,
+    TrainLoadState,
+)
 from app.domain.vehicle.models import ControlCommand, TrainState, VehicleConfig, CommandSource
 from app.domain.vehicle.doors import DoorSide, TrainDoorSystem
 from app.domain.vehicle.services import (
@@ -4917,45 +4922,29 @@ class SimulationEngine:
 
     def _build_station_service(self) -> StationService:
         """构建客流服务 — 使用 Poisson 客流生成器 + 六时段多日型."""
-        # Scenario priors, not AFC/OD measurements.  Each physical station has
-        # an explicit UP and DOWN platform so all global-engine trains consume
-        # the same queues rather than a second independent passenger clock.
-        station_demand = [
-            ("GGZ", 60.0, 0.05, 54.0, 0.12),
-            ("FSP", 72.0, 0.10, 56.0, 0.12),
-            ("KYL", 48.0, 0.12, 38.0, 0.10),
-            ("FTN", 55.0, 0.15, 44.0, 0.12),
-            ("FTD", 40.0, 0.15, 36.0, 0.14),
-            ("QLZ", 65.0, 0.18, 70.0, 0.20),
-            ("LLQ", 90.0, 0.20, 82.0, 0.18),
-            ("LLE", 50.0, 0.18, 76.0, 0.22),
-            ("BWR", 120.0, 0.25, 128.0, 0.28),
-            ("JBG", 80.0, 0.20, 74.0, 0.22),
-            ("BDZ", 35.0, 0.15, 32.0, 0.13),
-            ("BQS", 45.0, 0.15, 62.0, 0.20),
-            ("GTG", 70.0, 0.25, 88.0, 0.24),
-        ]
-        station_configs = [
-            StationFlowConfig(code, rate, alighting, direction=direction)
-            for code, up_rate, up_alighting, down_rate, down_alighting in station_demand
-            for direction, rate, alighting in (
-                ("UP", up_rate, up_alighting),
-                ("DOWN", down_rate, down_alighting),
-            )
-        ]
+        profile = load_passenger_profile()
+        self._passenger_profile = profile
+        self._default_train_capacity_pax = profile.train_capacity_pax
+        self._average_passenger_mass_kg = profile.average_passenger_mass_kg
+        self._estimated_weekday_passenger_arrivals = round(
+            profile.estimated_daily_arrivals()
+        )
 
+        base_scenario = profile.flow_scenario
         flow_generator = PoissonPassengerFlowGenerator(
-            station_configs=station_configs,
+            station_configs=list(profile.station_configs),
             scenario=FlowScenario(
-                day_type=DayType.MON_THU,
-                line_scale=self.scenario.passenger_demand_scale,
-                random_seed=42,
+                day_type=base_scenario.day_type,
+                line_scale=(
+                    base_scenario.line_scale * self.scenario.passenger_demand_scale
+                ),
+                random_seed=base_scenario.random_seed,
             ),
             use_poisson=self.scenario.passenger_use_poisson,
         )
         return StationService(
             flow_generator,
-            DwellTimeConfig(base_dwell_sec=30.0, door_capacity_pax_per_sec=3.0),
+            profile.dwell_config,
             automatic_generation_enabled=self.scenario.passenger_use_poisson,
         )
 
