@@ -160,7 +160,7 @@ export default function App() {
     return () => { active = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [setBackendStatus, updateFromBackend]);
 
-  // WebSocket 是实时主通道；发现序列缺口时不消费乱序帧，立即用 REST 重同步。
+  // WebSocket 是实时主通道；后端按最新状态发布，序列前跳属于正常合帧。
   useEffect(() => {
     let active = true;
     let socket: WebSocket | null = null;
@@ -171,10 +171,7 @@ export default function App() {
       socket = new WebSocket((import.meta.env.VITE_WS_URL as string | undefined) ?? defaultUrl);
       socket.onmessage = (event) => {
         try {
-          const result = updateFromBackend(JSON.parse(String(event.data)), 'WS');
-          if (result === 'gap') {
-            void fetchSimState().then((data) => updateFromBackend(data, 'REST'));
-          }
+          updateFromBackend(JSON.parse(String(event.data)), 'WS');
         } catch (error) {
           console.warn('[App] WebSocket 状态帧无效:', error);
         }
@@ -534,7 +531,7 @@ export default function App() {
           <span style={{ color: dataStale ? 'var(--amber)' : dataMode === 'LIVE_SIM' ? 'var(--green)' : 'var(--cyan)' }}>
             {dataMode}{dataStale ? ' · FROZEN' : ''} · #{snapshotSequence}
           </span>
-          {snapshotGapCount > 0 && <span style={{ color: 'var(--amber)' }}>RESYNC {snapshotGapCount}</span>}
+          {snapshotGapCount > 0 && <span style={{ color: 'var(--text-muted)' }}>COALESCED {snapshotGapCount}</span>}
           {import.meta.env.VITE_ENABLE_DEMO_MODE === 'true' && dataMode === 'DISCONNECTED' && (
             <button type="button" onClick={() => setDataMode('DEMO')} style={{ color: 'var(--amber)' }}>
               ENTER DEMO

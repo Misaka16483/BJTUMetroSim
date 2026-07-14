@@ -36,6 +36,7 @@ class ATOController:
         self.last_target_speed_mps: float = 0.0
         self.last_speed_error_mps: float = 0.0
         self.last_pid_output_percent: float = 0.0
+        self.last_profile_feedforward_percent: float = 0.0
         self.last_profile_mode: str = "NONE"
         self._last_command: ControlCommand | None = None
         self._last_command_sim_time_s: float | None = None
@@ -142,6 +143,7 @@ class ATOController:
         self._profile_cache_key = None
         self._profile_cache = None
         self.last_profile_mode = "NONE"
+        self.last_profile_feedforward_percent = 0.0
         self._last_command = None
         self._last_command_sim_time_s = None
         self._terminal_braking_latched = False
@@ -359,13 +361,27 @@ class ATOController:
     ) -> float:
         profile = self._profile_for(state, target)
         if profile is None:
+            self.last_profile_feedforward_percent = 0.0
             return pid_output_percent
 
-        mode = profile.mode_at_position(self._profile_lookup_position_m(state, target))
+        planned = profile.control_at_position(self._profile_lookup_position_m(state, target))
+        mode = planned.mode
         self.last_profile_mode = mode
         speed_gap_mps = target_speed_mps - state.speed_mps
-        if mode == "MAX_TRACTION" and speed_gap_mps > self.config.pid_deadband_mps:
-            return max(pid_output_percent, self.config.max_traction_percent)
+        self.last_profile_feedforward_percent = 0.0
+        if planned.traction_percent > 0.0 and speed_gap_mps > self.config.pid_deadband_mps:
+            error_span_mps = (
+                self.config.profile_feedforward_full_error_mps
+                - self.config.pid_deadband_mps
+            )
+            weight = _clamp(
+                (speed_gap_mps - self.config.pid_deadband_mps) / error_span_mps,
+                0.0,
+                1.0,
+            )
+            feedforward_percent = planned.traction_percent * weight
+            self.last_profile_feedforward_percent = feedforward_percent
+            return max(pid_output_percent, feedforward_percent)
         if mode == "MAX_BRAKE" and speed_gap_mps < -self.config.pid_deadband_mps:
             return min(pid_output_percent, -self.config.max_brake_percent * 0.8)
         if mode == "COAST" and abs(pid_output_percent) < 12.0:

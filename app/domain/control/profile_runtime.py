@@ -21,7 +21,7 @@ from app.domain.line.services import PathPlan
 from app.domain.vehicle.models import VehicleConfig
 
 
-PROFILE_CACHE_VERSION = 2
+PROFILE_CACHE_VERSION = 3
 
 
 @dataclass(frozen=True)

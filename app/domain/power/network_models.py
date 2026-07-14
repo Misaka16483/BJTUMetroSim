@@ -221,6 +221,10 @@ class SubstationPowerFlow:
     status: str
     rectifier_power_kw: float = 0.0
     feedback_power_kw: float = 0.0
+    rectifier_dc_bus_output_kw: float = 0.0
+    substation_internal_loss_kw: float = 0.0
+    equivalent_dc_source_power_kw: float = 0.0
+    feedback_dc_bus_power_kw: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -243,6 +247,10 @@ class ContactRailPowerFlow:
     power_kw: float
     load_ratio: float
     status: str
+    left_end_spatial_current_a: float = 0.0
+    right_end_spatial_current_a: float = 0.0
+    net_section_injection_a: float = 0.0
+    average_through_current_a: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -318,6 +326,10 @@ class PowerFlowSnapshot:
                     "status": item.status,
                     "rectifierPowerKw": round(item.rectifier_power_kw, 3),
                     "feedbackPowerKw": round(item.feedback_power_kw, 3),
+                    "rectifierDcBusOutputKw": round(item.rectifier_dc_bus_output_kw, 3),
+                    "substationInternalLossKw": round(item.substation_internal_loss_kw, 3),
+                    "equivalentDcSourcePowerKw": round(item.equivalent_dc_source_power_kw, 3),
+                    "feedbackDcBusPowerKw": round(item.feedback_dc_bus_power_kw, 3),
                 }
                 for item in self.substations
             ],
@@ -342,6 +354,10 @@ class PowerFlowSnapshot:
                     "powerKw": round(item.power_kw, 3),
                     "loadRatio": round(item.load_ratio, 4),
                     "status": item.status,
+                    "leftEndSpatialCurrentA": round(item.left_end_spatial_current_a, 2),
+                    "rightEndSpatialCurrentA": round(item.right_end_spatial_current_a, 2),
+                    "netSectionInjectionA": round(item.net_section_injection_a, 2),
+                    "averageThroughCurrentA": round(item.average_through_current_a, 2),
                 }
                 for item in self.contact_rail_flows
             ],

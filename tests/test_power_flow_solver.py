@@ -78,6 +78,36 @@ class DCTractionPowerFlowSolverTests(unittest.TestCase):
         self.assertLess(min(train.voltage_v for train in snapshot.trains), 750.0)
         self.assertTrue(any(item["type"] in {"SUBSTATION_WARNING", "FEEDER_WARNING", "LIMITED"} for item in snapshot.alerts))
 
+    def test_low_voltage_curtailment_is_reflected_in_network_current_and_vehicle_delivery(self) -> None:
+        snapshot = DCTractionPowerFlowSolver(_network()).solve(
+            [
+                TrainElectricalLoad(
+                    f"T{i}",
+                    "UP",
+                    2_500.0,
+                    22.0,
+                    traction_power_request_kw=2_700.0,
+                    aux_power_kw=150.0,
+                )
+                for i in range(5)
+            ],
+            dt_sec=1.0,
+        )
+
+        self.assertTrue(snapshot.converged)
+        self.assertAlmostEqual(min(item.voltage_v for item in snapshot.trains), 650.0, places=6)
+        self.assertTrue(all(0.0 < item.traction_limit_ratio < 1.0 for item in snapshot.trains))
+        delivered_kw = sum(
+            item.traction_power_delivered_kw + item.auxiliary_power_kw
+            for item in snapshot.trains
+        )
+        terminal_power_kw = sum(
+            max(item.current_a, 0.0) * item.voltage_v / 1000.0
+            for item in snapshot.trains
+        )
+        self.assertAlmostEqual(delivered_kw, terminal_power_kw, places=6)
+        self.assertLess(snapshot.power_balance_error_ratio, 0.01)
+
     def test_regen_can_be_absorbed_by_traction_train(self) -> None:
         network = _network()
         solver = DCTractionPowerFlowSolver(network)
@@ -287,6 +317,13 @@ class DCTractionPowerFlowSolverTests(unittest.TestCase):
         self.assertGreater(snapshot.wasted_regen_kw, 0.0)
         self.assertTrue(any(train.regen_limit_ratio < 1.0 for train in snapshot.trains))
         self.assertTrue(any(item["type"] in {"REGEN_LIMITED", "OVERVOLTAGE", "REGEN_WASTED"} for item in snapshot.alerts))
+        for train in snapshot.trains:
+            self.assertAlmostEqual(
+                train.regen_limit_ratio,
+                train.regen_power_accepted_kw / train.regen_power_available_kw,
+                places=9,
+            )
+            self.assertLessEqual(train.voltage_v, 900.0)
 
     def test_n_minus_one_outage_generates_outage_alert(self) -> None:
         network = _network()
@@ -331,6 +368,28 @@ class DCTractionPowerFlowSolverTests(unittest.TestCase):
         self.assertNotEqual(section.current_a, 0.0)
         self.assertAlmostEqual(section.power_kw, 750.0 * section.current_a / 1000.0, places=9)
         self.assertGreater(section.load_ratio, 0.0)
+        self.assertAlmostEqual(
+            section.average_through_current_a,
+            (section.left_end_spatial_current_a + section.right_end_spatial_current_a) / 2.0,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            section.net_section_injection_a,
+            section.left_end_spatial_current_a - section.right_end_spatial_current_a,
+            places=9,
+        )
+
+    def test_substation_dc_source_decomposition_closes(self) -> None:
+        snapshot = DCTractionPowerFlowSolver(_network()).solve(
+            [TrainElectricalLoad("T1", "UP", 1_800.0, 18.0, traction_force_n=95_000.0, aux_power_kw=60.0)],
+            dt_sec=1.0,
+        )
+        for item in snapshot.substations:
+            self.assertAlmostEqual(
+                item.equivalent_dc_source_power_kw,
+                item.rectifier_dc_bus_output_kw + item.substation_internal_loss_kw,
+                places=6,
+            )
 
 
 if __name__ == "__main__":

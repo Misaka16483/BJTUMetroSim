@@ -429,7 +429,15 @@ class ReportGenerator:
             ).fetchone()[0] or 0
 
         prow = conn.execute(
-            "SELECT SUM(energy_kwh) FROM power_records WHERE run_id=?", (run_id,)
+            "SELECT SUM(latest.energy_kwh) FROM power_records AS latest "
+            "JOIN ("
+            "  SELECT power_section_id, MAX(sim_time_ms) AS last_sim_time_ms "
+            "  FROM power_records WHERE run_id=? GROUP BY power_section_id"
+            ") AS terminal "
+            "ON latest.power_section_id=terminal.power_section_id "
+            "AND latest.sim_time_ms=terminal.last_sim_time_ms "
+            "WHERE latest.run_id=?",
+            (run_id, run_id),
         ).fetchone()
         consumed = prow[0] or 0.0
 

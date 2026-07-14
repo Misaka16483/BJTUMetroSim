@@ -55,22 +55,30 @@ class DCTractionPowerFlowSolver:
         self._storage_charged_kwh: dict[str, float] = defaultdict(float)
         self._storage_discharged_kwh: dict[str, float] = defaultdict(float)
 
-    def storage_checkpoint(self) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    def storage_checkpoint(
+        self,
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float]]:
         storage_ids = tuple(self.network.supercapacitor_storages)
         return (
             {storage_id: self._storage_energy_kwh[storage_id] for storage_id in storage_ids},
             {storage_id: self._storage_charged_kwh.get(storage_id, 0.0) for storage_id in storage_ids},
             {storage_id: self._storage_discharged_kwh.get(storage_id, 0.0) for storage_id in storage_ids},
+            {
+                substation_id: energy_kwh
+                for substation_id, energy_kwh in self._substation_energy_kwh.items()
+                if abs(energy_kwh) > 1e-12
+            },
         )
 
     def restore_storage_checkpoint(
         self,
-        checkpoint: tuple[dict[str, float], dict[str, float], dict[str, float]],
+        checkpoint: tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float]],
     ) -> None:
-        energy, charged, discharged = checkpoint
+        energy, charged, discharged, substation_energy = checkpoint
         self._storage_energy_kwh = dict(energy)
         self._storage_charged_kwh = defaultdict(float, charged)
         self._storage_discharged_kwh = defaultdict(float, discharged)
+        self._substation_energy_kwh = defaultdict(float, substation_energy)
 
     def solve(
         self,
@@ -202,7 +210,14 @@ class DCTractionPowerFlowSolver:
             if load.regen_power_kw > 0:
                 accepted_kw = regen.accepted_by_source_kw[load.train_id]
                 source_voltages = regen.source_voltages_v[load.train_id]
-                voltage_v = max(source_voltages, default=self.network.nominal_voltage_v if accepted_kw > 0 else 1000.0)
+                reachable_open_circuit_v = max(
+                    (
+                        self.network.substations[substation_id].no_load_voltage_v
+                        for substation_id, _feeder_id, _resistance in source_paths_by_train[load.train_id]
+                    ),
+                    default=self.network.nominal_voltage_v,
+                )
+                voltage_v = max(source_voltages, default=reachable_open_circuit_v)
                 current_a = -regen.source_currents_a[load.train_id]
             else:
                 transfer_current_a = regen.sink_currents_a[load.train_id]
@@ -214,8 +229,26 @@ class DCTractionPowerFlowSolver:
                 else:
                     voltage_v = solution_voltage
                 current_a = solution_current + transfer_current_a
-            traction_limit_ratio, regen_limit_ratio, voltage_level = self._limits(voltage_v)
-            traction_limit_ratio = min(traction_limit_ratio, delivered_ratio)
+            _voltage_traction_limit, _voltage_regen_limit, voltage_level = self._limits(voltage_v)
+            rectifier_delivered_kw = effective_demand_kw[load.train_id] * delivered_ratio
+            total_delivered_to_train_kw = (
+                rectifier_delivered_kw
+                + regen.absorbed_by_train_kw[load.train_id]
+                + regen.storage_supplied_by_train_kw[load.train_id]
+            )
+            residual_auxiliary_kw = max(load.aux_power_kw - load.raw_regen_power_kw, 0.0)
+            traction_delivered_kw = min(
+                load.traction_power_kw,
+                max(total_delivered_to_train_kw - residual_auxiliary_kw, 0.0),
+            )
+            traction_limit_ratio = (
+                min(1.0, traction_delivered_kw / load.traction_power_kw)
+                if load.traction_power_kw > 1e-9
+                else 1.0
+            )
+            regen_limit_ratio = 1.0
+            if traction_limit_ratio < 0.999 and voltage_level == "NORMAL":
+                voltage_level = "LIMITED"
             if load.regen_power_kw > 0:
                 accepted_source_kw = regen.accepted_by_source_kw[load.train_id]
                 accepted_vehicle_kw = load.self_consumed_regen_kw + accepted_source_kw
@@ -223,7 +256,7 @@ class DCTractionPowerFlowSolver:
                     1.0,
                     accepted_vehicle_kw / max(load.raw_regen_power_kw, 1e-9),
                 )
-                regen_limit_ratio = min(regen_limit_ratio, source_acceptance_ratio)
+                regen_limit_ratio = source_acceptance_ratio
                 if regen_limit_ratio < 0.999 and voltage_level == "NORMAL":
                     voltage_level = "REGEN_LIMITED"
             source_ids = [item[0] for item in source_contributions]
@@ -239,7 +272,7 @@ class DCTractionPowerFlowSolver:
                     regen_limit_ratio=regen_limit_ratio,
                     voltage_level=voltage_level,
                     traction_power_request_kw=load.traction_power_kw,
-                    traction_power_delivered_kw=load.traction_power_kw * traction_limit_ratio,
+                    traction_power_delivered_kw=traction_delivered_kw,
                     auxiliary_power_kw=load.aux_power_kw,
                     regen_power_available_kw=load.raw_regen_power_kw,
                     regen_power_self_consumed_kw=load.self_consumed_regen_kw,
@@ -333,6 +366,7 @@ class DCTractionPowerFlowSolver:
         allocation = _RegenAllocation(
             generated_kw=sum(load.regen_power_kw for load in loads),
         )
+        source_feeder_currents_a: dict[tuple[str, str], float] = defaultdict(float)
         regen_remaining = {
             load.train_id: load.regen_power_kw
             for load in loads
@@ -391,6 +425,11 @@ class DCTractionPowerFlowSolver:
                 bus_voltage_v,
                 source_r,
                 sink_r,
+                self._regen_source_current_headroom_a(
+                    bus_voltage_v,
+                    source_r,
+                    source_feeder_currents_a[(source_id, source_feeder)],
+                ),
             )
             if current_a <= 1e-9:
                 continue
@@ -401,7 +440,10 @@ class DCTractionPowerFlowSolver:
             allocation.absorbed_by_train_kw[sink_id] += delivered_kw
             allocation.accepted_by_source_kw[source_id] += generated_kw
             allocation.source_currents_a[source_id] += current_a
-            allocation.source_voltages_v[source_id].append(bus_voltage_v + current_a * source_r)
+            source_feeder_currents_a[(source_id, source_feeder)] += current_a
+            allocation.source_voltages_v[source_id].append(
+                bus_voltage_v + source_feeder_currents_a[(source_id, source_feeder)] * source_r
+            )
             allocation.sink_currents_a[sink_id] += current_a
             allocation.sink_voltages_v[sink_id].append(bus_voltage_v - current_a * sink_r)
             allocation.feeder_currents_a[source_feeder] -= current_a
@@ -453,6 +495,11 @@ class DCTractionPowerFlowSolver:
                     bus_voltage_v,
                     source_r,
                     0.0,
+                    self._regen_source_current_headroom_a(
+                        bus_voltage_v,
+                        source_r,
+                        source_feeder_currents_a[(source_id, source_feeder)],
+                    ),
                 )
                 if current_a <= 1e-9:
                     continue
@@ -466,7 +513,10 @@ class DCTractionPowerFlowSolver:
                 allocation.transfer_losses_kw += loss_kw
                 allocation.accepted_by_source_kw[source_id] += generated_kw
                 allocation.source_currents_a[source_id] += current_a
-                allocation.source_voltages_v[source_id].append(bus_voltage_v + current_a * source_r)
+                source_feeder_currents_a[(source_id, source_feeder)] += current_a
+                allocation.source_voltages_v[source_id].append(
+                    bus_voltage_v + source_feeder_currents_a[(source_id, source_feeder)] * source_r
+                )
                 allocation.feeder_currents_a[source_feeder] -= current_a
                 allocation.paths.append(RegenPathFlow(
                     source_train_id=source_id,
@@ -510,6 +560,11 @@ class DCTractionPowerFlowSolver:
                     bus_voltage_v,
                     source_r,
                     0.0,
+                    self._regen_source_current_headroom_a(
+                        bus_voltage_v,
+                        source_r,
+                        source_feeder_currents_a[(source_id, source_feeder)],
+                    ),
                 )
                 if current_a <= 1e-9:
                     continue
@@ -519,7 +574,10 @@ class DCTractionPowerFlowSolver:
                 allocation.transfer_losses_kw += loss_kw
                 allocation.accepted_by_source_kw[source_id] += generated_kw
                 allocation.source_currents_a[source_id] += current_a
-                allocation.source_voltages_v[source_id].append(bus_voltage_v + current_a * source_r)
+                source_feeder_currents_a[(source_id, source_feeder)] += current_a
+                allocation.source_voltages_v[source_id].append(
+                    bus_voltage_v + source_feeder_currents_a[(source_id, source_feeder)] * source_r
+                )
                 allocation.feeder_currents_a[source_feeder] -= current_a
                 allocation.feedback_currents_a[substation_id] += current_a
                 allocation.paths.append(RegenPathFlow(
@@ -711,6 +769,7 @@ class DCTractionPowerFlowSolver:
         bus_voltage_v: float,
         source_resistance_ohm: float,
         sink_resistance_ohm: float,
+        source_current_limit_a: float = math.inf,
     ) -> tuple[float, float, float, float]:
         """Return current, generated, delivered and resistive-loss power for one path."""
         if available_generated_kw <= 0 or delivery_limit_kw <= 0 or bus_voltage_v <= 0:
@@ -738,11 +797,24 @@ class DCTractionPowerFlowSolver:
                 )
                 sink_limit_a = (bus_voltage_v - math.sqrt(discriminant)) / (2.0 * sink_r)
 
-        current_a = max(0.0, min(source_limit_a, sink_limit_a))
+        current_a = max(0.0, min(source_limit_a, sink_limit_a, source_current_limit_a))
         generated_kw = (bus_voltage_v + current_a * source_r) * current_a / 1000.0
         delivered_kw = max(0.0, (bus_voltage_v - current_a * sink_r) * current_a / 1000.0)
         losses_kw = current_a * current_a * (source_r + sink_r) / 1000.0
         return current_a, generated_kw, delivered_kw, losses_kw
+
+    @staticmethod
+    def _regen_source_current_headroom_a(
+        bus_voltage_v: float,
+        source_resistance_ohm: float,
+        used_current_a: float,
+    ) -> float:
+        """Return remaining source current before its terminal reaches 900 V."""
+        source_r = max(source_resistance_ohm, 0.0)
+        if source_r <= 1e-12:
+            return math.inf
+        maximum_current_a = max((900.0 - bus_voltage_v) / source_r, 0.0)
+        return max(maximum_current_a - used_current_a, 0.0)
 
     def _load_source_paths(self, load: TrainElectricalLoad) -> list[tuple[str, str, float]]:
         """Build source paths through all collection points without duplicating one feeder."""
@@ -829,7 +901,10 @@ class DCTractionPowerFlowSolver:
         if power_kw <= 0 or not sources:
             return max((item[0] for item in sources), default=0.0), 1.0
         upper = max(item[0] for item in sources)
-        lower = min(500.0, upper)
+        # Below 650 V the train converter must curtail a constant-power request.
+        # Solving the full request down to 500 V and scaling only the API result
+        # afterwards leaves network current and vehicle force inconsistent.
+        lower = min(650.0, upper)
         target_w = power_kw * 1000.0
         available_at_floor_w = lower * sum(
             max((voltage - lower) / resistance, 0.0)
@@ -917,6 +992,13 @@ class DCTractionPowerFlowSolver:
             power_kw = voltage * current / 1000.0
             rectifier_power_kw = voltage * rectifier_current / 1000.0
             feedback_power_kw = voltage * feedback_current / 1000.0
+            equivalent_dc_source_power_kw = sub.no_load_voltage_v * rectifier_current / 1000.0
+            # Use the converged terminal drop so the published decomposition
+            # closes exactly even with the solver's finite voltage tolerance.
+            substation_internal_loss_kw = max(
+                equivalent_dc_source_power_kw - rectifier_power_kw,
+                0.0,
+            )
             self._substation_energy_kwh[sub.substation_id] += max(rectifier_power_kw, 0.0) * max(dt_sec, 0.0) / 3600.0
             absolute_current = abs(current)
             if not sub.in_service:
@@ -940,6 +1022,10 @@ class DCTractionPowerFlowSolver:
                     status=status,
                     rectifier_power_kw=rectifier_power_kw,
                     feedback_power_kw=feedback_power_kw,
+                    rectifier_dc_bus_output_kw=rectifier_power_kw,
+                    substation_internal_loss_kw=substation_internal_loss_kw,
+                    equivalent_dc_source_power_kw=equivalent_dc_source_power_kw,
+                    feedback_dc_bus_power_kw=feedback_power_kw,
                 )
             )
         return flows
@@ -998,8 +1084,11 @@ class DCTractionPowerFlowSolver:
             right_feeder = self.network.feeder_for(right.substation_id, section.direction, "LEFT") if right else None
             left_current_a = feeder_currents[left_feeder.feeder_id] if left_feeder else 0.0
             right_current_a = feeder_currents[right_feeder.feeder_id] if right_feeder else 0.0
-            signed_current_a = left_current_a - right_current_a
-            protection_current_a = max(abs(left_current_a), abs(right_current_a), abs(signed_current_a))
+            left_end_spatial_current_a = left_current_a
+            right_end_spatial_current_a = -right_current_a
+            net_section_injection_a = left_current_a + right_current_a
+            average_through_current_a = (left_current_a - right_current_a) / 2.0
+            protection_current_a = max(abs(left_current_a), abs(right_current_a))
             if section.status != "ENERGIZED":
                 status = "DEENERGIZED"
             elif protection_current_a > section.current_limit_a:
@@ -1011,10 +1100,16 @@ class DCTractionPowerFlowSolver:
             flows.append(ContactRailPowerFlow(
                 section_id=section.section_id,
                 direction=section.direction,
-                current_a=signed_current_a,
-                power_kw=self.network.nominal_voltage_v * signed_current_a / 1000.0,
+                # Legacy scalar now has an explicit spatial through-current
+                # meaning. Net section loading is exposed separately below.
+                current_a=average_through_current_a,
+                power_kw=self.network.nominal_voltage_v * average_through_current_a / 1000.0,
                 load_ratio=protection_current_a / section.current_limit_a if section.current_limit_a else 0.0,
                 status=status,
+                left_end_spatial_current_a=left_end_spatial_current_a,
+                right_end_spatial_current_a=right_end_spatial_current_a,
+                net_section_injection_a=net_section_injection_a,
+                average_through_current_a=average_through_current_a,
             ))
         return flows
 

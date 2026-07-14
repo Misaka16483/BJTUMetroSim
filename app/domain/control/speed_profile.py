@@ -5,7 +5,7 @@ import math
 from typing import TYPE_CHECKING
 
 from app.domain.vehicle.models import CommandSource, ControlCommand, TrainState, VehicleConfig
-from app.domain.vehicle.services import SimpleVehicleModel
+from app.domain.vehicle.services import BrakeBlendService, SimpleVehicleModel, TractionDriveModel
 
 if TYPE_CHECKING:
     from app.domain.line.services import PathPlan
@@ -48,13 +48,17 @@ class OptimizedSpeedProfile:
         return self.points[-1].speed_mps
 
     def mode_at_position(self, position_m: float) -> str:
+        return self.control_at_position(position_m).mode
+
+    def control_at_position(self, position_m: float) -> SpeedProfilePoint:
+        """Return the planned zero-order-hold control for a path position."""
         if not self.points:
-            return "UNKNOWN"
+            return SpeedProfilePoint(0.0, 0.0, 0.0, "UNKNOWN", 0.0, 0.0, 0.0)
         bounded_position_m = min(max(0.0, position_m), self.target_position_m)
         for point in self.points[1:]:
             if bounded_position_m <= point.position_m:
-                return point.mode
-        return self.points[-1].mode
+                return point
+        return self.points[-1]
 
 
 @dataclass(frozen=True)
@@ -132,6 +136,7 @@ def optimize_speed_profile_dcdp(
 
     config = vehicle_config or VehicleConfig()
     vehicle = SimpleVehicleModel(config)
+    drive = TractionDriveModel(config)
     dp_deceleration_mps2 = max(
         0.1,
         min(0.6, (config.max_service_brake_force_n + config.basic_resistance_n) / config.mass_kg),
@@ -156,11 +161,42 @@ def optimize_speed_profile_dcdp(
         next_states: dict[tuple[object, ...], _SearchNode] = {}
         remaining_stages = stages - stage
         for node in states.values():
-            for mode, command in _candidate_commands(config.train_id, node.state.speed_mps, config):
+            gradient_force_n = _gradient_force_n(node.state.position_m, path_plan, config)
+            for mode, command in _candidate_commands(
+                config.train_id,
+                node.state.speed_mps,
+                config,
+                gradient_force_n,
+            ):
                 mode_group = _command_group(command)
                 if not _transition_allowed(node, mode_group):
                     continue
-                gradient_force_n = _gradient_force_n(node.state.position_m, path_plan, config)
+                demand = drive.demand(command, node.state.speed_mps)
+                blend = BrakeBlendService.blend(demand, 1.0)
+                resistance_force_n = vehicle.running_resistance_n(
+                    node.state.speed_mps,
+                    demand.traction_force_n,
+                    blend.total_brake_force_n,
+                )
+                raw_acceleration_mps2 = (
+                    demand.traction_force_n
+                    - blend.total_brake_force_n
+                    - resistance_force_n
+                    - gradient_force_n
+                ) / config.mass_kg
+                raw_next_speed_mps = node.state.speed_mps + raw_acceleration_mps2 * dt_s
+                raw_next_position_m = node.state.position_m + (
+                    node.state.speed_mps + max(raw_next_speed_mps, 0.0)
+                ) * 0.5 * dt_s
+                local_speed_limit_mps = min(
+                    config.max_speed_mps,
+                    _speed_limit_at_position(raw_next_position_m, permitted_speed_mps, path_plan),
+                )
+                # SimpleVehicleModel clamps speed to the vehicle maximum. Reject
+                # the unclamped overspeed first so a full-traction command at the
+                # cap cannot masquerade as a physically valid cruise state.
+                if raw_next_speed_mps > local_speed_limit_mps + 1e-6:
+                    continue
                 next_state = vehicle.step(node.state, command, dt_s=dt_s, gradient_force_n=gradient_force_n)
                 local_speed_limit_mps = _speed_limit_at_position(next_state.position_m, permitted_speed_mps, path_plan)
                 if next_state.speed_mps > local_speed_limit_mps + 1e-6:
@@ -336,16 +372,35 @@ def _candidate_commands(
     train_id: str,
     speed_mps: float,
     config: VehicleConfig,
+    gradient_force_n: float = 0.0,
 ) -> tuple[tuple[str, ControlCommand], ...]:
-    cruise_percent = 0.0
+    cruise_traction_percent = 0.0
+    cruise_brake_percent = 0.0
     if speed_mps > config.stop_speed_threshold_mps:
-        cruise_percent = min(100.0, config.basic_resistance_n / config.max_traction_force_n * 100.0)
+        vehicle = SimpleVehicleModel(config)
+        drive = TractionDriveModel(config)
+        hold_force_n = vehicle.running_resistance_n(speed_mps) + gradient_force_n
+        if hold_force_n >= 0.0:
+            cruise_traction_percent = min(
+                100.0,
+                hold_force_n / max(drive.traction_capacity_n(speed_mps), 1.0) * 100.0,
+            )
+        else:
+            cruise_brake_percent = min(
+                100.0,
+                -hold_force_n / max(config.max_service_brake_force_n, 1.0) * 100.0,
+            )
     return (
         ("MAX_TRACTION", ControlCommand(train_id, traction_percent=100.0, source=CommandSource.ATO)),
         ("TRACTION_50", ControlCommand(train_id, traction_percent=50.0, source=CommandSource.ATO)),
         ("TRACTION_20", ControlCommand(train_id, traction_percent=20.0, source=CommandSource.ATO)),
         ("TRACTION_10", ControlCommand(train_id, traction_percent=10.0, source=CommandSource.ATO)),
-        ("CRUISE", ControlCommand(train_id, traction_percent=cruise_percent, source=CommandSource.ATO)),
+        ("CRUISE", ControlCommand(
+            train_id,
+            traction_percent=cruise_traction_percent,
+            brake_percent=cruise_brake_percent,
+            source=CommandSource.ATO,
+        )),
         ("COAST", ControlCommand.coast(train_id, source=CommandSource.ATO)),
         ("BRAKE_15", ControlCommand(train_id, brake_percent=15.0, source=CommandSource.ATO)),
         ("BRAKE_40", ControlCommand(train_id, brake_percent=40.0, source=CommandSource.ATO)),

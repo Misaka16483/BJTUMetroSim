@@ -819,7 +819,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   //  后端仿真引擎
   // ═══════════════════════════════════════════════════
 
-  updateFromBackend: (data: SimStateResponse, transport = 'REST') => {
+  updateFromBackend: (data: SimStateResponse) => {
     const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions, dispatchRuntime, operations } = data;
     const state = get();
     const sameStream = state.sessionId === data.sessionId && state.runId === data.runId;
@@ -827,10 +827,10 @@ export const useSimStore = create<SimState>((set, get) => ({
     const hasGap = sameStream
       && state.snapshotSequence > 0
       && data.snapshotSequence > state.snapshotSequence + 1;
-    if (hasGap && transport === 'WS') {
-      set({ snapshotGapCount: state.snapshotGapCount + 1 });
-      return 'gap';
-    }
+    // WebSocket publishes the latest state, not every physical microtick.
+    // Forward sequence jumps are expected coalescing (especially at 10x), so
+    // consume the newest authoritative snapshot instead of rejecting it and
+    // creating a REST resynchronization storm.
     const streamChanged = state.sessionId !== null && !sameStream;
     // A GET started before POST /start may arrive later with a stale LOADED or
     // STOPPED snapshot. Do not let it overwrite the acknowledged start state.

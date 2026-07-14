@@ -394,6 +394,7 @@ class SimulationEngine:
     # 鈹€鈹€ 閫熷害鏇茬嚎鍙傛暟 鈹€鈹€
     CRUISE_SPEED_MPS = 22.22  # 80 km/h 宸¤埅
     ROUTE_REQUEST_RETRY_MS = 1_000
+    POWER_CURVE_HISTORY_SECONDS = 180.0
 
     def __init__(
         self,
@@ -505,6 +506,12 @@ class SimulationEngine:
         self._reset_station_history()
         self._last_power_states: dict[str, Any] = {}
         self._last_power_solve_sim_time_ms: int | None = None
+        self._power_curve_history: deque[JsonDict] = deque(
+            maxlen=max(
+                1,
+                round(self.POWER_CURVE_HISTORY_SECONDS / self.clock.tick_seconds),
+            )
+        )
         self._last_dispatch_decisions: list[DispatchDecision] = []
         self._pending_dispatch_decisions: list[DispatchDecision] = []
         self._power_commands: deque[PowerCommand] = deque()
@@ -970,6 +977,7 @@ class SimulationEngine:
         self._last_arrivals_by_platform = {}
         self._last_power_states = self._empty_power_states()
         self._last_power_solve_sim_time_ms = None
+        self._power_curve_history.clear()
         self._last_dispatch_decisions = []
         self._pending_dispatch_decisions = []
         with self._passenger_command_lock:
@@ -1108,6 +1116,7 @@ class SimulationEngine:
             self.power_service = self._build_power_service()
             self._last_power_states = self._empty_power_states()
             self._last_power_solve_sim_time_ms = None
+            self._power_curve_history.clear()
             self._snapshot = self._build_snapshot()
 
     def queue_power_command(self, command_type: str, payload: JsonDict) -> JsonDict:
@@ -1748,6 +1757,11 @@ class SimulationEngine:
         self._pending_operation_events = []
 
         self._record_station_history(sim_time_ms)
+        network_snapshot = self.power_service.last_network_snapshot
+        if network_snapshot is not None and (
+            not power_solved or network_snapshot.sim_time_ms == sim_time_ms
+        ):
+            self._record_power_curve_sample(sim_time_ms, network_snapshot)
         # 8) 鏇存柊蹇収
         self._snapshot = self._build_snapshot()
         if tick % self._snapshot_interval_ticks == 0:
@@ -5133,6 +5147,7 @@ class SimulationEngine:
         with self._power_lock:
             snapshot = self.power_service.last_network_snapshot
             result = snapshot.to_dict() if snapshot is not None else {}
+            result["curveSamples"] = list(self._power_curve_history)
             if self.power_service.network is not None:
                 topology = self.power_service.network.topology_dict()
                 result["switches"] = topology["switches"]
@@ -5141,6 +5156,41 @@ class SimulationEngine:
             result["commandResults"] = list(self._power_command_results)
             result["solverFailure"] = self.power_service.last_solver_failure
             return result
+
+    def _record_power_curve_sample(self, sim_time_ms: int, snapshot: Any) -> None:
+        """Keep every physical micro-tick needed for speed-independent trends."""
+        finite_train_voltages = [
+            float(item.voltage_v)
+            for item in snapshot.trains
+            if math.isfinite(float(item.voltage_v))
+        ]
+        substations = list(snapshot.substations)
+        storages = list(snapshot.supercapacitor_flows)
+        self._power_curve_history.append({
+            "simTimeMs": int(sim_time_ms),
+            "electricalSolveTimeMs": int(snapshot.sim_time_ms),
+            "samplePeriodMs": round(self.clock.tick_seconds * 1000),
+            "minVoltageV": (
+                round(min(finite_train_voltages), 3)
+                if finite_train_voltages else None
+            ),
+            "netSubstationPowerKw": round(sum(item.power_kw for item in substations), 3),
+            "rectifierPowerKw": round(sum(item.rectifier_power_kw for item in substations), 3),
+            "feedbackPowerKw": round(sum(item.feedback_power_kw for item in substations), 3),
+            "maxSubstationLoadRatio": round(
+                max((item.load_ratio for item in substations), default=0.0),
+                6,
+            ),
+            "networkLossesKw": round(float(snapshot.losses_kw), 3),
+            "generatedRegenKw": round(float(snapshot.generated_regen_kw), 3),
+            "selfConsumedRegenKw": round(float(snapshot.self_consumed_regen_kw), 3),
+            "absorbedRegenKw": round(float(snapshot.absorbed_regen_kw), 3),
+            "feedbackRegenKw": round(float(snapshot.feedback_regen_kw), 3),
+            "wastedRegenKw": round(float(snapshot.wasted_regen_kw), 3),
+            "regenTransferLossesKw": round(float(snapshot.regen_transfer_losses_kw), 3),
+            "storageChargeKw": round(sum(item.charge_power_kw for item in storages), 3),
+            "storageDischargeKw": round(sum(item.discharge_power_kw for item in storages), 3),
+        })
 
     def export_current_run(self) -> JsonDict:
         if self.recorder is None or self._run_id is None:

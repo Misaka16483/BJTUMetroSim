@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSimStore } from '../store/useSimStore';
 import type {
@@ -20,7 +20,7 @@ import {
 
 type HistoryPoint = {
   tick: number;
-  minVoltageV: number;
+  minVoltageV: number | null;
   netSubstationPowerKw: number;
   rectifierPowerKw: number;
   feedbackPowerKw: number;
@@ -32,6 +32,8 @@ type HistoryPoint = {
   wastedRegenKw: number;
   storageChargeKw: number;
   storageDischargeKw: number;
+  feedbackRegenKw: number;
+  regenTransferLossesKw: number;
 };
 
 type EventPoint = {
@@ -87,9 +89,7 @@ export default function PowerSystemView() {
   const trains = useSimStore((s) => s.trains);
   const [selectedSubstationId, setSelectedSubstationId] = useState<string>('');
   const [selectedSwitchId, setSelectedSwitchId] = useState<string>('');
-  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [events, setEvents] = useState<EventPoint[]>([]);
-  const lastSampleTickRef = useRef<number | null>(null);
   const [feederFilter, setFeederFilter] = useState<'ALL' | 'SELECTED' | 'ABNORMAL'>('ABNORMAL');
   const [actionStatus, setActionStatus] = useState<string>('就绪');
   const [actionPending, setActionPending] = useState(false);
@@ -121,6 +121,25 @@ export default function PowerSystemView() {
   );
   const regen = simPowerNetwork?.regen;
   const solver = simPowerNetwork?.solver;
+  const history = useMemo<HistoryPoint[]>(() => (
+    (simPowerNetwork?.curveSamples ?? []).map((sample) => ({
+      tick: sample.simTimeMs,
+      minVoltageV: sample.minVoltageV,
+      netSubstationPowerKw: sample.netSubstationPowerKw,
+      rectifierPowerKw: sample.rectifierPowerKw,
+      feedbackPowerKw: -sample.feedbackPowerKw,
+      maxLoadRatio: sample.maxSubstationLoadRatio,
+      lossesKw: sample.networkLossesKw,
+      absorbedRegenKw: sample.absorbedRegenKw,
+      generatedRegenKw: sample.generatedRegenKw,
+      selfConsumedRegenKw: sample.selfConsumedRegenKw,
+      wastedRegenKw: sample.wastedRegenKw,
+      storageChargeKw: sample.storageChargeKw,
+      storageDischargeKw: sample.storageDischargeKw,
+      feedbackRegenKw: sample.feedbackRegenKw,
+      regenTransferLossesKw: sample.regenTransferLossesKw,
+    }))
+  ), [simPowerNetwork?.curveSamples]);
   const firstMileage = substations[0]?.mileageM ?? 0;
   const lastMileage = substations[substations.length - 1]?.mileageM ?? firstMileage + 1;
   const span = Math.max(lastMileage - firstMileage, 1);
@@ -147,52 +166,6 @@ export default function PowerSystemView() {
   }, [selectedSwitchId, switches]);
 
   useEffect(() => {
-    if (!simPowerNetwork) return;
-    const sampleTick = simPowerNetwork.simTimeMs ?? (lastSampleTickRef.current ?? -1) + 1;
-    if (lastSampleTickRef.current !== null && sampleTick < lastSampleTickRef.current) {
-      setEvents([]);
-    }
-    lastSampleTickRef.current = sampleTick;
-    const validTrainVoltages = trainVoltages
-      .map((item) => item.voltageV)
-      .filter((voltage) => Number.isFinite(voltage));
-    const minVoltage = validTrainVoltages.length > 0
-      ? Math.min(...validTrainVoltages)
-      : (powerTopology?.nominalVoltageV ?? 750);
-    const netPower = substations.reduce((sum, item) => sum + (item.powerKw ?? 0), 0);
-    const rectifierPower = substations.reduce((sum, item) => sum + Math.max(item.rectifierPowerKw ?? 0, 0), 0);
-    const substationFeedbackPower = substations.reduce(
-      (sum, item) => sum + Math.max(item.feedbackPowerKw ?? 0, 0),
-      0,
-    );
-    // The aggregate regen ledger is authoritative. Feedback is plotted below zero
-    // to distinguish AC-grid export from positive DC traction demand.
-    const feedbackPower = -(regen?.feedbackKw ?? substationFeedbackPower);
-    const maxLoadRatio = Math.max(...substations.map((item) => item.loadRatio ?? 0), 0);
-    setHistory((items) => {
-      const previous = items[items.length - 1];
-      const point: HistoryPoint = {
-        tick: sampleTick,
-        minVoltageV: minVoltage,
-        netSubstationPowerKw: netPower,
-        rectifierPowerKw: rectifierPower,
-        feedbackPowerKw: feedbackPower,
-        maxLoadRatio,
-        lossesKw: simPowerNetwork.lossesKw ?? 0,
-        absorbedRegenKw: regen?.absorbedKw ?? 0,
-        generatedRegenKw: regen?.generatedKw ?? 0,
-        selfConsumedRegenKw: regen?.selfConsumedKw ?? 0,
-        wastedRegenKw: regen?.wastedKw ?? 0,
-        storageChargeKw: regen?.storageChargedKw ?? 0,
-        storageDischargeKw: regen?.storageDischargedKw ?? 0,
-      };
-      if (previous && point.tick < previous.tick) return [point];
-      if (previous?.tick === point.tick) return [...items.slice(0, -1), point];
-      return [...items.slice(-179), point];
-    });
-  }, [simPowerNetwork, trainVoltages, substations, regen, powerTopology?.nominalVoltageV]);
-
-  useEffect(() => {
     const result = simPowerNetwork?.commandResults?.at(-1);
     if (!result) return;
     if (result.status === 'APPLIED') setActionStatus(`${result.commandId} 已执行`);
@@ -215,7 +188,10 @@ export default function PowerSystemView() {
       point.lossesKw,
       point.generatedRegenKw,
       point.selfConsumedRegenKw,
+      point.absorbedRegenKw,
+      point.feedbackRegenKw,
       point.wastedRegenKw,
+      point.regenTransferLossesKw,
       point.storageChargeKw,
       point.storageDischargeKw,
     ]);
@@ -313,10 +289,10 @@ export default function PowerSystemView() {
           </div>
           <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <Metric label="最低列车电压" value={fmt(minVoltageTrain?.voltageV, 0)} unit="V" color={(minVoltageTrain?.voltageV ?? 750) < 650 ? 'var(--amber)' : 'var(--green)'} />
-            <Metric label="最大牵引所负载" value={fmt((busiestSubstation?.loadRatio ?? 0) * 100, 1)} unit="%" color={(busiestSubstation?.loadRatio ?? 0) >= 0.85 ? 'var(--amber)' : 'var(--cyan)'} />
-            <Metric label="线路损耗" value={fmt(simPowerNetwork?.lossesKw, 1)} unit="kW" color="var(--text-dim)" />
-            <Metric label="再生浪费" value={fmt(regen?.wastedKw, 0)} unit="kW" color={(regen?.wastedKw ?? 0) > 0 ? 'var(--amber)' : 'var(--green)'} />
-            <Metric label="再生生成" value={fmt(regen?.generatedKw, 0)} unit="kW" color="var(--cyan)" />
+            <Metric label="最大牵引所电流负载率" value={fmt((busiestSubstation?.loadRatio ?? 0) * 100, 1)} unit="%" color={(busiestSubstation?.loadRatio ?? 0) >= 0.85 ? 'var(--amber)' : 'var(--cyan)'} />
+            <Metric label="网络与设备电阻损耗" value={fmt(simPowerNetwork?.lossesKw, 1)} unit="kW" color="var(--text-dim)" />
+            <Metric label="未回收再生潜力" value={fmt(regen?.wastedKw, 0)} unit="kW" color={(regen?.wastedKw ?? 0) > 0 ? 'var(--amber)' : 'var(--green)'} />
+            <Metric label="候选再生功率" value={fmt(regen?.generatedKw, 0)} unit="kW" color="var(--cyan)" />
             <Metric label="本车自用" value={fmt(regen?.selfConsumedKw, 0)} unit="kW" color="var(--green)" />
             <Metric label="跨车吸收" value={fmt(regen?.absorbedKw, 0)} unit="kW" color="var(--cyan)" />
             <Metric label="变电所反馈" value={fmt(regen?.feedbackKw, 0)} unit="kW" color="#b57cff" />
@@ -330,25 +306,36 @@ export default function PowerSystemView() {
                 points={history}
                 events={events}
                 series={[
-                  { key: 'minVoltageV', label: '最低电压', color: '#8FC31F', min: 500, max: 900, unit: 'V', axis: 'left' },
-                  { key: 'maxLoadRatio', label: '最大负载', color: '#ffb454', min: 0, max: 1, unit: 'p.u.', axis: 'right' },
+                  { key: 'minVoltageV', label: '最低列车电压', color: '#8FC31F', unit: 'V', axis: 'left' },
+                  { key: 'maxLoadRatio', label: '最大牵引所电流负载率', color: '#ffb454', unit: 'p.u.', axis: 'right' },
                 ]}
               />
             </TrendPanel>
-            <TrendPanel title="功率与能量" subtitle="正值为牵引网功率流，交流回馈绘制为负值（kW）">
+            <TrendPanel title="直流侧供电功率" subtitle="正值流入牵引网，回馈装置吸收绘制为负值（kW）">
               <TrendChart
                 points={history}
                 events={events}
                 series={[
                   { key: 'netSubstationPowerKw', label: '变电所净功率', color: '#58a6ff', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
-                  { key: 'rectifierPowerKw', label: '整流输入', color: '#8FC31F', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
-                  { key: 'lossesKw', label: '线路损耗', color: '#8ba0bb', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
-                  { key: 'wastedRegenKw', label: '再生浪费', color: '#ff453a', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
-                  { key: 'generatedRegenKw', label: '再生总功率', color: '#38bdf8', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
-                  { key: 'selfConsumedRegenKw', label: '本车自用', color: '#facc15', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
-                  { key: 'storageChargeKw', label: '超级电容充电', color: '#22c55e', dash: '5 3', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'rectifierPowerKw', label: '整流机组直流侧输出', color: '#8FC31F', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'lossesKw', label: '直流网络与设备电阻损耗', color: '#8ba0bb', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
                   { key: 'storageDischargeKw', label: '超级电容放电', color: '#fb923c', dash: '5 3', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
-                  { key: 'feedbackPowerKw', label: '交流回馈(-)', color: '#c084fc', dash: '6 4', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'feedbackPowerKw', label: '回馈装置直流侧吸收（负向）', color: '#c084fc', dash: '6 4', min: powerScale.min, max: powerScale.max, unit: 'kW', axis: 'left' },
+                ]}
+              />
+            </TrendPanel>
+            <TrendPanel title="再生功率分配" subtitle="候选再生功率及其实际去向（kW）">
+              <TrendChart
+                points={history}
+                events={events}
+                series={[
+                  { key: 'generatedRegenKw', label: '候选再生功率', color: '#38bdf8', min: 0, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'selfConsumedRegenKw', label: '本车辅助自用', color: '#facc15', min: 0, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'absorbedRegenKw', label: '跨车吸收', color: '#58a6ff', min: 0, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'storageChargeKw', label: '超级电容充电', color: '#22c55e', dash: '5 3', min: 0, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'feedbackRegenKw', label: '变电所回馈', color: '#c084fc', dash: '6 4', min: 0, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'wastedRegenKw', label: '未回收再生潜力', color: '#ff453a', min: 0, max: powerScale.max, unit: 'kW', axis: 'left' },
+                  { key: 'regenTransferLossesKw', label: '再生传输损耗', color: '#8ba0bb', min: 0, max: powerScale.max, unit: 'kW', axis: 'left' },
                 ]}
               />
             </TrendPanel>
@@ -420,17 +407,19 @@ export default function PowerSystemView() {
           </section>
           <section className="grid grid-cols-1 lg:grid-cols-[1fr_1.25fr] gap-3">
             <DataTable
-              title="接触轨分段潮流（正值指向公里标增大方向）"
-              columns={['分段', '方向', '电流/A', '功率/kW', '负载率', '状态']}
+              title="接触轨分段端点电流与潮流（空间正向为公里标增大）"
+              columns={['分段', '方向', '左端/A', '右端/A', '净注入/A', '平均穿越/A', '负载率', '状态']}
               rows={contactRailFlows.map((item) => [
                 item.sectionId,
                 item.direction,
-                `${item.currentA >= 0 ? '+' : ''}${fmt(item.currentA, 0)}`,
-                `${item.powerKw >= 0 ? '+' : ''}${fmt(item.powerKw, 1)}`,
+                fmt(item.leftEndSpatialCurrentA, 0),
+                fmt(item.rightEndSpatialCurrentA, 0),
+                fmt(item.netSectionInjectionA, 0),
+                fmt(item.averageThroughCurrentA, 0),
                 `${fmt(item.loadRatio * 100, 1)}%`,
                 item.status,
               ])}
-              statusColumn={5}
+              statusColumn={7}
             />
             <DataTable
               title="再生能量路径"
@@ -751,9 +740,20 @@ function TrendChart({
   const leftAxis = series.find((item) => item.axis !== 'right') ?? series[0];
   const rightAxis = series.find((item) => item.axis === 'right');
   const axisRange = (item: (typeof series)[number]) => {
-    const values = points.map((point) => Number(point[item.key] ?? 0));
-    const min = item.min ?? Math.min(...values, 0);
-    const max = item.max ?? Math.max(...values, 1);
+    const values = points
+      .map((point) => point[item.key])
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+    const defaultMin = item.key === 'minVoltageV' ? 650 : 0;
+    const defaultMax = item.key === 'minVoltageV'
+      ? 900
+      : item.key === 'maxLoadRatio'
+        ? 1.05
+        : 1;
+    const min = item.min ?? Math.min(...values, defaultMin);
+    const observedMax = Math.max(...values, defaultMax);
+    const max = item.max ?? (
+      item.key === 'maxLoadRatio' ? observedMax * 1.05 : observedMax
+    );
     return { min, max, range: Math.max(max - min, 1e-6) };
   };
   const leftRange = axisRange(leftAxis);
@@ -794,14 +794,19 @@ function TrendChart({
         />
       )}
       {series.map((item) => {
-        const values = points.map((point) => Number(point[item.key] ?? 0));
-        const min = item.min ?? Math.min(...values, 0);
-        const max = item.max ?? Math.max(...values, 1);
-        const range = Math.max(max - min, 1e-6);
-        const path = points.map((point, index) => {
+        const itemRange = axisRange(item);
+        let drawing = false;
+        const path = points.map((point) => {
           const x = pad + ((point.tick - firstTick) / tickRange) * (width - pad * 2);
-          const y = plotBottom - ((Number(point[item.key] ?? 0) - min) / range) * plotHeight;
-          return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+          const value = point[item.key];
+          if (typeof value !== 'number' || !Number.isFinite(value)) {
+            drawing = false;
+            return '';
+          }
+          const y = plotBottom - ((value - itemRange.min) / itemRange.range) * plotHeight;
+          const command = drawing ? 'L' : 'M';
+          drawing = true;
+          return `${command}${x.toFixed(1)},${y.toFixed(1)}`;
         }).join(' ');
         return (
           <path
@@ -812,6 +817,22 @@ function TrendChart({
             strokeWidth="2"
             strokeDasharray={item.dash}
           />
+        );
+      })}
+      {[0, 0.5, 1].map((ratio) => {
+        const tick = firstTick + tickRange * ratio;
+        return (
+          <text
+            key={`time-${ratio}`}
+            x={pad + ratio * (width - pad * 2)}
+            y={plotBottom + 13}
+            textAnchor={ratio === 0 ? 'start' : ratio === 1 ? 'end' : 'middle'}
+            fill="#61758e"
+            fontSize="8"
+            fontFamily="monospace"
+          >
+            {(tick / 1000).toFixed(1)} s
+          </text>
         );
       })}
       {events.map((event, index) => {

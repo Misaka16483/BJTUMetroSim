@@ -17,6 +17,32 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EnginePowerNetworkLoopTests(unittest.TestCase):
+    def test_power_curve_microtick_history_is_identical_at_1x_and_10x(self) -> None:
+        histories = []
+        for multiplier in (1, 10):
+            engine = SimulationEngine.load_from_files(
+                scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
+                line_map_path=ROOT / "data" / "cache" / "line_map.json",
+                stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
+            )
+            engine.load()
+            engine.set_speed_multiplier(multiplier)
+            engine.clock.start()
+            for _ in range(12):
+                engine._tick()
+            snapshot = engine.snapshot()
+            assert snapshot is not None
+            histories.append(snapshot.power_network["curveSamples"])
+
+        self.assertEqual(
+            [item["simTimeMs"] for item in histories[0]],
+            [item["simTimeMs"] for item in histories[1]],
+        )
+        self.assertEqual(
+            [item["samplePeriodMs"] for item in histories[0]],
+            [item["samplePeriodMs"] for item in histories[1]],
+        )
+
     def test_power_request_uses_actual_vehicle_command_during_braking(self) -> None:
         engine = SimulationEngine.load_from_files(
             scenario_path=ROOT / "data" / "scenarios" / "line9_single.json",
@@ -135,6 +161,12 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
             self.assertEqual(len(snapshot.power_network["supercapacitorStorageSystems"]), 1)
             self.assertIn("storageChargedKw", snapshot.power_network["regen"])
             self.assertIn("storageDischargedKw", snapshot.power_network["regen"])
+            self.assertEqual(len(snapshot.power_network["curveSamples"]), 8)
+            self.assertEqual(
+                [item["simTimeMs"] for item in snapshot.power_network["curveSamples"]],
+                sorted(item["simTimeMs"] for item in snapshot.power_network["curveSamples"]),
+            )
+            self.assertTrue(all(item["samplePeriodMs"] == 250 for item in snapshot.power_network["curveSamples"]))
             self.assertIn("minTrainVoltageV", snapshot.kpi)
 
             with closing(sqlite3.connect(db_path)) as conn:

@@ -106,6 +106,35 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertEqual(loaded["power"]["avgVoltageV"], 748.0)
         self.assertEqual(set(loaded["charts"].keys()), {"dynamics", "passenger", "power"})
 
+    def test_power_consumption_uses_each_sections_terminal_cumulative_value(self) -> None:
+        run_id = self.recorder.start_run(
+            "power-terminal-cumulative",
+            {"startTimeMs": 0, "tickSeconds": 0.25, "trainCount": 0},
+        )
+        for sim_time_ms, section_id, energy_kwh in (
+            (250, "PWR-A", 1.0),
+            (500, "PWR-A", 2.0),
+            (250, "PWR-B", 1.5),
+            (500, "PWR-B", 3.0),
+        ):
+            self.recorder.record_power(
+                run_id,
+                sim_time_ms=sim_time_ms,
+                power_section_id=section_id,
+                requested_power_kw=100.0,
+                available_power_kw=1_000.0,
+                traction_limit_ratio=1.0,
+                voltage_level="NORMAL",
+                energy_kwh=energy_kwh,
+                regen_energy_kwh=0.0,
+                absorbed_regen_kw=0.0,
+                wasted_regen_kw=0.0,
+            )
+
+        report = ReportGenerator(self.recorder).generate(run_id)
+
+        self.assertEqual(report["power"]["totalPowerConsumedKwh"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

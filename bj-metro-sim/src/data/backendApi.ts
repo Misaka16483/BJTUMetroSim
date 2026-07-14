@@ -274,6 +274,12 @@ export interface PowerSubstationState {
   energyKwh: number;
   loadRatio: number;
   status: string;
+  rectifierPowerKw: number;
+  feedbackPowerKw: number;
+  rectifierDcBusOutputKw?: number;
+  substationInternalLossKw?: number;
+  equivalentDcSourcePowerKw?: number;
+  feedbackDcBusPowerKw?: number;
 }
 
 export interface PowerTopologySubstation {
@@ -286,8 +292,6 @@ export interface PowerTopologySubstation {
   overloadCurrentA: number;
   efsCapacityKw: number;
   status: string;
-  rectifierPowerKw: number;
-  feedbackPowerKw: number;
   sourceId: string;
   quality: string;
   parameterSources: Record<string, string>;
@@ -368,8 +372,30 @@ export interface ContactRailPowerFlowState {
   powerKw: number;
   loadRatio: number;
   status: string;
-  rectifierPowerKw?: number;
-  feedbackPowerKw?: number;
+  leftEndSpatialCurrentA?: number;
+  rightEndSpatialCurrentA?: number;
+  netSectionInjectionA?: number;
+  averageThroughCurrentA?: number;
+}
+
+export interface PowerCurveSample {
+  simTimeMs: number;
+  electricalSolveTimeMs: number;
+  samplePeriodMs: number;
+  minVoltageV: number | null;
+  netSubstationPowerKw: number;
+  rectifierPowerKw: number;
+  feedbackPowerKw: number;
+  maxSubstationLoadRatio: number;
+  networkLossesKw: number;
+  generatedRegenKw: number;
+  selfConsumedRegenKw: number;
+  absorbedRegenKw: number;
+  feedbackRegenKw: number;
+  wastedRegenKw: number;
+  regenTransferLossesKw: number;
+  storageChargeKw: number;
+  storageDischargeKw: number;
 }
 
 export interface PowerTopologyFeeder {
@@ -425,6 +451,7 @@ export interface PowerNetworkState {
   contactRailFlows?: ContactRailPowerFlowState[];
   supercapacitorStorageSystems?: SupercapacitorStorageState[];
   trainVoltages: TrainVoltageState[];
+  curveSamples?: PowerCurveSample[];
   regen: {
     generatedKw: number;
     selfConsumedKw: number;
