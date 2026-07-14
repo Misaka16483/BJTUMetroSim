@@ -43,6 +43,20 @@ def build_engine(scenario_path: Path = SCENARIO, recorder: RunRecorder | None = 
     return engine
 
 
+def advance_until_any_train_moves(
+    engine: SimulationEngine,
+    *,
+    min_speed_mps: float = 1.0,
+    max_ticks: int = 300,
+) -> int:
+    """Wait through dwell/interlocking startup before comparing loaded power states."""
+    for tick in range(1, max_ticks + 1):
+        engine._tick()
+        if any(item.speed_mps >= min_speed_mps for item in engine.trains):
+            return tick
+    raise RuntimeError("no train reached motion state before power acceptance timeout")
+
+
 def five_train_loads(force_n: float = 100_000.0) -> list[TrainElectricalLoad]:
     return [
         TrainElectricalLoad(f"T{i}", "UP", 2200.0 + i * 400.0, 15.0, traction_force_n=force_n, aux_power_kw=100.0)
@@ -408,6 +422,7 @@ def passenger_check(output_dir: Path) -> dict:
                 key: replace(value, no_load_voltage_v=740.0, internal_resistance_ohm=0.025)
                 for key, value in stressed_network.substations.items()
             }
+            advance_until_any_train_moves(stressed)
             stressed_min_limit = 1.0
             for _tick in range(200):
                 stressed._tick()

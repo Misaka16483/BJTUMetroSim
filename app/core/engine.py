@@ -42,15 +42,8 @@ from app.domain.interlocking.train_track_trace import TrainTrackTrace
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
-from app.domain.station.services import (
-    DayType,
-    DwellTimeConfig,
-    FlowScenario,
-    PoissonPassengerFlowGenerator,
-    StationFlowConfig,
-    StationService,
-    TrainLoadState,
-)
+from app.domain.station.passenger_profiles import load_passenger_profile
+from app.domain.station.services import PoissonPassengerFlowGenerator, StationService, TrainLoadState
 from app.domain.vehicle.models import ControlCommand, TrainState, VehicleConfig, CommandSource
 from app.domain.vehicle.doors import DoorSide, TrainDoorSystem
 from app.domain.vehicle.services import (
@@ -89,7 +82,7 @@ class SimTrainState:
     target_distance_m: float = 0.0     # 当前区间总站间距（不变，到站后更新）
     dwell_remaining_sec: float = 0.0
     onboard_pax: int = 0
-    capacity_pax: int = 600
+    capacity_pax: int = 1460
     load_factor: float = 0.0
     door_state: str = "CLOSED"
     door_side: str = "NONE"
@@ -563,7 +556,6 @@ class SimulationEngine:
         for train in self.trains:
             if train.train_id == train_id:
                 train.mass_kg = self._make_vehicle_config(train_id, train.onboard_pax).mass_kg
-                train.capacity_pax = 600
                 self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self._snapshot = self._build_snapshot()
         return vcfg
@@ -796,7 +788,10 @@ class SimulationEngine:
         if operation_mode not in ("ATO", "MANUAL"):
             return {"ok": False, "error": "INVALID_OPERATION_MODE"}
 
-        capacity_pax = int(payload.get("capacityPax", 600))
+        capacity_pax = int(payload.get(
+            "capacityPax",
+            getattr(self, "_default_train_capacity_pax", 1_460),
+        ))
         initial_load_pax = int(payload.get("initialLoadPax", 0))
         if capacity_pax <= 0:
             return {"ok": False, "error": "INVALID_CAPACITY"}
@@ -3255,7 +3250,6 @@ class SimulationEngine:
             train_load=TrainLoadState(train.train_id, train.onboard_pax, train.capacity_pax),
             requested_alighting=requested_alighting,
             requested_boarding=requested_boarding,
-            platform_area_m2=120.0,
         )
         train._boarding_credit_pax -= result.boarding
         train.onboard_pax = result.updated_load.onboard_pax
@@ -3292,7 +3286,10 @@ class SimulationEngine:
             onboard_pax=train.onboard_pax,
             capacity_pax=train.capacity_pax,
             load_factor=train.load_factor,
-            vehicle_load_kg=train.onboard_pax * 65.0,
+            vehicle_load_kg=(
+                train.onboard_pax
+                * getattr(self, "_average_passenger_mass_kg", 65.0)
+            ),
             detail={"stationId": train.current_station_code},
         )
         self.recorder.record_dwell(
@@ -4476,6 +4473,9 @@ class SimulationEngine:
                 ),
                 "totalOnboardPax": sum(t.onboard_pax for t in self.trains),
                 "totalWaitingPax": sum(p.waiting_pax for p in self.station_service.platforms.values()),
+                "passengerProfileId": self._passenger_profile.profile_id,
+                "passengerDataQuality": self._passenger_profile.quality,
+                "estimatedWeekdayPassengerArrivals": self._estimated_weekday_passenger_arrivals,
                 "maxPlatformDensity": round(
                     max((p.platform_density_pax_per_m2 for p in self.station_service.platforms.values()), default=0.0),
                     3,
@@ -4617,7 +4617,10 @@ class SimulationEngine:
             onboard_pax=cfg.initial_load_pax,
             capacity_pax=cfg.capacity_pax,
             load_factor=(cfg.initial_load_pax / cfg.capacity_pax) if cfg.capacity_pax > 0 else 0.0,
-            mass_kg=225_000.0 + cfg.initial_load_pax * 65.0,
+            mass_kg=(
+                vehicle.mass_kg
+                + cfg.initial_load_pax * vehicle.average_passenger_mass_kg
+            ),
             train_length_m=vehicle.train_length_m,
             current_station_name=stn.get("name", ""),
             next_station_name=next_stn.get("name", ""),
@@ -4632,7 +4635,10 @@ class SimulationEngine:
             line_id="9",
             initial_station_code=str(spec["initialStationCode"]),
             direction=str(spec["direction"]),
-            capacity_pax=int(spec.get("capacityPax", 600)),
+            capacity_pax=int(spec.get(
+                "capacityPax",
+                getattr(self, "_default_train_capacity_pax", 1_460),
+            )),
             initial_load_pax=int(spec.get("initialLoadPax", 0)),
         )
         vehicle_config = self._vehicle_config_by_train.get(train_id)
@@ -4646,46 +4652,28 @@ class SimulationEngine:
         train.operation_mode = str(spec.get("operationMode", "ATO"))
         self._manual_mode_by_train[train_id] = train.operation_mode == "MANUAL"
         if vehicle_config is not None:
-            train.mass_kg = vehicle_config.mass_kg + cfg.initial_load_pax * 65.0
+            train.mass_kg = (
+                vehicle_config.mass_kg
+                + cfg.initial_load_pax * vehicle_config.average_passenger_mass_kg
+            )
         return train
 
     def _build_station_service(self) -> StationService:
-        """构建客流服务 — 使用 Poisson 客流生成器 + 六时段多日型."""
-        # Scenario priors, not AFC/OD measurements.  Each physical station has
-        # an explicit UP and DOWN platform so all global-engine trains consume
-        # the same queues rather than a second independent passenger clock.
-        station_demand = [
-            ("GGZ", 60.0, 0.05, 54.0, 0.12),
-            ("FSP", 72.0, 0.10, 56.0, 0.12),
-            ("KYL", 48.0, 0.12, 38.0, 0.10),
-            ("FTN", 55.0, 0.15, 44.0, 0.12),
-            ("FTD", 40.0, 0.15, 36.0, 0.14),
-            ("QLZ", 65.0, 0.18, 70.0, 0.20),
-            ("LLQ", 90.0, 0.20, 82.0, 0.18),
-            ("LLE", 50.0, 0.18, 76.0, 0.22),
-            ("BWR", 120.0, 0.25, 128.0, 0.28),
-            ("JBG", 80.0, 0.20, 74.0, 0.22),
-            ("BDZ", 35.0, 0.15, 32.0, 0.13),
-            ("BQS", 45.0, 0.15, 62.0, 0.20),
-            ("GTG", 70.0, 0.25, 88.0, 0.24),
-        ]
-        station_configs = [
-            StationFlowConfig(code, rate, alighting, direction=direction)
-            for code, up_rate, up_alighting, down_rate, down_alighting in station_demand
-            for direction, rate, alighting in (
-                ("UP", up_rate, up_alighting),
-                ("DOWN", down_rate, down_alighting),
-            )
-        ]
-
-        flow_generator = PoissonPassengerFlowGenerator(
-            station_configs=station_configs,
-            scenario=FlowScenario(day_type=DayType.MON_THU, line_scale=1.0, random_seed=42),
-            use_poisson=True,
+        """Build the calibrated synthetic passenger service from versioned data."""
+        profile = load_passenger_profile()
+        self._passenger_profile = profile
+        self._default_train_capacity_pax = profile.train_capacity_pax
+        self._average_passenger_mass_kg = profile.average_passenger_mass_kg
+        self._estimated_weekday_passenger_arrivals = round(
+            profile.estimated_daily_arrivals()
         )
         return StationService(
-            flow_generator,
-            DwellTimeConfig(base_dwell_sec=30.0, door_capacity_pax_per_sec=3.0),
+            PoissonPassengerFlowGenerator(
+                list(profile.station_configs),
+                profile.flow_scenario,
+                use_poisson=profile.use_poisson,
+            ),
+            profile.dwell_config,
         )
 
     def _build_power_service(self) -> PowerService:

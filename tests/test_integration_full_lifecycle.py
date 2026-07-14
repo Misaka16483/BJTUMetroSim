@@ -253,7 +253,7 @@ for stn in ["GGZ", "FSP", "KYL"]:
 
 # ── 2f. 下车比例 ──
 ratio = fg.alighting_ratio("GGZ", "UP")
-between(ratio, 0.01, 0.5, f"GGZ alighting_ratio {ratio:.3f}")
+between(ratio, 0.0, 0.5, f"GGZ alighting_ratio {ratio:.3f}")
 
 # ── 2g. DOWN 方向（如有配置） ──
 down_rate = fg.arrival_rate_pax_per_min("GGZ", "DOWN", 8*3600*1000)

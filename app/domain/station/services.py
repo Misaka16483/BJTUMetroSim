@@ -40,6 +40,25 @@ class StationFlowConfig:
     base_arrival_rate_pax_per_min: float          # 平峰小时基准到达率
     alighting_ratio: float = 0.12                 # 本站下车比例
     direction: str = "UP"
+    platform_area_m2: float = 120.0
+    period_factors: tuple[tuple[str, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.station_id:
+            raise ValueError("station_id is required")
+        if self.direction not in {"UP", "DOWN"}:
+            raise ValueError("direction must be UP or DOWN")
+        if self.base_arrival_rate_pax_per_min < 0:
+            raise ValueError("base arrival rate must be non-negative")
+        if not 0.0 <= self.alighting_ratio <= 1.0:
+            raise ValueError("alighting ratio must be in [0, 1]")
+        if self.platform_area_m2 <= 0:
+            raise ValueError("platform area must be positive")
+        if any(value < 0 for _, value in self.period_factors):
+            raise ValueError("period factors must be non-negative")
+
+    def period_factor(self, period_name: str) -> float:
+        return dict(self.period_factors).get(period_name, 1.0)
 
 
 @dataclass(frozen=True)
@@ -156,13 +175,16 @@ class PoissonPassengerFlowGenerator:
                 return cfg
         return None
 
-    def _period_multiplier(self, sim_time_ms: int) -> float:
+    def _period(self, sim_time_ms: int) -> tuple[str | None, float]:
         """根据仿真时刻返回六时段系数."""
         sim_sec = (sim_time_ms // 1000) % 86400
-        for _name, start, end, coeff in TIME_PERIODS:
+        for name, start, end, coeff in TIME_PERIODS:
             if start <= sim_sec < end:
-                return coeff
-        return 0.0  # 0:00-5:00 无运营
+                return name, coeff
+        return None, 0.0  # 0:00-5:00 无运营
+
+    def _period_multiplier(self, sim_time_ms: int) -> float:
+        return self._period(sim_time_ms)[1]
 
     def arrival_rate_pax_per_min(
         self, station_id: str, direction: str, sim_time_ms: int
@@ -171,12 +193,13 @@ class PoissonPassengerFlowGenerator:
         cfg = self._station_config(station_id, direction)
         if cfg is None:
             return 0.0
-        period_coeff = self._period_multiplier(sim_time_ms)
+        period_name, period_coeff = self._period(sim_time_ms)
         if period_coeff <= 0:
             return 0.0
         return (
             cfg.base_arrival_rate_pax_per_min
             * period_coeff
+            * cfg.period_factor(period_name or "")
             * self.day_coefficient
             * self._scenario.line_scale
         )
@@ -220,7 +243,11 @@ class StationService:
         self.dwell_config = dwell_config or DwellTimeConfig()
         self.platforms: dict[tuple[str, str], PlatformCrowdState] = {}
         for config in getattr(flow_generator, "_station_configs", []):
-            self.ensure_platform(config.station_id, config.direction)
+            self.ensure_platform(
+                config.station_id,
+                config.direction,
+                config.platform_area_m2,
+            )
         # KPI 累积量
         self._total_boarded: int = 0
         self._total_alighted: int = 0

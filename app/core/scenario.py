@@ -17,7 +17,7 @@ class TrainConfig:
     line_id: str
     initial_station_code: str
     direction: str  # "UP" or "DOWN"
-    capacity_pax: int = 600
+    capacity_pax: int = 1460
     initial_load_pax: int = 0
 
 
@@ -119,7 +119,7 @@ class ScenarioConfig:
                     line_id=item["lineId"],
                     initial_station_code=item["initialStationCode"],
                     direction=item["direction"],
-                    capacity_pax=item.get("capacityPax", 600),
+                    capacity_pax=item.get("capacityPax", 1460),
                     initial_load_pax=item.get("initialLoadPax", 0),
                 )
                 for item in data.get("trains", [])
