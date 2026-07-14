@@ -3,10 +3,12 @@ from __future__ import annotations
 import math
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from app.core.engine import DWELLING, SimulationEngine
 from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import RuleBasedDispatchService
+from app.domain.interlocking.models import RouteRequest
 from app.domain.interlocking.runtime import InterlockingRuntimeCoordinator
 
 
@@ -30,6 +32,15 @@ class FakeTrain:
     phase: str = DWELLING
 
 
+@dataclass(frozen=True)
+class FakePathPlan:
+    key: str
+    segment_ids: tuple[int, ...]
+
+    def cache_key(self) -> tuple[str]:
+        return (self.key,)
+
+
 class DispatchRuntimeTests(unittest.TestCase):
     def test_real_phase_transition_records_departure_and_headway(self) -> None:
         service = RuleBasedDispatchService()
@@ -49,6 +60,86 @@ class DispatchRuntimeTests(unittest.TestCase):
 
 
 class InterlockingRuntimeTests(unittest.TestCase):
+    def test_missing_route_table_path_holds_instead_of_using_legacy_motion(self) -> None:
+        engine = make_engine()
+        try:
+            self.assertTrue(engine.add_train({
+                "trainId": "HOLD", "initialStationCode": "QLZ", "direction": "UP"
+            })["ok"])
+            train = engine.trains[0]
+            train._path_plan = None
+            train.speed_mps = 5.0
+
+            with patch.object(engine, "_ensure_interval_path", return_value=None):
+                handled, prepared = engine._prepare_train_step(
+                    train,
+                    engine._absolute_sim_time_ms(),
+                )
+
+            self.assertTrue(handled)
+            self.assertIsNone(prepared)
+            self.assertEqual(train.speed_mps, 0.0)
+            self.assertFalse(train.departure_authorized)
+            self.assertEqual(train.interlocking_hold_reason, "NO_ROUTE_TABLE_PATH")
+            self.assertEqual(train.current_platform_id, 12)
+        finally:
+            engine.speed_profile_service.shutdown()
+
+    def test_arrival_platform_continuity_completes_route_50_lifecycle(self) -> None:
+        engine = make_engine()
+        try:
+            self.assertTrue(engine.add_train({
+                "trainId": "R50", "initialStationCode": "QLZ", "direction": "UP"
+            })["ok"])
+            engine.clock.start()
+
+            for _ in range(1200):
+                engine._tick()
+                train = engine.trains[0]
+                if train.current_station_code == "LLQ":
+                    break
+            else:
+                self.fail("train did not arrive at LLQ")
+
+            train = engine.trains[0]
+            route_50 = next(
+                item for item in engine.route_service.snapshot()
+                if item["routeId"] == "50"
+            )
+            self.assertEqual(train.current_platform_id, 14)
+            self.assertEqual(train.current_segment_id, 103)
+            self.assertEqual(train.current_segment_offset_m, 0.0)
+            self.assertIsNotNone(train._track_trace)
+            self.assertEqual(train._track_trace.head_segment_id, 103)
+            self.assertEqual(route_50["lastEnteredSectionId"], "88")
+            self.assertIn(route_50["state"], {"LOCKED", "APPROACH_LOCKED"})
+
+            # The next interval must continue from the platform actually
+            # reached by routes 49/50, not another platform at the same station.
+            engine._tick()
+            self.assertEqual(train._path_plan.origin_platform_id, 14)
+            self.assertEqual(train._path_plan.start_segment_id, 103)
+            self.assertEqual(train.current_platform_id, 14)
+            self.assertEqual(train.current_segment_id, 103)
+            self.assertIn(102, train._track_trace.segment_ids)
+            self.assertIn(104, train._track_trace.segment_ids)
+            self.assertTrue(
+                {102, 103}.issubset(
+                    engine.section_occupation.covered_segments_for(train.train_id)
+                )
+            )
+
+            for _ in range(1200):
+                engine._tick()
+                if engine.route_service.state_of("50") == "IDLE":
+                    break
+            else:
+                self.fail("route 50 was not released after the train tail cleared")
+
+            self.assertNotEqual(train.current_segment_id, 88)
+        finally:
+            engine.speed_profile_service.shutdown()
+
     def test_every_mainline_interval_has_route_or_cbtc_section_authority(self) -> None:
         engine = make_engine()
         runtime = InterlockingRuntimeCoordinator(
@@ -85,10 +176,127 @@ class InterlockingRuntimeTests(unittest.TestCase):
         self.assertTrue(first["departureAuthorized"])
         self.assertEqual(second["phase"], DWELLING)
         self.assertFalse(second["departureAuthorized"])
-        self.assertEqual(second["interlockingHoldReason"], "INTERVAL_RESERVED")
+        self.assertEqual(second["interlockingHoldReason"], "CONFLICT_ROUTE_LOCKED")
         self.assertEqual(second["lastDispatchAction"], "HOLD")
         self.assertEqual(second["lastDispatchReason"], "HEADWAY_TOO_SHORT")
         self.assertEqual(engine.snapshot().dispatch_runtime["departureCount"], 1)
+
+    def test_independent_routes_are_not_blocked_by_broad_path_reservations(self) -> None:
+        engine = make_engine()
+        runtime = InterlockingRuntimeCoordinator(engine.line_map, engine.track_query)
+
+        first = runtime.request_departure(
+            "T1",
+            FakePathPlan("first", (49, 50, 51)),
+            ("28",),
+        )
+        # Segment 49 deliberately overlaps the first diagnostic PathPlan.
+        # Route 92 itself uses sections 185/186/187 and is independent of 28.
+        second = runtime.request_departure(
+            "T2",
+            FakePathPlan("second", (49, 220, 221, 222, 223, 225)),
+            ("92",),
+        )
+
+        self.assertTrue(first.granted)
+        self.assertTrue(second.granted)
+        owners = {
+            item["routeId"]: item["trainId"]
+            for item in runtime.route_service.snapshot()
+            if item["state"] in {"LOCKED", "APPROACH_LOCKED"}
+        }
+        self.assertEqual(owners["28"], "T1")
+        self.assertEqual(owners["92"], "T2")
+
+    def test_same_real_route_is_still_exclusive(self) -> None:
+        engine = make_engine()
+        runtime = InterlockingRuntimeCoordinator(engine.line_map, engine.track_query)
+        path = FakePathPlan("shared", (49, 50, 51))
+
+        self.assertTrue(runtime.request_departure("T1", path, ("28",)).granted)
+        second = runtime.request_departure("T2", path, ("28",))
+
+        self.assertFalse(second.granted)
+        self.assertEqual(second.failure_reason, "CONFLICT_ROUTE_LOCKED")
+
+    def test_blocked_second_route_does_not_revoke_an_existing_first_route(self) -> None:
+        engine = make_engine()
+        runtime = InterlockingRuntimeCoordinator(engine.line_map, engine.track_query)
+        path = engine._path_plan_for_station_pair(5, 6)
+        self.assertIsNotNone(path)
+        assert path is not None
+
+        self.assertTrue(
+            runtime.route_service.request(
+                RouteRequest("BLOCK-50", "50", "T-BLOCKER")
+            ).accepted
+        )
+        first = runtime.request_departure("T1", path, ("49",))
+        self.assertTrue(first.granted)
+
+        extension = runtime.request_departure("T1", path, ("49", "50"))
+        self.assertFalse(extension.granted)
+        self.assertEqual(runtime.route_service.locked_by("49"), "T1")
+        self.assertEqual(runtime.route_service.locked_by("50"), "T-BLOCKER")
+
+        # A passed signal correctly returns to red.  Extending authority must
+        # validate newly requested route 50, not cancel route 49 behind T1.
+        runtime.route_service._routes["49"].has_entered = True
+        runtime.signal_resolver.refresh()
+        runtime.route_service.release("50", "CANCEL")
+        extension = runtime.request_departure("T1", path, ("49", "50"))
+        self.assertTrue(extension.granted)
+        self.assertEqual(runtime.route_service.locked_by("49"), "T1")
+        self.assertEqual(runtime.route_service.locked_by("50"), "T1")
+
+    def test_engine_departs_on_first_route_and_retries_blocked_second_route(self) -> None:
+        engine = make_engine()
+        self.assertTrue(engine.add_train({
+            "trainId": "T-PROGRESSIVE",
+            "initialStationCode": "QLZ",
+            "initialSegmentId": 98,
+            "direction": "UP",
+        })["ok"])
+        train = engine.trains[0]
+        self.assertEqual(train._planned_route_ids, ("49", "50"))
+        self.assertTrue(
+            engine.route_service.request(
+                RouteRequest("BLOCK-50", "50", "T-BLOCKER")
+            ).accepted
+        )
+        train.dwell_remaining_sec = 0.0
+        train.door_state = "CLOSED"
+        train.door_notice = "CLOSED"
+        train.phase = DWELLING
+
+        engine._authorize_ready_departures(0)
+        self.assertTrue(train.departure_authorized)
+        self.assertEqual(train.active_route_ids, ("49",))
+        authority = engine._movement_authority_for_train(
+            train,
+            train._path_plan,
+            train.path_position_m,
+            engine._make_vehicle_config(train.train_id, train.onboard_pax),
+        )
+        self.assertIsNotNone(authority)
+        self.assertEqual(authority.end_reason, "ROUTE_ENDPOINT")
+        self.assertEqual(authority.locked_route_ids, ("49",))
+        self.assertLess(authority.end_position_m, train._path_plan.total_length_m)
+
+        train.route_retry_at_ms = 0
+        engine._extend_interval_authority(train, train._path_plan, 1_000)
+        self.assertTrue(train.departure_authorized)
+        self.assertEqual(train.active_route_ids, ("49",))
+        self.assertEqual(
+            train.interlocking_hold_reason,
+            "NEXT_ROUTE_PENDING:CONFLICT_ROUTE_LOCKED",
+        )
+
+        engine.route_service.release("50", "CANCEL")
+        train.route_retry_at_ms = 0
+        engine._extend_interval_authority(train, train._path_plan, 2_000)
+        self.assertEqual(train.active_route_ids, ("49", "50"))
+        self.assertIsNone(train.interlocking_hold_reason)
 
     def test_red_start_signal_revokes_departure_authority(self) -> None:
         engine = make_engine()
@@ -110,6 +318,47 @@ class InterlockingRuntimeTests(unittest.TestCase):
         self.assertEqual(authority.failure_reason, "SIGNAL_AT_STOP")
         self.assertEqual(runtime.snapshot()["lockedRouteCount"], 0)
         self.assertEqual(runtime.snapshot()["reservedIntervalCount"], 0)
+
+    def test_completed_interval_releases_terminal_overlap_authority(self) -> None:
+        engine = make_engine()
+        runtime = engine.interlocking_runtime
+        path = engine._path_plan_for_station_pair(0, 1)
+        self.assertIsNotNone(path)
+
+        authority = runtime.request_departure("T-ARRIVED", path)
+        self.assertTrue(authority.granted)
+        self.assertGreater(runtime.snapshot()["lockedRouteCount"], 0)
+        self.assertEqual(runtime.snapshot()["reservedIntervalCount"], 1)
+
+        runtime.complete_interval("T-ARRIVED")
+
+        self.assertEqual(runtime.snapshot()["lockedRouteCount"], 0)
+        self.assertEqual(runtime.snapshot()["reservedIntervalCount"], 0)
+        self.assertNotIn(
+            "T-ARRIVED",
+            {item["trainId"] for item in runtime.snapshot()["departureAuthorities"]},
+        )
+
+    def test_interlocking_wait_closes_doors_without_restarting_dwell(self) -> None:
+        engine = make_engine()
+        self.assertTrue(engine.add_train({
+            "trainId": "T-WAIT", "initialStationCode": "GGZ", "direction": "UP"
+        })["ok"])
+        path = engine._path_plan_for_station_pair(0, 1)
+        self.assertIsNotNone(path)
+        self.assertTrue(engine.interlocking_runtime.request_departure("T-BLOCK", path).granted)
+        engine.clock.start()
+
+        for _ in range(math.ceil(35.0 / engine.clock.tick_seconds)):
+            engine._tick()
+
+        waiting = engine.trains[0]
+        self.assertEqual(waiting.phase, DWELLING)
+        self.assertFalse(waiting.departure_authorized)
+        self.assertEqual(waiting.interlocking_hold_reason, "INTERVAL_RESERVED")
+        self.assertEqual(waiting.dwell_remaining_sec, 0.0)
+        self.assertEqual(waiting.door_state, "CLOSED")
+        self.assertEqual(waiting.door_transition_remaining_sec, 0.0)
 
     def test_tail_clear_releases_route_and_following_train_eventually_departs(self) -> None:
         engine = make_engine()

@@ -30,10 +30,8 @@ class ATOController:
         self._filtered_derivative: float = 0.0
         self._profile_cache_key: tuple[object, ...] | None = None
         self._profile_cache: OptimizedSpeedProfile | None = None
-        # Fast-forward must keep the 250 ms physics lifecycle responsive.  A
-        # fresh DCDP solve can take seconds per interval, so the engine may
-        # temporarily use the deterministic braking curve while preserving an
-        # already-computed profile.
+        # Profile generation is asynchronous in the engine; this switch remains
+        # available for standalone controller use and is enabled for runtime ATO.
         self.allow_profile_compute: bool = True
         self.last_target_speed_mps: float = 0.0
         self.last_speed_error_mps: float = 0.0
@@ -42,6 +40,7 @@ class ATOController:
         self._last_command: ControlCommand | None = None
         self._last_command_sim_time_s: float | None = None
         self._terminal_braking_latched = False
+        self._terminal_braking_target_position_m: float | None = None
 
     def decide(self, state: TrainState, target: AtoTarget) -> ControlCommand:
         if target.emergency_brake_required:
@@ -137,6 +136,7 @@ class ATOController:
         self._last_command = None
         self._last_command_sim_time_s = None
         self._terminal_braking_latched = False
+        self._terminal_braking_target_position_m = None
 
     @property
     def current_profile(self) -> OptimizedSpeedProfile | None:
@@ -354,6 +354,17 @@ class ATOController:
             dt_s = max(state.sim_time_s - self._last_command_sim_time_s, 1e-6)
         target_position_m = self._target_position_m(target)
         remaining_distance_m = max(0.0, target_position_m - state.position_m)
+        # A route-end movement authority is a temporary stopping target.  Once
+        # CI extends that authority, the old terminal-brake latch must not keep
+        # suppressing traction for the rest of the station interval.
+        if (
+            self._terminal_braking_latched
+            and self._terminal_braking_target_position_m is not None
+            and target_position_m
+            > self._terminal_braking_target_position_m + self.config.stop_tolerance_m
+        ):
+            self._terminal_braking_latched = False
+            self._terminal_braking_target_position_m = None
         braking_distance_m = state.speed_mps * state.speed_mps / (
             2.0 * self.config.expected_deceleration_mps2
         )
@@ -363,6 +374,7 @@ class ATOController:
         )
         if requested.brake_percent > 0 and in_terminal_braking_zone:
             self._terminal_braking_latched = True
+            self._terminal_braking_target_position_m = target_position_m
 
         creep_allowed = (
             remaining_distance_m <= self.config.creep_distance_m

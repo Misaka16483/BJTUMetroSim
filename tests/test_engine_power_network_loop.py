@@ -93,6 +93,23 @@ class EnginePowerNetworkLoopTests(unittest.TestCase):
                 recorder=recorder,
             )
             engine.load()
+            # This test injects manual traction and electric braking while the
+            # trains are already moving. Establish their real route-table
+            # paths and CI authority first; an un-authorized 18 m/s train is
+            # correctly stopped by ATP with pneumatic emergency braking and
+            # therefore cannot be used to exercise regenerative power paths.
+            for train in engine.trains[:2]:
+                next_idx = train.station_index + (1 if train.direction == "UP" else -1)
+                path_plan = engine._ensure_interval_path(train, next_idx)
+                self.assertIsNotNone(path_plan)
+                authority = engine.interlocking_runtime.request_departure(
+                    train.train_id,
+                    path_plan,
+                    train._planned_route_ids,
+                )
+                self.assertTrue(authority.granted)
+                train.active_route_ids = authority.route_ids
+                train.departure_authorized = True
             engine.trains[0].phase = "DEPARTING"
             engine.trains[0].dwell_remaining_sec = 0.0
             engine.trains[0].speed_mps = 18.0

@@ -79,6 +79,34 @@ class AtoPowerStabilityTests(unittest.TestCase):
         )
         self.assertGreater(after_reset.traction_percent, 0.0)
 
+    def test_terminal_braking_latch_releases_when_movement_authority_extends(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        temporary_authority = AtoTarget(target_position_m=1000.0, permitted_speed_mps=12.0)
+
+        braking = controller.decide(
+            TrainState("T1", position_m=720.0, speed_mps=20.0, sim_time_s=0.0),
+            temporary_authority,
+        )
+        controller.decide(
+            TrainState("T1", position_m=725.0, speed_mps=0.0, sim_time_s=0.25),
+            temporary_authority,
+        )
+        self.assertGreater(braking.brake_percent, 0.0)
+        self.assertTrue(controller._terminal_braking_latched)
+
+        extended_authority = AtoTarget(target_position_m=1400.0, permitted_speed_mps=12.0)
+        commands = [
+            controller.decide(
+                TrainState("T1", position_m=725.0, speed_mps=0.0, sim_time_s=sim_time_s),
+                extended_authority,
+            )
+            for sim_time_s in (0.5, 0.75, 1.0, 1.25, 1.5, 1.75)
+        ]
+
+        self.assertFalse(controller._terminal_braking_latched)
+        self.assertGreater(commands[-1].traction_percent, 0.0)
+        self.assertEqual(commands[-1].brake_percent, 0.0)
+
     def test_traction_command_uses_realistic_slew_rate(self) -> None:
         config = AtoConfig(
             use_dynamic_programming_profile=False,

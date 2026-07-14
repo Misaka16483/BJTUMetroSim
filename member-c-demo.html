@@ -21,11 +21,11 @@ canvas{display:block}
 #tab-bar{display:flex;border-bottom:1px solid #172436;flex-shrink:0}
 #tab-bar button{flex:1;padding:8px 0;border:none;background:transparent;color:#5f7088;font-size:10px;text-transform:uppercase;letter-spacing:.08em;cursor:pointer}
 #tab-bar button.on{color:#58a6ff;border-bottom:2px solid #58a6ff;background:rgba(88,166,255,0.05)}
-#log,#route-tab{flex:1;display:flex;flex-direction:column;overflow:hidden}
-#route-tab{display:none}
+#log,#route-tab,#train-tab{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#route-tab,#train-tab{display:none}
 #log-content{display:flex;flex-direction:column;overflow:hidden;flex:1}
-#log h3,#route-tab h3{padding:10px 14px;border-bottom:1px solid #172436;font-size:11px;text-transform:uppercase;color:#5f7088;flex-shrink:0;display:flex;justify-content:space-between}
-#log-list,#route-list{flex:1;overflow-y:auto;padding:4px 0;font-family:monospace;font-size:10px;line-height:1.6}
+#log h3,#route-tab h3,#train-tab h3{padding:10px 14px;border-bottom:1px solid #172436;font-size:11px;text-transform:uppercase;color:#5f7088;flex-shrink:0;display:flex;justify-content:space-between}
+#log-list,#route-list,#train-list{flex:1;overflow-y:auto;padding:4px 0;font-family:monospace;font-size:10px;line-height:1.6}
 #log-list div,#route-list div{padding:2px 14px;border-bottom:1px solid #0d1424;white-space:nowrap}
 #route-list div{cursor:pointer;transition:.1s;overflow:hidden;text-overflow:ellipsis}
 #route-list div:hover{background:#1a2640}
@@ -38,6 +38,7 @@ canvas{display:block}
 .route-item{white-space:normal!important;padding:7px 14px!important}.route-item .route-title{display:flex;justify-content:space-between;gap:8px}.route-item .route-title span:last-child{color:#5f7088;font-size:9px}.empty-note{padding:12px 14px;color:#5f7088;font-size:11px;line-height:1.6}
 #log-list .occ{color:#f85149}#log-list .lock{color:#d29922}#log-list .rel{color:#3fb950}
 #log-list .ent{color:#f0c040}#log-list .sig{color:#58a6ff}#log-list .vac{color:#3a4a5a}
+.train-card{padding:9px 12px;border-bottom:1px solid #172436;cursor:pointer}.train-card.sel{background:#111d2b;border-left:2px solid #58a6ff}.train-head{display:flex;justify-content:space-between;color:#d7ebff}.train-meta{margin-top:4px;color:#8094a8;font-size:9px}.car-door-row{display:flex;align-items:center;gap:4px;margin-top:4px}.car-label{width:24px;color:#5f7088;font-size:8px}.door-unit{height:10px;flex:1;border-radius:1px;background:#3fb950}.door-unit.open{background:#f85149}.door-unit.moving{background:#d29922}.door-unit.fault{background:#a371f7}.door-controls{display:flex;gap:5px;margin-top:7px}.door-controls button{padding:3px 6px;border:1px solid #31506d;border-radius:3px;background:#111d2b;color:#b9dcff;font-size:9px;cursor:pointer}
 #foot{display:flex;align-items:center;padding:4px 16px;background:#0d1424;border-top:1px solid #172436;font-size:10px;color:#3a4a5a;gap:16px;flex-shrink:0}
 </style>
 </head>
@@ -68,6 +69,7 @@ canvas{display:block}
     <div id="tab-bar">
       <button onclick="switchTab('log')" id="tab-log" class="on">事件日志</button>
       <button onclick="switchTab('route')" id="tab-route">进路检查</button>
+      <button onclick="switchTab('train')" id="tab-train">列车状态</button>
     </div>
     <div id="log-content">
       <h3>事件日志 <span id="lcnt" style="color:#3a4a5a;font-weight:400;font-size:10px;margin-left:8px">0</span></h3>
@@ -78,6 +80,10 @@ canvas{display:block}
       <div id="route-inspector">点击图中的轨道以查看相关进路。</div>
       <div style="padding:4px 10px"><input id="route-filter" placeholder="搜索进路..." style="width:100%;padding:4px 8px;border:1px solid #1a2240;border-radius:3px;background:#0d1117;color:#c9d1d9;font-size:10px;font-family:monospace;outline:none" oninput="filterRoutes()"></div>
       <div id="route-list"></div>
+    </div>
+    <div id="train-tab" style="display:none">
+      <h3>主引擎列车 <span id="tcnt" style="color:#3a4a5a;font-weight:400;font-size:10px;margin-left:8px">0</span></h3>
+      <div id="train-list"><div class="empty-note">暂无列车。</div></div>
     </div>
   </div>
 </div>
@@ -102,8 +108,10 @@ setTimeout(function(){fetch(A+'/api/phase2/member-c/static-routes').then(functio
 function switchTab(tab){
   document.getElementById('tab-log').className = tab==='log'?'on':'';
   document.getElementById('tab-route').className = tab==='route'?'on':'';
+  document.getElementById('tab-train').className = tab==='train'?'on':'';
   document.getElementById('log-content').style.display = tab==='log'?'flex':'none';
   document.getElementById('route-tab').style.display = tab==='route'?'flex':'none';
+  document.getElementById('train-tab').style.display = tab==='train'?'flex':'none';
 }
 
 /* ═══════════════════════════ 后端通信 ═══════════════════════════ */
