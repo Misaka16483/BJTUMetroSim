@@ -930,6 +930,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                         match.group(1),
                         int(since) if since is not None else None,
                     ))
+            elif path == "/api/sim/passenger-exchange":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    query = parse_qs(parsed.query)
+                    station_code = query.get("stationCode", [None])[0]
+                    self._send_json(self.engine.current_station_passenger_exchange(station_code))
+            elif path == "/api/sim/passenger-flow-mode":
+                if self.engine is None:
+                    self._send_json({"ok": False, "error": "ENGINE_NOT_INITIALIZED"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                else:
+                    self._send_json({"ok": True, "passengerFlow": self.engine.passenger_flow_configuration()})
             elif path == "/api/passenger-sim/state":
                 self._send_json(self.service.passenger_sim.snapshot())
             elif path == "/api/sim/power/state":
@@ -1059,6 +1071,51 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "UNKNOWN_PASSENGER_SIM_ACTION"}, HTTPStatus.NOT_FOUND)
                     return
                 self._send_json({"ok": True, "action": action, "state": sim.snapshot()})
+                return
+
+            if path == "/api/sim/passenger-flow-mode":
+                if self.engine is None:
+                    self._send_json(
+                        {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
+                payload = self._read_json_body()
+                enabled = payload.get("enabled", payload.get("usePoisson"))
+                if not isinstance(enabled, bool):
+                    self._send_json(
+                        {"ok": False, "error": "enabled must be a boolean"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                self._send_json({
+                    "ok": True,
+                    "passengerFlow": self.engine.set_passenger_poisson_enabled(enabled),
+                })
+                return
+
+            if path == "/api/sim/passengers/add":
+                if self.engine is None:
+                    self._send_json(
+                        {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
+                payload = self._read_json_body()
+                result = self.engine.add_platform_passengers(
+                    str(payload.get("stationCode", "")),
+                    str(payload.get("direction", "")),
+                    payload.get("passengers"),
+                )
+                if result.get("ok"):
+                    self._send_json(result)
+                else:
+                    status = (
+                        HTTPStatus.CONFLICT
+                        if result.get("error") == "AUTO_PASSENGER_GENERATION_ENABLED"
+                        else HTTPStatus.BAD_REQUEST
+                    )
+                    self._send_json(result, status)
                 return
 
             if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/speed", "/api/sim/step", "/api/sim/tick-interval"}:
@@ -1440,6 +1497,27 @@ class ApiHandler(BaseHTTPRequestHandler):
         snap = self.engine.snapshot()
         if snap is None:
             return {"clock": {"state": "STOPPED", "simTime": "--:--:--", "tick": 0}, "trains": [], "source": "static"}
+        return {
+            "clock": {
+                "state": snap.clock_state,
+                "simTime": snap.sim_time_str,
+                "tick": snap.tick,
+                "simTimeMs": snap.sim_time_ms,
+                "speedMultiplier": snap.speed_multiplier,
+                "tickIntervalMs": round(self.engine._tick_interval_seconds * 1000),
+            },
+            "trains": snap.trains,
+            "stations": snap.stations,
+            "power": snap.power,
+            "powerNetwork": snap.power_network,
+            "dispatchDecisions": snap.dispatch_decisions,
+            "dispatchRuntime": snap.dispatch_runtime,
+            "interlocking": snap.interlocking,
+            "kpi": snap.kpi,
+            "passengerFlow": self.engine.passenger_flow_configuration(),
+            "passengerExchanges": self.engine.current_station_passenger_exchange()["exchanges"],
+            "source": "simulation-engine",
+        }
         return snap.to_api_dict(
             tick_interval_ms=round(self.engine._tick_interval_seconds * 1000),
         )

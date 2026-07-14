@@ -20,7 +20,7 @@ import type {
 } from '../data/backendApi';
 import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
-type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow' | 'memberCDemo';
+type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow' | 'memberCDemo' | 'topologyLayout';
 export type DataMode = 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
 export type SnapshotUpdateResult = 'accepted' | 'stale' | 'gap';
 
@@ -917,12 +917,30 @@ export const useSimStore = create<SimState>((set, get) => ({
       if (!cachedStationPolyIdx || cachedStationPolyIdx.length !== line9.stations.length) {
         buildPolylineCache(line9);
       }
+      // 宏观地图数据的站序可能与后端 stationIndex 相反。
+      // 优先用后端返回的站名定位地图站点，避免“郭公庄发车却显示在国家图书馆”。
+      const normalizeStationName = (name?: string) => (name ?? '').replace(/站$/, '');
+      const mapStationIndexByName = new Map(
+        line9.stations.map((station, index) => [normalizeStationName(station.name), index]),
+      );
+      const guogongzhuangMapIndex = mapStationIndexByName.get('郭公庄');
+      const nationalLibraryMapIndex = mapStationIndexByName.get('国家图书馆');
+      const mapUsesBackendOrder = guogongzhuangMapIndex !== undefined
+        && nationalLibraryMapIndex !== undefined
+        && guogongzhuangMapIndex < nationalLibraryMapIndex;
+      const backendToMapIndex = (backendIndex: number) => {
+        const clamped = Math.max(0, Math.min(backendIndex, line9.stations.length - 1));
+        return mapUsesBackendOrder ? clamped : line9.stations.length - 1 - clamped;
+      };
       for (const t of trains) {
-        const stIdx = t.stationIndex;
-        const nextIdx = t.direction === 'UP'
-          ? Math.min(stIdx + 1, (line9.stations.length || 1) - 1)
-          : Math.max(stIdx - 1, 0);
-        const pos = interpolateOnPolyline(stIdx, nextIdx, t.segmentProgress);
+        const fallbackNextBackendIndex = t.direction === 'UP'
+          ? Math.min(t.stationIndex + 1, (line9.stations.length || 1) - 1)
+          : Math.max(t.stationIndex - 1, 0);
+        const currentMapIndex = mapStationIndexByName.get(normalizeStationName(t.currentStation))
+          ?? backendToMapIndex(t.stationIndex);
+        const nextMapIndex = mapStationIndexByName.get(normalizeStationName(t.nextStation))
+          ?? backendToMapIndex(fallbackNextBackendIndex);
+        const pos = interpolateOnPolyline(currentMapIndex, nextMapIndex, t.segmentProgress);
         if (pos) {
           newPositions[t.trainId] = { lat: pos[0], lng: pos[1] };
         }

@@ -52,11 +52,16 @@ class ScenarioConfig:
     use_dynamic_programming_profile: bool = True
     auto_spawn_trains: bool = False
     line_scope_file: str | None = None
+    passenger_demand_scale: float = 1.0
+    passenger_use_poisson: bool = True
     trains: list[TrainConfig] = field(default_factory=list)
     operation_plan: OperationPlanConfig = field(default_factory=OperationPlanConfig)
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> ScenarioConfig:
+        passenger_demand_scale = float(data.get("passengerDemandScale", 1.0))
+        if passenger_demand_scale < 0.0:
+            raise ValueError("passengerDemandScale must be non-negative")
         operation = data.get("operationPlan", {})
         return cls(
             line_id=data["lineId"],
@@ -66,6 +71,8 @@ class ScenarioConfig:
             use_dynamic_programming_profile=bool(data.get("useDynamicProgrammingProfile", True)),
             auto_spawn_trains=bool(data.get("autoSpawnTrains", False)),
             line_scope_file=data.get("lineScopeFile"),
+            passenger_demand_scale=passenger_demand_scale,
+            passenger_use_poisson=bool(data.get("passengerUsePoisson", True)),
             operation_plan=OperationPlanConfig(
                 enabled=bool(operation.get("enabled", False)),
                 direction=str(operation.get("direction", "UP")).upper(),

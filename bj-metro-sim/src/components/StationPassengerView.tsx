@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSimStore } from '../store/useSimStore';
-import { fetchStationPassengerHistory, type SimStationInfo, type SimTrainState } from '../data/backendApi';
+import {
+  addPlatformPassengers,
+  fetchPassengerFlowMode,
+  fetchStationPassengerHistory,
+  setPassengerFlowMode,
+  type SimStationInfo,
+  type SimTrainState,
+} from '../data/backendApi';
 
 type Point = { t: number; up: number; down: number };
 
@@ -116,6 +123,34 @@ function trainLocationText(train: SimTrainState) {
   return `运行：${current} → ${next}`;
 }
 
+function PassengerExchangeMetrics({ train, compact = false }: { train: SimTrainState; compact?: boolean }) {
+  const boarding = train.currentBoardingPax ?? train.lastBoarding ?? 0;
+  const alighting = train.currentAlightingPax ?? train.lastAlighting ?? 0;
+  const boardingRate = train.currentBoardingRatePaxPerSec ?? 0;
+  const alightingRate = train.currentAlightingRatePaxPerSec ?? 0;
+
+  return <div data-testid={`passenger-exchange-${train.trainId}`} className={compact ? 'mt-2' : 'mt-2 rounded-md p-2'} style={compact ? undefined : { background: 'rgba(255,255,255,.025)', border: '1px solid rgba(255,255,255,.05)' }}>
+    <div className="mb-1 flex items-center justify-between text-[8px] uppercase tracking-[.12em]" style={{ color: '#64748b' }}>
+      <span>本次停站累计</span>
+      {train.phase === 'DWELLING' ? <span style={{ color: '#7dd3fc' }}>实时更新</span> : null}
+    </div>
+    <div className="grid grid-cols-2 gap-1.5">
+      <div className="rounded px-2 py-1.5" style={{ background: 'rgba(48,209,88,.07)' }}>
+        <div className="text-[8px]" style={{ color: '#86efac' }}>上车</div>
+        <b className="font-mono text-sm" style={{ color: '#d9fbe3' }}>{boarding.toLocaleString()} <small className="text-[8px] font-normal">人</small></b>
+      </div>
+      <div className="rounded px-2 py-1.5" style={{ background: 'rgba(255,159,10,.07)' }}>
+        <div className="text-[8px]" style={{ color: '#fbbf24' }}>下车</div>
+        <b className="font-mono text-sm" style={{ color: '#fff1cf' }}>{alighting.toLocaleString()} <small className="text-[8px] font-normal">人</small></b>
+      </div>
+    </div>
+    <div className="mt-1.5 flex justify-between font-mono text-[8px]" style={{ color: '#94a3b8' }}>
+      <span>上车 {boardingRate.toFixed(1)} 人/s</span>
+      <span>下车 {alightingRate.toFixed(1)} 人/s</span>
+    </div>
+  </div>;
+}
+
 export default function StationPassengerView() {
   const simStations = useSimStore((state) => state.simStations);
   const trains = useSimStore((state) => state.trains);
@@ -135,7 +170,25 @@ export default function StationPassengerView() {
   const [focus, setFocus] = useState(selectedStationCode ?? 'GGZ');
   const [waitingHistory, setWaitingHistory] = useState<Point[]>(() => [{ t: SIM_START_SECONDS, up: 0, down: 0 }]);
   const [arrivalHistory, setArrivalHistory] = useState<Point[]>(() => [{ t: SIM_START_SECONDS, up: 0, down: 0 }]);
+  const [poissonEnabled, setPoissonEnabled] = useState<boolean | null>(null);
+  const [poissonPending, setPoissonPending] = useState(false);
+  const [poissonError, setPoissonError] = useState<string | null>(null);
+  const [manualPassengerInputs, setManualPassengerInputs] = useState<Record<'UP' | 'DOWN', string>>({ UP: '50', DOWN: '50' });
+  const [manualAddPending, setManualAddPending] = useState<'UP' | 'DOWN' | null>(null);
+  const [manualAddFeedback, setManualAddFeedback] = useState<Record<'UP' | 'DOWN', string | null>>({ UP: null, DOWN: null });
   const historyCursor = useRef<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchPassengerFlowMode()
+      .then((response) => {
+        if (!cancelled) setPoissonEnabled(response.passengerFlow.usePoisson);
+      })
+      .catch(() => {
+        if (!cancelled) setPoissonError('客流模式读取失败');
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (selectedStationCode && stations.some((station) => station.code === selectedStationCode)) setFocus(selectedStationCode);
@@ -204,6 +257,42 @@ export default function StationPassengerView() {
     setFocus(code);
     setSelectedStationCode(code);
   };
+  const togglePoisson = async () => {
+    if (poissonEnabled === null || poissonPending) return;
+    setPoissonPending(true);
+    setPoissonError(null);
+    try {
+      const response = await setPassengerFlowMode(!poissonEnabled);
+      setPoissonEnabled(response.passengerFlow.usePoisson);
+    } catch {
+      setPoissonError('客流模式切换失败');
+    } finally {
+      setPoissonPending(false);
+    }
+  };
+  const addPassengers = async (direction: 'UP' | 'DOWN') => {
+    const passengers = Number.parseInt(manualPassengerInputs[direction], 10);
+    if (!Number.isInteger(passengers) || passengers <= 0) {
+      setManualAddFeedback((previous) => ({ ...previous, [direction]: '请输入大于 0 的整数' }));
+      return;
+    }
+    setManualAddPending(direction);
+    setManualAddFeedback((previous) => ({ ...previous, [direction]: null }));
+    try {
+      const response = await addPlatformPassengers(focus, direction, passengers);
+      const currentUp = direction === 'UP' ? response.projectedWaitingPax : (up.waitingPax ?? 0);
+      const currentDown = direction === 'DOWN' ? response.projectedWaitingPax : (down.waitingPax ?? 0);
+      setWaitingHistory((previous) => mergeHistory(previous, [{ t: simSeconds, up: currentUp, down: currentDown }]));
+      setManualAddFeedback((previous) => ({
+        ...previous,
+        [direction]: response.status === 'QUEUED' ? `已提交 +${passengers}，下个 tick 生效` : `已增加 ${passengers} 人`,
+      }));
+    } catch {
+      setManualAddFeedback((previous) => ({ ...previous, [direction]: '增加人数失败' }));
+    } finally {
+      setManualAddPending(null);
+    }
+  };
 
   return <div className="flex h-full flex-col" style={{ background: '#070b11' }}>
     <header className="flex h-12 shrink-0 items-center justify-between px-5" style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
@@ -241,7 +330,33 @@ export default function StationPassengerView() {
         <Chart title={`${name} · 站台候车人数`} points={waitingHistory} now={simSeconds} unit="pax" />
         <Chart title={`${name} · 进站率（5分钟滚动）`} points={ratePoints} now={simSeconds} unit="pax/min" />
       </main>
-      <aside className="flex w-64 shrink-0 flex-col gap-2 overflow-y-auto">
+      <aside className="flex w-[17rem] shrink-0 flex-col gap-2 overflow-y-auto">
+        <section data-testid="passenger-flow-mode-control" className="rounded-lg p-3" style={{ border: '1px solid rgba(100,210,255,.16)', background: 'linear-gradient(135deg, rgba(100,210,255,.055), rgba(255,255,255,.015))' }}>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold" style={{ color: '#d7e0eb' }}>进站客流生成</div>
+              <div className="mt-0.5 text-[8px]" style={{ color: '#718096' }}>{poissonEnabled ? '泊松随机采样 · 自动生成开启' : '自动生成已停止 · 可按站台加人'}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-label="切换泊松随机客流"
+              aria-checked={poissonEnabled === true}
+              disabled={poissonEnabled === null || poissonPending}
+              onClick={() => { void togglePoisson(); }}
+              className="relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-wait disabled:opacity-50"
+              style={{ background: poissonEnabled ? 'rgba(48,209,88,.42)' : 'rgba(100,116,139,.35)', border: `1px solid ${poissonEnabled ? 'rgba(48,209,88,.65)' : 'rgba(148,163,184,.25)'}` }}
+              title={poissonError ?? '开启时自动生成泊松客流；关闭时停止生成并允许手动加人'}
+            >
+              <span className="absolute top-[3px] h-4 w-4 rounded-full transition-all" style={{ left: poissonEnabled ? 23 : 3, background: poissonEnabled ? '#b9f6ca' : '#cbd5e1', boxShadow: '0 1px 4px rgba(0,0,0,.45)' }} />
+            </button>
+          </div>
+          <div className="mt-2 flex items-center justify-between border-t pt-2 text-[8px]" style={{ color: '#94a3b8', borderColor: 'rgba(255,255,255,.06)' }}>
+            <span>模式</span>
+            <span style={{ color: poissonEnabled ? '#7ee7a2' : '#cbd5e1' }}>{poissonPending ? '切换中…' : poissonEnabled ? '自动生成中' : poissonEnabled === false ? '手动输入' : '读取中…'}</span>
+          </div>
+          {poissonError ? <div className="mt-1 text-[8px]" role="alert" style={{ color: '#ef4444' }}>{poissonError}</div> : null}
+        </section>
         <div className="rounded-lg p-3" style={{ border: '1px solid rgba(255,255,255,.09)' }}>
           <div className="mb-2 flex justify-between"><small style={{ color: '#94a3b8' }}>全部列车载客率</small><small style={{ color: '#64748b' }}>{trainOverview.length} 列</small></div>
           {trainOverview.length === 0 ? <p className="text-[10px]" style={{ color: '#64748b' }}>尚未配置列车</p> : trainOverview.map((train) => {
@@ -255,7 +370,7 @@ export default function StationPassengerView() {
               <div className="mt-1 flex justify-between font-mono" style={{ color: '#94a3b8' }}><span>{train.onboardPax}/{train.capacityPax} 人</span><span>{isDwelling ? `停站 ${Math.ceil(train.dwellRemainingSec)}s` : train.phase}</span></div>
               <div className="mt-1 truncate" style={{ color: isDwelling ? '#d7e0eb' : '#94a3b8' }}>{trainLocationText(train)}</div>
               <div className="mt-1" style={{ color: signalColor }}>信号：{trainSignalText(train)}</div>
-              <div className="mt-1" style={{ color: '#94a3b8' }}>当前上下客：上 {(train.currentBoardingRatePaxPerSec ?? 0).toFixed(1)} / 下 {(train.currentAlightingRatePaxPerSec ?? 0).toFixed(1)} 人/s</div>
+              <PassengerExchangeMetrics train={train} />
             </div>;
           })}
         </div>
@@ -263,10 +378,37 @@ export default function StationPassengerView() {
           const platform = direction === 'UP' ? up : down;
           const color = direction === 'UP' ? UP : DOWN;
           return <div key={direction} className="rounded-lg p-3" style={{ border: `1px solid ${color}33` }}>
-            <small style={{ color }}>{direction === 'UP' ? '上行站台' : '下行站台'}</small>
+            <div className="flex items-center justify-between"><small style={{ color }}>{name} · {direction === 'UP' ? '上行站台' : '下行站台'}</small><span className="font-mono text-[8px]" style={{ color: '#64748b' }}>{focus}</span></div>
             <div className="mt-2 text-[10px]" style={{ color: '#94a3b8' }}>候车 / 滞留 / 密度</div>
             <div className="font-mono text-2xl" style={{ color: '#e2e8f0' }}>{(platform.waitingPax ?? 0).toLocaleString()} <span className="text-[10px]">pax</span></div>
             <div className="mt-2 text-[11px]" style={{ color: '#cbd5e1' }}>滞留 {platform.leftBehindPax ?? 0}　{(platform.platformDensity ?? 0).toFixed(2)} pax/m²</div>
+            {poissonEnabled === false ? <div className="mt-3 border-t pt-2" style={{ borderColor: 'rgba(255,255,255,.07)' }}>
+              <label htmlFor={`manual-passengers-${direction}`} className="text-[8px]" style={{ color: '#94a3b8' }}>向本站台增加候车人数</label>
+              <div className="mt-1 flex gap-1.5">
+                <input
+                  id={`manual-passengers-${direction}`}
+                  type="number"
+                  min="1"
+                  max="1000000"
+                  step="1"
+                  value={manualPassengerInputs[direction]}
+                  onChange={(event) => setManualPassengerInputs((previous) => ({ ...previous, [direction]: event.target.value }))}
+                  className="min-w-0 flex-1 rounded px-2 py-1 font-mono text-[10px] outline-none"
+                  style={{ color: '#e2e8f0', border: '1px solid rgba(148,163,184,.2)', background: 'rgba(15,23,42,.72)' }}
+                  aria-label={`${name}${direction === 'UP' ? '上行' : '下行'}站台增加人数`}
+                />
+                <button
+                  type="button"
+                  disabled={manualAddPending !== null}
+                  onClick={() => { void addPassengers(direction); }}
+                  className="rounded px-2 py-1 text-[9px] disabled:cursor-wait disabled:opacity-50"
+                  style={{ color, border: `1px solid ${color}55`, background: `${color}12` }}
+                >
+                  {manualAddPending === direction ? '提交中…' : '增加'}
+                </button>
+              </div>
+              {manualAddFeedback[direction] ? <div className="mt-1 text-[8px]" role="status" style={{ color: manualAddFeedback[direction]?.includes('失败') || manualAddFeedback[direction]?.includes('请输入') ? '#ef4444' : '#7ee7a2' }}>{manualAddFeedback[direction]}</div> : null}
+            </div> : null}
           </div>;
         })}
         <div className="rounded-lg p-3" style={{ border: '1px solid rgba(255,255,255,.09)' }}>
@@ -276,7 +418,8 @@ export default function StationPassengerView() {
             <div className="mt-1" style={{ color: train.doorState === 'OPEN' ? UP : train.doorNotice === 'PREPARE_OPEN' || train.doorNotice === 'PREPARE_CLOSE' ? '#f59e0b' : '#94a3b8' }}>
               {train.doorNotice === 'PREPARE_OPEN' ? `模拟信号：准备开启${train.doorSide === 'LEFT' ? '左门' : '右门'}` : train.doorNotice === 'PREPARE_CLOSE' ? '模拟信号：准备关门' : train.doorState === 'OPEN' ? `模拟信号：${train.doorSide === 'LEFT' ? '左门' : '右门'}开启` : train.doorState === 'CLOSING' ? '模拟信号：正在关门' : '车门关闭'}
             </div>
-            <div className="mt-1" style={{ color: '#94a3b8' }}>当前上下客：上 {(train.currentBoardingRatePaxPerSec ?? 0).toFixed(1)} / 下 {(train.currentAlightingRatePaxPerSec ?? 0).toFixed(1)} 人/s　停站 {Math.ceil(train.dwellRemainingSec)} s</div>
+            <PassengerExchangeMetrics train={train} compact />
+            <div className="mt-1 text-right font-mono text-[8px]" style={{ color: '#64748b' }}>剩余停站 {Math.ceil(train.dwellRemainingSec)} s</div>
           </div>)}
         </div>
       </aside>

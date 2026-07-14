@@ -196,6 +196,7 @@ class SimTrainState:
     _planned_alighting_total: int = field(default=0, repr=False, compare=False)
     _boarding_credit_pax: float = field(default=0.0, repr=False, compare=False)
     _passenger_stop_started_ms: int | None = field(default=None, repr=False, compare=False)
+    _terminal_turnback_pending: bool = field(default=False, repr=False, compare=False)
 
     def to_dict(self) -> JsonDict:
         return {
@@ -222,6 +223,8 @@ class SimTrainState:
             "doorSystem": self.door_system.to_dict(),
             "lastBoarding": self.last_boarding,
             "lastAlighting": self.last_alighting,
+            "currentBoardingPax": self.last_boarding,
+            "currentAlightingPax": self.last_alighting,
             "currentBoardingRatePaxPerSec": round(self.current_boarding_rate_pax_per_sec, 2),
             "currentAlightingRatePaxPerSec": round(self.current_alighting_rate_pax_per_sec, 2),
             "lastPassengerEventMs": self.last_passenger_event_ms,
@@ -548,6 +551,8 @@ class SimulationEngine:
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._power_lock = threading.RLock()
+        self._passenger_command_lock = threading.Lock()
+        self._pending_passenger_additions: deque[JsonDict] = deque()
         self._snapshot: TickSnapshot | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -960,6 +965,8 @@ class SimulationEngine:
         self._last_power_solve_sim_time_ms = None
         self._last_dispatch_decisions = []
         self._pending_dispatch_decisions = []
+        with self._passenger_command_lock:
+            self._pending_passenger_additions.clear()
         self._ato_by_train = {}
         self._dcdp_curve_data = {}
         self._dcdp_curve_meta = {}
@@ -1297,6 +1304,8 @@ class SimulationEngine:
             self._last_power_solve_sim_time_ms = None
             self._last_dispatch_decisions = []
             self._pending_dispatch_decisions = []
+            with self._passenger_command_lock:
+                self._pending_passenger_additions.clear()
             self._ato_by_train = {}
             self._dcdp_curve_data = {}
             self._dcdp_curve_meta = {}
@@ -1438,9 +1447,13 @@ class SimulationEngine:
         self._apply_power_commands(sim_time_ms)
 
         # 1) 客流先到达，停站处理生成的载荷供本 tick 车辆请求使用。
+        # Manual additions are serialized at the same micro-tick boundary, but
+        # they are not automatic arrivals and therefore do not feed the rate chart.
+        self._drain_platform_passenger_additions()
         self._last_arrivals_by_platform = self.station_service.update_arrivals(
             sim_time_ms,
             dt_sec=self.clock.tick_seconds,
+            eligible_platforms=self._serviceable_passenger_platforms(),
         )
 
         # CI scan before control: refresh real head/tail occupation and keep a
@@ -2828,6 +2841,10 @@ class SimulationEngine:
         sim_time_ms: int,
     ) -> None:
         train.turnback_count += 1
+        # The no-OD model has one unambiguous destination: everybody still on
+        # board leaves at the terminus.  The actual discharge remains gradual
+        # during the following open-door dwell.
+        train._terminal_turnback_pending = True
         train.direction = "DOWN" if train.direction == "UP" else "UP"
         train.turnback_state = "COMPLETED"
         train.turnback_phase_index = None
@@ -3253,8 +3270,10 @@ class SimulationEngine:
             train.door_state = "OPEN"
             train.door_side = self._door_side_for(train.direction)
             train.door_notice = "OPEN"
-            ratio = self.station_service.flow_generator.alighting_ratio(
-                train.current_station_code, train.direction, sim_time_ms,
+            ratio = 1.0 if train._terminal_turnback_pending else (
+                self.station_service.flow_generator.alighting_ratio(
+                    train.current_station_code, train.direction, sim_time_ms,
+                )
             )
             train._planned_alighting_total = min(
                 train.onboard_pax,
@@ -3262,6 +3281,7 @@ class SimulationEngine:
             )
             train._boarding_credit_pax = 0.0
             train._passenger_stop_started_ms = sim_time_ms
+            train._terminal_turnback_pending = False
             train.last_boarding = 0
             train.last_alighting = 0
             train.current_boarding_rate_pax_per_sec = 0.0
@@ -3494,6 +3514,167 @@ class SimulationEngine:
                 ]
                 for direction in ("UP", "DOWN")
             },
+        }
+
+    def passenger_flow_configuration(self) -> JsonDict:
+        enabled = self.station_service.automatic_generation_enabled
+        return {
+            "enabled": enabled,
+            "usePoisson": enabled,
+            "mode": "POISSON_STOCHASTIC" if enabled else "DISABLED_MANUAL",
+            "manualInputAllowed": not enabled,
+            "demandScale": self.scenario.passenger_demand_scale,
+            "boardingPolicy": "FILL_TO_CAPACITY",
+            "tickSeconds": self.clock.tick_seconds,
+        }
+
+    def set_passenger_poisson_enabled(self, enabled: bool) -> JsonDict:
+        """Enable or disable automatic Poisson passenger generation."""
+        with self._lifecycle_lock:
+            with self._passenger_command_lock:
+                self.station_service.set_automatic_generation_enabled(enabled)
+                if enabled:
+                    self.station_service.flow_generator.set_use_poisson(True)
+                self.scenario.passenger_use_poisson = bool(enabled)
+            self._snapshot = self._build_snapshot()
+            return self.passenger_flow_configuration()
+
+    def add_platform_passengers(
+        self,
+        station_code: str,
+        direction: str,
+        passengers: int,
+    ) -> JsonDict:
+        """Add waiting passengers manually when automatic generation is disabled."""
+        code = str(station_code).strip()
+        normalized_direction = str(direction).strip().upper()
+        if code not in {str(station.get("code", "")) for station in self._station_list}:
+            return {"ok": False, "error": "INVALID_STATION_CODE"}
+        if normalized_direction not in {"UP", "DOWN"}:
+            return {"ok": False, "error": "INVALID_DIRECTION"}
+        if isinstance(passengers, bool) or not isinstance(passengers, int) or passengers <= 0:
+            return {"ok": False, "error": "PASSENGERS_MUST_BE_POSITIVE_INTEGER"}
+        if passengers > 1_000_000:
+            return {"ok": False, "error": "PASSENGERS_EXCEED_LIMIT"}
+
+        command = {
+            "stationCode": code,
+            "direction": normalized_direction,
+            "passengers": passengers,
+        }
+        with self._passenger_command_lock:
+            if self.station_service.automatic_generation_enabled:
+                return {"ok": False, "error": "AUTO_PASSENGER_GENERATION_ENABLED"}
+            platform = self.station_service.ensure_platform(code, normalized_direction)
+            if self.clock.state.value == "RUNNING":
+                self._pending_passenger_additions.append(command)
+                return {
+                    "ok": True,
+                    "status": "QUEUED",
+                    **command,
+                    "waitingPax": platform.waiting_pax,
+                    "projectedWaitingPax": platform.waiting_pax + passengers,
+                }
+            self._apply_platform_passenger_addition(command, include_in_history=True)
+            self._snapshot = self._build_snapshot()
+            return {
+                "ok": True,
+                "status": "APPLIED",
+                **command,
+                "waitingPax": platform.waiting_pax,
+                "projectedWaitingPax": platform.waiting_pax,
+            }
+
+    def _apply_platform_passenger_addition(
+        self,
+        command: JsonDict,
+        *,
+        include_in_history: bool,
+    ) -> tuple[tuple[str, str], int]:
+        code = str(command["stationCode"])
+        direction = str(command["direction"])
+        passengers = int(command["passengers"])
+        key = (code, direction)
+        platform = self.station_service.ensure_platform(code, direction)
+        platform.waiting_pax += passengers
+        platform._total_arrived_pax += passengers
+        if include_in_history:
+            history = self._station_history.setdefault(
+                key,
+                deque(maxlen=6 * 3600 + 1),
+            )
+            current_second_ms = (self._absolute_sim_time_ms() // 1000) * 1000
+            point = {
+                "simTimeMs": current_second_ms,
+                "waitingPax": platform.waiting_pax,
+                "arrivals": 0,
+                "leftBehindPax": platform.left_behind_pax,
+                "platformDensity": round(platform.platform_density_pax_per_m2, 3),
+            }
+            if history and int(history[-1]["simTimeMs"]) == current_second_ms:
+                history[-1] = point
+            else:
+                history.append(point)
+        return key, passengers
+
+    def _drain_platform_passenger_additions(self) -> dict[tuple[str, str], int]:
+        additions: dict[tuple[str, str], int] = {}
+        with self._passenger_command_lock:
+            while self._pending_passenger_additions:
+                key, passengers = self._apply_platform_passenger_addition(
+                    self._pending_passenger_additions.popleft(),
+                    include_in_history=False,
+                )
+                additions[key] = additions.get(key, 0) + passengers
+        return additions
+
+    def current_station_passenger_exchange(self, station_code: str | None = None) -> JsonDict:
+        """Return current dwell exchange totals and instantaneous rates per train."""
+        snapshot = self.snapshot()
+        if snapshot is None:
+            return {
+                "simTimeMs": self._absolute_sim_time_ms(),
+                "passengerFlow": self.passenger_flow_configuration(),
+                "exchanges": [],
+                "source": "simulation-engine",
+            }
+        platform_by_key = {
+            (str(item.get("code", "")), str(item.get("direction", ""))): item
+            for item in snapshot.stations
+        }
+        exchanges: list[JsonDict] = []
+        for train in snapshot.trains:
+            if train.get("phase") != DWELLING:
+                continue
+            code = str(train.get("currentStationCode", ""))
+            if station_code is not None and code != str(station_code):
+                continue
+            direction = str(train.get("direction", ""))
+            platform = platform_by_key.get((code, direction), {})
+            exchanges.append({
+                "trainId": train.get("trainId"),
+                "stationCode": code,
+                "stationName": train.get("currentStation", code),
+                "direction": direction,
+                "doorState": train.get("doorState", "CLOSED"),
+                "doorNotice": train.get("doorNotice", "CLOSED"),
+                "active": train.get("doorState") == "OPEN",
+                "currentBoardingPax": int(train.get("currentBoardingPax", 0)),
+                "currentAlightingPax": int(train.get("currentAlightingPax", 0)),
+                "boardingRatePaxPerSec": float(train.get("currentBoardingRatePaxPerSec", 0.0)),
+                "alightingRatePaxPerSec": float(train.get("currentAlightingRatePaxPerSec", 0.0)),
+                "platformWaitingPax": int(platform.get("waitingPax", 0)),
+                "onboardPax": int(train.get("onboardPax", 0)),
+                "capacityPax": int(train.get("capacityPax", 0)),
+                "loadFactor": float(train.get("loadFactor", 0.0)),
+                "dwellRemainingSec": float(train.get("dwellRemainingSec", 0.0)),
+            })
+        return {
+            "simTimeMs": snapshot.sim_time_ms,
+            "stationCode": station_code,
+            "passengerFlow": self.passenger_flow_configuration(),
+            "exchanges": exchanges,
+            "source": "simulation-engine",
         }
 
     def _update_power(
@@ -4497,6 +4678,7 @@ class SimulationEngine:
         time_str = f"{h:02d}:{m:02d}:{s:02d}"
 
         active = [t for t in self.trains if t.phase != IDLE]
+        passenger_totals = self.station_service.passenger_totals()
         return TickSnapshot(
             tick=self.clock.current_tick,
             sim_time_ms=self._absolute_sim_time_ms(),
@@ -4530,6 +4712,13 @@ class SimulationEngine:
                 ),
                 "totalOnboardPax": sum(t.onboard_pax for t in self.trains),
                 "totalWaitingPax": sum(p.waiting_pax for p in self.station_service.platforms.values()),
+                "passengerDemandScale": self.scenario.passenger_demand_scale,
+                "passengerUsePoisson": self.station_service.automatic_generation_enabled,
+                "totalPassengerArrivedPax": passenger_totals["arrivedPax"],
+                "totalPassengerBoardedPax": passenger_totals["boardedPax"],
+                "totalPassengerAlightedPax": passenger_totals["alightedPax"],
+                "passengerServiceRatio": round(float(passenger_totals["serviceRatio"]), 4),
+                "passengerPlatformBalanced": passenger_totals["platformBalanced"],
                 "passengerProfileId": self._passenger_profile.profile_id,
                 "passengerDataQuality": self._passenger_profile.quality,
                 "estimatedWeekdayPassengerArrivals": self._estimated_weekday_passenger_arrivals,
@@ -4715,22 +4904,57 @@ class SimulationEngine:
             )
         return train
 
+    def _serviceable_passenger_platforms(self) -> set[tuple[str, str]]:
+        """Return directions which have a departing service at each terminal."""
+        if not self._station_list:
+            return set()
+        first_code = str(self._station_list[0].get("code", ""))
+        last_code = str(self._station_list[-1].get("code", ""))
+        excluded = {(first_code, "DOWN"), (last_code, "UP")}
+        return {key for key in self.station_service.platforms if key not in excluded}
+
     def _build_station_service(self) -> StationService:
-        """Build the calibrated synthetic passenger service from versioned data."""
-        profile = load_passenger_profile()
-        self._passenger_profile = profile
-        self._default_train_capacity_pax = profile.train_capacity_pax
-        self._average_passenger_mass_kg = profile.average_passenger_mass_kg
-        self._estimated_weekday_passenger_arrivals = round(
-            profile.estimated_daily_arrivals()
+        """构建客流服务 — 使用 Poisson 客流生成器 + 六时段多日型."""
+        # Scenario priors, not AFC/OD measurements.  Each physical station has
+        # an explicit UP and DOWN platform so all global-engine trains consume
+        # the same queues rather than a second independent passenger clock.
+        station_demand = [
+            ("GGZ", 60.0, 0.05, 54.0, 0.12),
+            ("FSP", 72.0, 0.10, 56.0, 0.12),
+            ("KYL", 48.0, 0.12, 38.0, 0.10),
+            ("FTN", 55.0, 0.15, 44.0, 0.12),
+            ("FTD", 40.0, 0.15, 36.0, 0.14),
+            ("QLZ", 65.0, 0.18, 70.0, 0.20),
+            ("LLQ", 90.0, 0.20, 82.0, 0.18),
+            ("LLE", 50.0, 0.18, 76.0, 0.22),
+            ("BWR", 120.0, 0.25, 128.0, 0.28),
+            ("JBG", 80.0, 0.20, 74.0, 0.22),
+            ("BDZ", 35.0, 0.15, 32.0, 0.13),
+            ("BQS", 45.0, 0.15, 62.0, 0.20),
+            ("GTG", 70.0, 0.25, 88.0, 0.24),
+        ]
+        station_configs = [
+            StationFlowConfig(code, rate, alighting, direction=direction)
+            for code, up_rate, up_alighting, down_rate, down_alighting in station_demand
+            for direction, rate, alighting in (
+                ("UP", up_rate, up_alighting),
+                ("DOWN", down_rate, down_alighting),
+            )
+        ]
+
+        flow_generator = PoissonPassengerFlowGenerator(
+            station_configs=station_configs,
+            scenario=FlowScenario(
+                day_type=DayType.MON_THU,
+                line_scale=self.scenario.passenger_demand_scale,
+                random_seed=42,
+            ),
+            use_poisson=self.scenario.passenger_use_poisson,
         )
         return StationService(
-            PoissonPassengerFlowGenerator(
-                list(profile.station_configs),
-                profile.flow_scenario,
-                use_poisson=profile.use_poisson,
-            ),
-            profile.dwell_config,
+            flow_generator,
+            DwellTimeConfig(base_dwell_sec=30.0, door_capacity_pax_per_sec=3.0),
+            automatic_generation_enabled=self.scenario.passenger_use_poisson,
         )
 
     def _build_power_service(self) -> PowerService:
