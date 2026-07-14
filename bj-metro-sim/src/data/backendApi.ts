@@ -143,6 +143,8 @@ export interface SimTrainState {
   doorTransitionRemainingSec?: number;
   lastBoarding?: number;
   lastAlighting?: number;
+  currentBoardingPax?: number;
+  currentAlightingPax?: number;
   currentBoardingRatePaxPerSec?: number;
   currentAlightingRatePaxPerSec?: number;
   lastPassengerEventMs?: number | null;
@@ -461,6 +463,13 @@ export interface SimKpi {
   avgSpeed: number;
   totalOnboardPax: number;
   totalWaitingPax?: number;
+  passengerDemandScale?: number;
+  passengerUsePoisson?: boolean;
+  totalPassengerArrivedPax?: number;
+  totalPassengerBoardedPax?: number;
+  totalPassengerAlightedPax?: number;
+  passengerServiceRatio?: number;
+  passengerPlatformBalanced?: boolean;
   maxPlatformDensity?: number;
   totalTractionEnergyKwh?: number;
   minTractionLimitRatio?: number;
@@ -536,6 +545,8 @@ export interface SimStateResponse {
   dispatchDecisions?: SimDispatchDecision[];
   dispatchRuntime?: DispatchRuntimeState;
   interlocking?: InterlockingRuntimeState;
+  passengerFlow?: PassengerFlowConfiguration;
+  passengerExchanges?: CurrentPassengerExchange[];
   kpi: SimKpi;
   source: string;
 }
@@ -552,6 +563,43 @@ export interface StationPassengerHistoryResponse {
   stationCode: string;
   source: string;
   history: Record<'UP' | 'DOWN', PassengerHistoryPoint[]>;
+}
+
+export interface PassengerFlowConfiguration {
+  enabled: boolean;
+  usePoisson: boolean;
+  mode: 'POISSON_STOCHASTIC' | 'DISABLED_MANUAL';
+  manualInputAllowed: boolean;
+  demandScale: number;
+  boardingPolicy: 'FILL_TO_CAPACITY';
+  tickSeconds: number;
+}
+
+export interface CurrentPassengerExchange {
+  trainId: string;
+  stationCode: string;
+  stationName: string;
+  direction: 'UP' | 'DOWN';
+  doorState: string;
+  doorNotice: string;
+  active: boolean;
+  currentBoardingPax: number;
+  currentAlightingPax: number;
+  boardingRatePaxPerSec: number;
+  alightingRatePaxPerSec: number;
+  platformWaitingPax: number;
+  onboardPax: number;
+  capacityPax: number;
+  loadFactor: number;
+  dwellRemainingSec: number;
+}
+
+export interface PassengerExchangeResponse {
+  simTimeMs: number;
+  stationCode?: string | null;
+  passengerFlow: PassengerFlowConfiguration;
+  exchanges: CurrentPassengerExchange[];
+  source: string;
 }
 
 // ── 速度规划曲线 ──
@@ -586,6 +634,40 @@ export function fetchSimState(): Promise<SimStateResponse> {
 export function fetchStationPassengerHistory(stationCode: string, sinceSimTimeMs?: number): Promise<StationPassengerHistoryResponse> {
   const suffix = sinceSimTimeMs === undefined ? '' : `?sinceSimTimeMs=${sinceSimTimeMs}`;
   return getJson<StationPassengerHistoryResponse>(`/api/sim/passenger-history/${encodeURIComponent(stationCode)}${suffix}`);
+}
+
+export function fetchCurrentPassengerExchange(stationCode?: string): Promise<PassengerExchangeResponse> {
+  const suffix = stationCode === undefined ? '' : `?stationCode=${encodeURIComponent(stationCode)}`;
+  return getJson<PassengerExchangeResponse>(`/api/sim/passenger-exchange${suffix}`);
+}
+
+export function fetchPassengerFlowMode(): Promise<{ ok: boolean; passengerFlow: PassengerFlowConfiguration }> {
+  return getJson<{ ok: boolean; passengerFlow: PassengerFlowConfiguration }>('/api/sim/passenger-flow-mode');
+}
+
+export function setPassengerFlowMode(usePoisson: boolean): Promise<{ ok: boolean; passengerFlow: PassengerFlowConfiguration }> {
+  return postJson('/api/sim/passenger-flow-mode', { enabled: usePoisson }) as Promise<{
+    ok: boolean;
+    passengerFlow: PassengerFlowConfiguration;
+  }>;
+}
+
+export interface AddPlatformPassengersResponse {
+  ok: boolean;
+  status: 'QUEUED' | 'APPLIED';
+  stationCode: string;
+  direction: 'UP' | 'DOWN';
+  passengers: number;
+  waitingPax: number;
+  projectedWaitingPax: number;
+}
+
+export function addPlatformPassengers(
+  stationCode: string,
+  direction: 'UP' | 'DOWN',
+  passengers: number,
+): Promise<AddPlatformPassengersResponse> {
+  return postJson('/api/sim/passengers/add', { stationCode, direction, passengers }) as Promise<AddPlatformPassengersResponse>;
 }
 
 export function fetchSpeedProfile(): Promise<SpeedProfileResponse> {

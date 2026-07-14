@@ -150,6 +150,15 @@ class PoissonPassengerFlowGenerator:
     def day_coefficient(self) -> float:
         return DAY_TYPE_COEFFICIENTS.get(self._scenario.day_type, 1.0)
 
+    @property
+    def use_poisson(self) -> bool:
+        return self._use_poisson
+
+    def set_use_poisson(self, enabled: bool) -> bool:
+        """Enable or disable automatic Poisson passenger generation."""
+        self._use_poisson = bool(enabled)
+        return self._use_poisson
+
     def _station_config(self, station_id: str, direction: str) -> StationFlowConfig | None:
         for cfg in self._station_configs:
             if cfg.station_id == station_id and cfg.direction == direction:
@@ -191,16 +200,15 @@ class PoissonPassengerFlowGenerator:
         lam = rate * dt_sec / 60.0
         if self._use_poisson:
             return int(self._rng.poisson(lam))
-        else:
-            # 确定性模式：取整 + 余数累积
-            key = (station_id, direction)
-            residual = getattr(self, "_residual_by_key", {}).get(key, 0.0)
-            expected = lam + residual
-            result = int(expected)
-            if not hasattr(self, "_residual_by_key"):
-                self._residual_by_key: dict[tuple[str, str], float] = {}
-            self._residual_by_key[key] = expected - result
-            return result
+        # Legacy deterministic mode: integer expectation with residual carry.
+        key = (station_id, direction)
+        residual = getattr(self, "_residual_by_key", {}).get(key, 0.0)
+        expected = lam + residual
+        result = int(expected)
+        if not hasattr(self, "_residual_by_key"):
+            self._residual_by_key: dict[tuple[str, str], float] = {}
+        self._residual_by_key[key] = expected - result
+        return result
 
     def alighting_ratio(self, station_id: str, direction: str, _sim_time_ms: int = 0) -> float:
         """获取某站下车比例."""
@@ -215,15 +223,40 @@ class StationService:
         self,
         flow_generator: PoissonPassengerFlowGenerator,
         dwell_config: DwellTimeConfig | None = None,
+        automatic_generation_enabled: bool = True,
     ) -> None:
         self.flow_generator = flow_generator
         self.dwell_config = dwell_config or DwellTimeConfig()
+        self._automatic_generation_enabled = bool(automatic_generation_enabled)
         self.platforms: dict[tuple[str, str], PlatformCrowdState] = {}
         for config in getattr(flow_generator, "_station_configs", []):
             self.ensure_platform(config.station_id, config.direction)
         # KPI 累积量
         self._total_boarded: int = 0
         self._total_alighted: int = 0
+
+    @property
+    def automatic_generation_enabled(self) -> bool:
+        return self._automatic_generation_enabled
+
+    def set_automatic_generation_enabled(self, enabled: bool) -> bool:
+        self._automatic_generation_enabled = bool(enabled)
+        return self._automatic_generation_enabled
+
+    def passenger_totals(self) -> dict[str, int | float | bool]:
+        """Return authoritative cumulative passenger-flow conservation data."""
+        arrived = sum(platform._total_arrived_pax for platform in self.platforms.values())
+        waiting = sum(platform.waiting_pax for platform in self.platforms.values())
+        expected_waiting = arrived - self._total_boarded
+        return {
+            "arrivedPax": arrived,
+            "boardedPax": self._total_boarded,
+            "alightedPax": self._total_alighted,
+            "waitingPax": waiting,
+            "expectedWaitingPax": expected_waiting,
+            "platformBalanced": waiting == expected_waiting,
+            "serviceRatio": self._total_boarded / arrived if arrived > 0 else 1.0,
+        }
 
     def ensure_platform(
         self, station_id: str, direction: str, platform_area_m2: float = 120.0
@@ -236,12 +269,19 @@ class StationService:
         return self.platforms[key]
 
     def update_arrivals(
-        self, sim_time_ms: int, dt_sec: float
+        self,
+        sim_time_ms: int,
+        dt_sec: float,
+        eligible_platforms: set[tuple[str, str]] | None = None,
     ) -> dict[tuple[str, str], int]:
         """每 tick 更新所有站台的进站客流."""
+        if not self._automatic_generation_enabled:
+            return {}
         arrivals_by_platform: dict[tuple[str, str], int] = {}
         # 遍历所有已有站台（不局限于 active profile）
         for key in list(self.platforms.keys()):
+            if eligible_platforms is not None and key not in eligible_platforms:
+                continue
             station_id, direction = key
             platform = self.platforms[key]
             arrivals = self.flow_generator.arrivals(station_id, direction, sim_time_ms, dt_sec)
