@@ -32,5 +32,10 @@ Thumbs.db
 # Logs
 *.log
 
+# External read-only teaching artifacts and vendor SDK (kept locally only)
+/188_2.tableData-1(1).csv
+/188_2.tableData.csv
+/rtdb-demo/
+
 # Launcher script (local only)
 run.ps1

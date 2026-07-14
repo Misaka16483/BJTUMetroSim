@@ -84,3 +84,14 @@ python tools/run_power_optimization.py --problem N1_ROBUST_TIMETABLE --populatio
 ## 6. 结果使用限制
 
 当前拓扑容量和部分设备位置为 `ENGINEERING_ESTIMATE`。在真实参数未校准前，优化结果用于算法比较、闭环演示和方案筛选，不得直接作为现场运行图、保护整定或设备投资决策。
+
+## 7. 已选实验主题与 V1 实现
+
+在上述备选问题基础上，V1 正式实验主题确定为“多车牵引/制动时序与超级电容控制联合优化”。该实验直接调用生产版直流潮流求解器，采用带约束 NSGA-II，同时最小化 SOC 修正取电能量、整流峰值功率和再生浪费，并以同预算随机搜索、仅时序和仅储能三组结果作为对照。
+
+与早期四问题演示相比，V1 增加了运行时间与停车位置保持、速度跟踪、牵引所容量、储能期末 SOC 修正、重复随机种子、独立半步长复算、消融和敏感性分析，因此后续论文或答辩中的定量结论应优先引用 V1 实验。
+
+- 实现：`app/domain/power/joint_optimization.py`
+- 执行入口：`tools/run_joint_power_optimization.py`
+- 冻结摘要：`data/contracts/joint_power_optimization_v1_summary.json`
+- 完整报告：`docs/测试与验收/多车时序与超级电容联合优化实验报告.md`
