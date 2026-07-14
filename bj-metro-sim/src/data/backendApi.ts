@@ -567,6 +567,74 @@ export interface DispatchRuntimeState {
   }>;
 }
 
+export interface OperationServiceState {
+  serviceId: string;
+  trainId: string;
+  lineId: string;
+  direction: 'UP' | 'DOWN';
+  dutyId: string;
+  originStationCode: string;
+  terminalStationCode: string;
+  plannedRunTimeS: number;
+  stops: Array<{
+    stationCode: string;
+    stationName: string;
+    stationIndex: number;
+    plannedArrivalS: number;
+    plannedDepartureS: number;
+    distanceFromOriginM: number;
+    isSkipped: boolean;
+  }>;
+}
+
+export interface OperationDutyState {
+  dutyId: string;
+  trainId: string;
+  serviceIds: string[];
+  plannedStartS: number;
+  plannedEndS: number;
+  lifecycleState: string;
+  activeServiceId: string | null;
+}
+
+export interface OperationPlanState {
+  enabled: boolean;
+  planHash?: string | null;
+  generationWindow?: {
+    startTimeMs: number;
+    endTimeMs: number;
+  };
+  experimentWindow?: {
+    phase?: string;
+    [key: string]: unknown;
+  };
+  profileWarmup?: {
+    ready?: boolean;
+    [key: string]: unknown;
+  };
+  acceptance?: {
+    status?: string;
+    completedDutyCount?: number;
+    totalDutyCount?: number;
+    maximumAbsoluteDeviationSec?: number;
+    scheduleWithinTolerance?: boolean;
+    [key: string]: unknown;
+  };
+  timetables: Array<{
+    timetableId: string;
+    lineId: string;
+    direction: 'UP' | 'DOWN';
+    validFromS: number;
+    validToS: number;
+    serviceCount: number;
+    runTimeSource: string;
+    services: OperationServiceState[];
+  }>;
+  services: OperationServiceState[];
+  duties: OperationDutyState[];
+  recentEvents: Array<Record<string, unknown>>;
+}
+
 export interface SimStateResponse {
   sessionId: string | null;
   runId: number | null;
@@ -582,13 +650,7 @@ export interface SimStateResponse {
   dispatchRuntime?: DispatchRuntimeState;
   interlocking?: InterlockingRuntimeState;
   kpi: SimKpi;
-  operations?: {
-    enabled: boolean;
-    timetables: Array<Record<string, unknown>>;
-    services: Array<Record<string, unknown>>;
-    duties: Array<Record<string, unknown>>;
-    recentEvents: Array<Record<string, unknown>>;
-  };
+  operations?: OperationPlanState;
   source: string;
   recordedSource?: string;
   replayReadOnly?: boolean;
