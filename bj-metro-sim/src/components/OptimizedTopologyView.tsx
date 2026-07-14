@@ -128,10 +128,10 @@ const GGZ_THROAT_VISIBLE_IDS = new Set<number>([
   262, 263, 265, 266, 267, 268, 269, 270, 271, 273, 282, 285, 286, 287,
   288, 289, 290, 291, 294, 295, 296, 297, 300, 314, 315, 318,
 ]);
-const SHOW_GGZ_DEPOT_BRANCH = false;
+const SHOW_GGZ_DEPOT_BRANCH = true;
 // Bump when a fixed local topology arrangement changes, so Vite Fast Refresh
 // recomputes the memoized layout instead of retaining a previous coordinate set.
-const LAYOUT_REVISION = 122;
+const LAYOUT_REVISION = 132;
 // Final GGZ presentation coordinates. They are based on the reviewed V2 SVG,
 // then normalized to the runtime topology contract: every switch marker is
 // rendered at the right endpoint of its Excel/API frogSeg. Direct neighbours
@@ -153,13 +153,45 @@ const GGZ_VERIFIED_THROAT_POSITIONS: readonly (readonly [number, number, number]
   [26, -974, 322], [27, -932, 322], [28, -890, 322],
   [267, -826, 322], [265, -784, 322], [29, -574, 322], [238, -532, 322],
 
-  [295, -1684, 288], [289, -1642, 288], [296, -1600, 288], [290, -1558, 288],
+  [295, -1692, 364], [289, -1650, 364], [296, -1600, 288], [290, -1558, 288],
   [259, -1322, 364], [255, -1280, 364],
   [256, -1322, 406], [258, -1280, 406],
   [263, -1440, 448], [260, -1398, 448], [261, -1238, 448], [262, -1196, 448],
 
   [30, -492, 274], [33, -450, 274],
   [31, -444, 226], [32, -402, 226],
+];
+// Previously hidden depot Segs extend only from the existing open turnout
+// endpoints.  None of the reviewed V2 coordinates above move: these five
+// compact fans attach at S240, S271/S273, S263, S295 and S296 respectively.
+const GGZ_DEPOT_EXTENSION_POSITIONS: readonly (readonly [number, number, number])[] = [
+  // W43/W44 and W54/W55 form one upper storage loop.  W54/W55 mirrors the
+  // W43/W44 two-turnout shape: W55 is upper-left, S276--S275 is horizontal,
+  // and W54 is lower-right.  The long central grey span is kept straight.
+  [241, -612, -62], [242, -570, -62],
+  [243, -564, -110], [244, -522, -110], [245, -480, -110],
+  [264, -1404, -110], [277, -1446, -110], [278, -1488, -110],
+  [279, -1530, -110], [280, -1572, -110],
+  [276, -1406, -62], [275, -1364, -62],
+
+  // W53/W56 fan: keep both storage tracks below S271.  Moving the complete
+  // rows (rather than S272 alone) keeps every grey continuation horizontal;
+  // W53 and W56 are the only 45-degree transitions between the rows.
+  [272, -1274, 82], [274, -1316, 82],
+  [284, -1358, 82], [293, -1400, 82], [299, -1442, 82], [317, -1484, 82],
+  [283, -1364, 130], [292, -1406, 130], [298, -1448, 130], [316, -1490, 130],
+
+  // W58's reverse branch sits below the main row.  The freed upper slot lets
+  // S320--S296--S290 remain one straight grey track into W57.
+  [319, -1776, 364], [301, -1734, 364],
+  [320, -1642, 288],
+
+  // S305--S303 is the straight approach into S263.  W59's reverse branch is
+  // one lane below it, and W60 fans out on the next lower lane.
+  [303, -1482, 448], [304, -1524, 448], [305, -1566, 448],
+  [306, -1524, 490], [307, -1566, 490], [308, -1608, 490],
+  [309, -1684, 532], [310, -1726, 532],
+  [311, -1642, 532], [312, -1600, 532], [313, -1558, 532],
 ];
 const fullLineSemantics = getFullLineMainlineSemantics();
 const fullLineStationAnchors = getFullLineStationAnchors();
@@ -178,7 +210,10 @@ function isGgzThroatVisibleSegment(id: number) {
   // Retain the explicitly traced station throat routes and every imported
   // full-line interval continuing beyond FSP.  Depot-only and alternate
   // legs remain out of the presentation graph.
-  return !GGZ_THROAT_SCOPE_IDS.has(id) || GGZ_THROAT_VISIBLE_IDS.has(id) || fullLineSemantics.has(id);
+  return !GGZ_THROAT_SCOPE_IDS.has(id)
+    || GGZ_THROAT_VISIBLE_IDS.has(id)
+    || fullLineSemantics.has(id)
+    || (SHOW_GGZ_DEPOT_BRANCH && GGZ_DEPOT_SEGMENT_IDS.has(id));
 }
 
 function average(values: number[]) {
@@ -439,6 +474,17 @@ function buildLayout(topology: TopologyData) {
   [7, 9, 11, 12, 34, 36, 37, 38].forEach((id) => {
     const position = positions.get(id);
     if (position) positions.set(id, { ...position, x: position.x - ggzPlatformApproachPull });
+  });
+
+  // Keep each GCZ platform Seg directly beside its nearest approach Seg.
+  // S13/S39 are plain running Segs, so this closes the visual 56px void
+  // without moving any frog, reverse leg, or the reviewed W4--W7 geometry.
+  ([[11, 13], [37, 39]] as const).forEach(([approachId, platformId]) => {
+    const approach = positions.get(approachId);
+    const platform = positions.get(platformId);
+    if (approach && platform) {
+      positions.set(platformId, { ...platform, x: approach.x + SEG_WIDTH + 8 });
+    }
   });
 
   // W8/W9/W10/W11 repeat the same four-frog X: W8/W10 are the left pair,
@@ -1605,6 +1651,47 @@ function buildLayout(topology: TopologyData) {
     }
   }
 
+  // The station-alignment pass above moves the W39 frog S222 one column to
+  // the right. Reflow the complete six-switch BQS throat around that fixed
+  // lower datum: paired frogs share columns, every leg is 45 degrees, and
+  // the W37/W39 diagonals cross in their interiors so the non-connection
+  // marker remains visible. BQS/GTG platforms stay at their aligned columns.
+  const bqsW39Frog = positions.get(222);
+  const bqsW39Reverse = positions.get(224);
+  const bqsW38Reverse = positions.get(212);
+  const bqsW38Frog = positions.get(211);
+  const bqsW41Frog = positions.get(214);
+  const bqsW41Reverse = positions.get(216);
+  if (
+    bqsW39Frog && bqsW39Reverse && bqsW38Reverse && bqsW38Frog
+    && bqsW41Frog && bqsW41Reverse
+  ) {
+    const step = SEG_WIDTH + 8;
+    const w39Rise = Math.abs(bqsW39Frog.y - bqsW39Reverse.y);
+    const reverse224X = bqsW39Frog.x + SEG_WIDTH + w39Rise;
+    const reverse212X = reverse224X + step;
+    const upperRise = Math.abs(bqsW38Reverse.y - bqsW38Frog.y);
+    const frog211X = reverse212X + upperRise;
+    const terminalReverseX = frog211X + step * 2 + SEG_WIDTH + upperRise;
+
+    setStraightSlot(208, bqsW39Frog.x);
+    setStraightSlot(209, bqsW39Frog.x + step);
+    setStraightSlot(224, reverse224X);
+    setStraightSlot(210, reverse224X);
+    setStraightSlot(212, reverse212X);
+    setStraightSlot(226, reverse212X);
+    setStraightSlot(211, frog211X);
+    setStraightSlot(225, frog211X);
+    setStraightSlot(213, frog211X + step);
+    setStraightSlot(227, frog211X + step);
+    setStraightSlot(214, frog211X + step * 2);
+    setStraightSlot(228, frog211X + step * 2);
+    setStraightSlot(215, frog211X + step * 3);
+    setStraightSlot(229, frog211X + step * 3);
+    setStraightSlot(216, terminalReverseX);
+    setStraightSlot(230, terminalReverseX);
+  }
+
   // BDZ down platform: S184--[S185]--S186 is one station chain, so the
   // outgoing S186 occupies the immediately adjacent right-hand column.
   const bdzDownPlatform = positions.get(185);
@@ -1620,6 +1707,12 @@ function buildLayout(topology: TopologyData) {
   for (const [id, x, y] of GGZ_VERIFIED_THROAT_POSITIONS) {
     const segment = byId.get(id);
     if (segment) positions.set(id, { segment, x, y });
+  }
+  if (SHOW_GGZ_DEPOT_BRANCH) {
+    for (const [id, x, y] of GGZ_DEPOT_EXTENSION_POSITIONS) {
+      const segment = byId.get(id);
+      if (segment) positions.set(id, { segment, x, y });
+    }
   }
 
   const positioned = [...positions.values()];
