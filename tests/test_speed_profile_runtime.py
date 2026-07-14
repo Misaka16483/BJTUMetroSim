@@ -100,6 +100,12 @@ class SpeedProfileRuntimeTests(unittest.TestCase):
                 self.assertTrue(runtime["workerAlive"])
                 self.assertTrue(all(train.phase == "DWELLING" for train in engine.trains))
                 self.assertTrue(all(not train._profile_triggered for train in engine.trains))
+                for train in engine.trains:
+                    self.assertEqual(engine.export_speed_profile(train.train_id), [])
+                    self.assertEqual(
+                        engine.export_speed_profile_meta(train.train_id)["source"],
+                        "DCDP_PENDING",
+                    )
         finally:
             engine.speed_profile_service.shutdown()
 

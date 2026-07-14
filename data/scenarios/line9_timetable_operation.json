@@ -3,7 +3,7 @@
   "name": "9号线运行图与交路生命周期验证",
   "startTimeMs": 21600000,
   "tickSeconds": 0.25,
-  "useDynamicProgrammingProfile": false,
+  "useDynamicProgrammingProfile": true,
   "autoSpawnTrains": false,
   "lineScopeFile": "line9_mainline_scope.json",
   "operationPlan": {

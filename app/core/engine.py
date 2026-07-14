@@ -20,7 +20,6 @@ from app.domain.control.models import AtoConfig, AtoTarget, OperationMode
 from app.domain.control.movement_authority import MovementAuthorityService, TrainPosition
 from app.domain.control.services import ATOController
 from app.domain.control.profile_runtime import AsyncSpeedProfileService, build_speed_profile_request
-from app.domain.control.speed_profile import stopping_target_speed_mps
 from app.domain.dispatch.kpi import DispatchKpiTracker
 from app.domain.dispatch.runtime import DispatchRuntimeCoordinator
 from app.domain.dispatch.services import DispatchContext, DispatchDecision, DispatchRuleConfig, RuleBasedDispatchService
@@ -495,7 +494,10 @@ class SimulationEngine:
         self._ato_config = AtoConfig(
             target_cruise_speed_mps=self.CRUISE_SPEED_MPS,
             expected_deceleration_mps2=0.6,
-            use_dynamic_programming_profile=scenario.use_dynamic_programming_profile,
+            # DCDP is mandatory for every runtime scenario.  Scenario files
+            # may retain the field for compatibility, but can no longer turn
+            # exact speed-profile calculation off.
+            use_dynamic_programming_profile=True,
             profile_position_step_m=10.0,
             profile_speed_step_mps=1.0,
             profile_max_states_per_stage=700,
@@ -1799,6 +1801,12 @@ class SimulationEngine:
             train.door_system.set_permission(DoorSide.NONE)
             train._door_stop_platform_id = None
             self._sync_legacy_door_state(train)
+            # DCDP is mandatory for a PathPlan interval.  The asynchronous
+            # worker may need more wall-clock time than a 10x simulation dwell
+            # provides, so keep the train at the platform until the exact
+            # profile is installed instead of departing on the fallback curve.
+            if self._ato_config.use_dynamic_programming_profile and not train._profile_triggered:
+                return True, None
             train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
             train.phase = DEPARTING
 
@@ -2153,6 +2161,8 @@ class SimulationEngine:
                 return
 
             train.dwell_remaining_sec = 0.0
+            if self._ato_config.use_dynamic_programming_profile and not train._profile_triggered:
+                return
             train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
             train.phase = DEPARTING
 
@@ -2647,10 +2657,10 @@ class SimulationEngine:
             self._ato_by_train[train_id] = controller
             if len(self._ato_by_train) == 1:
                 self.ato = controller
-        # At fast-forward rates, do not block a complete simulation batch on a
-        # new DCDP optimization.  Cached DCDP profiles remain in use; otherwise
-        # ATO falls back to its deterministic braking curve for that interval.
-        controller.allow_profile_compute = self._speed_multiplier < 10
+        # Every playback rate uses the exact DCDP profile.  Profile generation
+        # remains asynchronous, and departure is held until the profile has
+        # been installed, so fast-forward never substitutes the braking curve.
+        controller.allow_profile_compute = True
         return controller
 
     def _ensure_interval_path(self, train: SimTrainState, next_idx: int) -> PathPlan | None:
@@ -2794,8 +2804,8 @@ class SimulationEngine:
             )
             profile = self.speed_profile_service.request(request)
             if profile is None:
-                train.target_speed_mps = ato.fallback_target_speed_mps(state, target)
-                self._store_fallback_path_profile(train, path_plan, request.cache_key)
+                train.target_speed_mps = 0.0
+                self._store_pending_path_profile(train, path_plan, request.cache_key)
                 return False
             ato.install_profile(state, target, profile)
         train.target_speed_mps = ato.target_speed_mps(state, target)
@@ -2839,43 +2849,20 @@ class SimulationEngine:
         }
         self._profile_run_times[train.train_id] = profile.scheduled_run_time_s
 
-    def _store_fallback_path_profile(
+    def _store_pending_path_profile(
         self,
         train: SimTrainState,
         path_plan: PathPlan,
         cache_key: str,
     ) -> None:
-        """Expose a cheap safe curve while the exact DCDP profile is pending."""
-        sample_count = max(2, int(path_plan.total_length_m // 25.0) + 1)
-        points: list[dict[str, Any]] = []
-        for index in range(sample_count + 1):
-            position_m = min(path_plan.total_length_m, path_plan.total_length_m * index / sample_count)
-            local_limit_mps = path_plan.speed_limit_at(position_m, train.permitted_speed_mps)
-            speed_mps = stopping_target_speed_mps(
-                position_m=position_m,
-                target_position_m=path_plan.total_length_m,
-                permitted_speed_mps=local_limit_mps,
-                cruise_speed_mps=self._ato_config.target_cruise_speed_mps,
-                expected_deceleration_mps2=self._ato_config.expected_deceleration_mps2,
-                stop_tolerance_m=self._ato_config.stop_tolerance_m,
-                approach_margin_m=self._ato_config.creep_distance_m,
-            )
-            constraint = path_plan.constraint_at(position_m)
-            points.append({
-                "positionM": round(position_m, 1),
-                "speedMps": round(speed_mps, 2),
-                "mode": "BRAKING_CURVE",
-                "localSpeedLimitMps": round(local_limit_mps, 2),
-                "gradeRatio": round(path_plan.grade_ratio_at(position_m), 7),
-                "segmentId": constraint.segment_id if constraint is not None else None,
-            })
-        self._dcdp_curve_data[train.train_id] = points
+        """Publish pending state without exposing a non-DCDP substitute curve."""
+        self._dcdp_curve_data[train.train_id] = []
         self._dcdp_curve_meta[train.train_id] = {
-            "source": "BRAKING_CURVE_FALLBACK",
+            "source": "DCDP_PENDING",
             "status": "DCDP_PENDING",
             "cacheKey": cache_key,
             "targetPositionM": path_plan.total_length_m,
-            "pointCount": len(points),
+            "pointCount": 0,
         }
 
     def _update_train_path_context(self, train: SimTrainState) -> None:

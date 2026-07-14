@@ -594,7 +594,8 @@ export const useSimStore = create<SimState>((set, get) => ({
     let selectedMeta: SpeedProfileMeta | null | undefined;
 
     for (const [trainId, points] of Object.entries(profiles)) {
-      if (points.length === 0) continue;
+      const nextMeta = profileMeta[trainId] ?? null;
+      if (points.length === 0 && nextMeta === null) continue;
       const activeId = state.activeSpeedRunIdByTrain[trainId];
       // 请求发出后若车辆已经到下一站，丢弃迟到的旧区间响应。
       if (expectedActiveRunIds && expectedActiveRunIds[trainId] !== activeId) continue;
@@ -603,10 +604,14 @@ export const useSimStore = create<SimState>((set, get) => ({
       if (runIndex < 0 || !trainRuns) continue;
 
       const run = trainRuns[runIndex];
-      const profileEndM = points[points.length - 1]?.positionM ?? 0;
-      if (run.pathTotalLengthM > 0 && Math.abs(profileEndM - run.pathTotalLengthM) > 2) continue;
+      const profileEndM = points[points.length - 1]?.positionM;
+      if (
+        profileEndM !== undefined
+        && run.pathTotalLengthM > 0
+        && Math.abs(profileEndM - run.pathTotalLengthM) > 2
+      ) continue;
 
-      const updatedRun = { ...run, profile: points, profileMeta: profileMeta[trainId] ?? null };
+      const updatedRun = { ...run, profile: points, profileMeta: nextMeta };
       const updatedTrainRuns = [...trainRuns];
       updatedTrainRuns[runIndex] = updatedRun;
       nextRuns[trainId] = updatedTrainRuns;

@@ -3,7 +3,7 @@
   "name": "9号线20车早高峰高密度压力测试",
   "startTimeMs": 25200000,
   "tickSeconds": 0.25,
-  "useDynamicProgrammingProfile": false,
+  "useDynamicProgrammingProfile": true,
   "autoSpawnTrains": false,
   "lineScopeFile": "line9_mainline_scope.json",
   "operationPlan": {

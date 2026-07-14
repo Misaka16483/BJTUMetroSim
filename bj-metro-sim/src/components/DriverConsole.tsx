@@ -752,6 +752,8 @@ function SpeedCurveChart({
     : '';
   const planLabel = profileSource === 'DCDP_STRICT'
     ? 'DCDP'
+    : profileSource === 'DCDP_PENDING'
+      ? 'DCDP…'
     : 'PLAN';
 
   return (
