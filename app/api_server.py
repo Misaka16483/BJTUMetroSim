@@ -1497,30 +1497,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         snap = self.engine.snapshot()
         if snap is None:
             return {"clock": {"state": "STOPPED", "simTime": "--:--:--", "tick": 0}, "trains": [], "source": "static"}
-        return {
-            "clock": {
-                "state": snap.clock_state,
-                "simTime": snap.sim_time_str,
-                "tick": snap.tick,
-                "simTimeMs": snap.sim_time_ms,
-                "speedMultiplier": snap.speed_multiplier,
-                "tickIntervalMs": round(self.engine._tick_interval_seconds * 1000),
-            },
-            "trains": snap.trains,
-            "stations": snap.stations,
-            "power": snap.power,
-            "powerNetwork": snap.power_network,
-            "dispatchDecisions": snap.dispatch_decisions,
-            "dispatchRuntime": snap.dispatch_runtime,
-            "interlocking": snap.interlocking,
-            "kpi": snap.kpi,
-            "passengerFlow": self.engine.passenger_flow_configuration(),
-            "passengerExchanges": self.engine.current_station_passenger_exchange()["exchanges"],
-            "source": "simulation-engine",
-        }
-        return snap.to_api_dict(
+        result = snap.to_api_dict(
             tick_interval_ms=round(self.engine._tick_interval_seconds * 1000),
         )
+        result["passengerFlow"] = self.engine.passenger_flow_configuration()
+        result["passengerExchanges"] = self.engine.current_station_passenger_exchange()["exchanges"]
+        return result
 
     @staticmethod
     def _replay_state(snapshot: JsonDict, run_id: int) -> JsonDict:

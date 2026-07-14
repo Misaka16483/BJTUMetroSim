@@ -43,7 +43,7 @@ from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.line.services import LineMapRepository, LineScope, PathPlan, PathPlanner, TrackQueryService
 from app.domain.power.services import PowerSection, PowerService, TrainPowerRequest
 from app.domain.station.passenger_profiles import load_passenger_profile
-from app.domain.station.services import PoissonPassengerFlowGenerator, StationService, TrainLoadState
+from app.domain.station.services import DayType, DwellTimeConfig, FlowScenario, PoissonPassengerFlowGenerator, StationFlowConfig, StationService, TrainLoadState
 from app.domain.vehicle.models import ControlCommand, TrainState, VehicleConfig, CommandSource
 from app.domain.vehicle.doors import DoorSide, TrainDoorSystem
 from app.domain.vehicle.services import (
@@ -454,6 +454,8 @@ class SimulationEngine:
 
         # 鈹€鈹€ 鍩熸湇鍔?鈹€鈹€
         self.station_service = self._build_station_service()
+        self._passenger_profile = None  # loaded lazily or set externally
+        self._estimated_weekday_passenger_arrivals = 0
         self.power_service: PowerService = self._build_power_service()
         self.dispatch_service = RuleBasedDispatchService(
             DispatchRuleConfig(
@@ -4719,8 +4721,8 @@ class SimulationEngine:
                 "totalPassengerAlightedPax": passenger_totals["alightedPax"],
                 "passengerServiceRatio": round(float(passenger_totals["serviceRatio"]), 4),
                 "passengerPlatformBalanced": passenger_totals["platformBalanced"],
-                "passengerProfileId": self._passenger_profile.profile_id,
-                "passengerDataQuality": self._passenger_profile.quality,
+                "passengerProfileId": getattr(self._passenger_profile, "profile_id", "BUILTIN_SYNTHETIC") if self._passenger_profile else "BUILTIN_SYNTHETIC",
+                "passengerDataQuality": getattr(self._passenger_profile, "quality", "SYNTHETIC") if self._passenger_profile else "SYNTHETIC",
                 "estimatedWeekdayPassengerArrivals": self._estimated_weekday_passenger_arrivals,
                 "maxPlatformDensity": round(
                     max((p.platform_density_pax_per_m2 for p in self.station_service.platforms.values()), default=0.0),

@@ -69,21 +69,8 @@ export default function App() {
   const activeTab = VIEW_TABS[modeIndex];
   const [showReport, setShowReport] = useState(false);
   const [showAutoDispatch, setShowAutoDispatch] = useState(false);
-  const modeIndex = viewMode === 'macro'
-    ? 0
-    : viewMode === 'micro'
-      ? 1
-      : viewMode === 'interlocking'
-        ? 2
-        : viewMode === 'fullLine'
-          ? 3
-          : viewMode === 'driver'
-            ? 4
-            : viewMode === 'power'
-              ? 5
-              : viewMode === 'stationFlow'
-                ? 6
-                : 7;
+
+
 
   // 首次加载: 先拉取全量路网(Amap) → 再并行尝试后端获取9号线富数据
   useEffect(() => {
@@ -312,7 +299,7 @@ export default function App() {
         </div>
 
         <div className="hidden lg:flex shrink-0 items-center gap-3">
-        {backendStatus === 'connected' && dataMode === 'LIVE_SIM' ? <DriverCabConnectionButton /> : null}
+        <span className="xl:hidden">{backendStatus === 'connected' && dataMode === 'LIVE_SIM' ? <DriverCabConnectionButton /> : null}</span>
 
         <div className="flex items-center gap-1.5 shrink-0" style={{ flexBasis: 'auto' }}>
           <button
@@ -373,36 +360,7 @@ export default function App() {
           </button>
         </div>
 
-        <div className="hidden xl:flex shrink-0 items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
-        <div className="flex items-center justify-end gap-3 min-w-0 overflow-hidden whitespace-nowrap text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
-          <span className="led led-online" /> SYS ONLINE
-          <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
-          <span>
-            API{' '}
-            <span style={{ color: backendStatus === 'connected' ? 'var(--cyan)' : 'var(--amber)' }}>
-              {backendStatus.toUpperCase()}
-            </span>
-          </span>
-          <span style={{ color: dataStale ? 'var(--amber)' : dataMode === 'LIVE_SIM' ? 'var(--green)' : 'var(--cyan)' }}>
-            {dataMode}{dataStale ? ' · FROZEN' : ''} · #{snapshotSequence}
-          </span>
-          {snapshotGapCount > 0 && <span style={{ color: 'var(--amber)' }}>RESYNC {snapshotGapCount}</span>}
-          {import.meta.env.VITE_ENABLE_DEMO_MODE === 'true' && dataMode === 'DISCONNECTED' && (
-            <button type="button" onClick={() => setDataMode('DEMO')} style={{ color: 'var(--amber)' }}>
-              ENTER DEMO
-            </button>
-          )}
-          <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
-          <span>UTC+8</span>
-          {linesLoading && <span style={{ color: 'var(--amber)' }}>LOADING</span>}
-          {backendStatus === 'connected' && (
-            <>
-              <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
-              <span style={{ color: engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)' }}>
-                {engineClockState}
-              </span>
-            </>
-          )}
+
         </div>
       </header>
 
@@ -514,26 +472,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ═══════════════ footer ═══════════════ */}
-      <footer className="flex items-center justify-between px-5 shrink-0 board-num text-[9px]" style={{ color: 'var(--text-muted)', height: 18 }}>
-        <div className="flex items-center gap-2">
-          <span className={backendStatus === 'connected' ? 'led led-online' : 'led'} />
-          {backendStatus === 'connected' && trackMap
-            ? `${trackMap.counts.segments} SEG · ${trackMap.counts.signals} SIG · ${trackMap.counts.routes} ROUTE`
-            : backendStatus === 'fallback'
-              ? 'MAP: AMAP'
-              : 'API OFFLINE'}
-          {backendStatus === 'connected' && (
-            <>
-              <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
-              <span style={{ color: engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)' }}>
-                SIM: {engineClockState}
-              </span>
-            </>
-          )}
-        </div>
-        <span style={{ color: 'rgba(255,255,255,0.04)' }}>v0.2.0</span>
-      </footer>
+
 
       {showTrainMgmt && (
         <div
@@ -565,6 +504,55 @@ export default function App() {
       )}
 
       <AutoDispatchPanel open={showAutoDispatch} onClose={() => setShowAutoDispatch(false)} />
+
+      {/* ═══════════════ 底部状态栏 ═══════════════ */}
+      <div className="shrink-0 flex items-center justify-between px-3 py-px text-[8px] board-num border-t" style={{ color: 'var(--text-muted)', borderColor: 'rgba(255,255,255,0.06)' }}>
+        <div className="flex items-center gap-1.5">
+          {backendStatus === 'connected' && trackMap
+            ? <span>{trackMap.counts.segments} SEG · {trackMap.counts.signals} SIG · {trackMap.counts.routes} ROUTE</span>
+            : backendStatus === 'fallback'
+              ? <span>MAP: AMAP</span>
+              : <span>API OFFLINE</span>}
+          {backendStatus === 'connected' && (
+            <>
+              <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
+              <span style={{ color: engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)' }}>
+                SIM: {engineClockState}
+              </span>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="led led-online" /> SYS ONLINE
+          <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
+          <span>
+            API{' '}
+            <span style={{ color: backendStatus === 'connected' ? 'var(--cyan)' : 'var(--amber)' }}>
+              {backendStatus.toUpperCase()}
+            </span>
+          </span>
+          <span style={{ color: dataStale ? 'var(--amber)' : dataMode === 'LIVE_SIM' ? 'var(--green)' : 'var(--cyan)' }}>
+            {dataMode}{dataStale ? ' · FROZEN' : ''} · #{snapshotSequence}
+          </span>
+          {snapshotGapCount > 0 && <span style={{ color: 'var(--amber)' }}>RESYNC {snapshotGapCount}</span>}
+          {import.meta.env.VITE_ENABLE_DEMO_MODE === 'true' && dataMode === 'DISCONNECTED' && (
+            <button type="button" onClick={() => setDataMode('DEMO')} style={{ color: 'var(--amber)' }}>
+              ENTER DEMO
+            </button>
+          )}
+          <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
+          <span>UTC+8</span>
+          {linesLoading && <span style={{ color: 'var(--amber)' }}>LOADING</span>}
+          {backendStatus === 'connected' && (
+            <>
+              <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
+              <span style={{ color: engineClockState === 'RUNNING' ? 'var(--green)' : 'var(--text-muted)' }}>
+                {engineClockState}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
