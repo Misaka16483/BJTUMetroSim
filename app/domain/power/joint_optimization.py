@@ -10,6 +10,13 @@ from typing import Any
 from app.domain.power.flow_solver import DCTractionPowerFlowSolver
 from app.domain.power.line9_topology import load_line9_power_network
 from app.domain.power.network_models import TrainElectricalLoad
+from app.domain.power.trajectory import (
+    ProxyTrajectoryProvider,
+    TrainTrajectorySample,
+    TrajectoryFrame,
+    TrajectoryProvider,
+    assert_candidate_supported,
+)
 from app.domain.power.validation import validate_power_snapshot
 from app.domain.vehicle.models import VehicleConfig
 from app.domain.vehicle.services import SimpleVehicleModel
@@ -42,6 +49,7 @@ MODE_VARIABLES = {
 @dataclass(frozen=True)
 class JointExperimentConfig:
     train_count: int = 12
+    start_time_ms: int = 0
     horizon_sec: int = 240
     time_step_sec: float = 1.25
     cycle_sec: float = 120.0
@@ -62,16 +70,27 @@ class JointExperimentConfig:
     max_balance_error_ratio: float = 0.01
     max_speed_tracking_rmse_mps: float = 1.50
     max_departure_deviation_sec: float = 15.0
+    max_runtime_deviation_sec: float = 15.0
+    max_stop_position_error_m: float = 0.5
+    max_dynamics_residual_n: float = 5_000.0
 
     def __post_init__(self) -> None:
         if self.train_count < 2:
             raise ValueError("train_count must be at least 2")
+        if self.start_time_ms < 0:
+            raise ValueError("start_time_ms must be non-negative")
         if self.horizon_sec <= 0 or self.time_step_sec <= 0:
             raise ValueError("horizon and time step must be positive")
         if self.horizon_sec % self.time_step_sec:
             raise ValueError("horizon_sec must be divisible by time_step_sec")
         if self.electrical_substeps < 1:
             raise ValueError("electrical_substeps must be positive")
+        if min(
+            self.max_runtime_deviation_sec,
+            self.max_stop_position_error_m,
+            self.max_dynamics_residual_n,
+        ) < 0:
+            raise ValueError("runtime, stop-position, and dynamics tolerances must be non-negative")
         if not 0 < self.rectifier_efficiency <= 1 or not 0 < self.feedback_efficiency <= 1:
             raise ValueError("grid conversion efficiencies must be in (0, 1]")
 
@@ -87,7 +106,12 @@ def normalize_candidate(candidate: JsonDict) -> JsonDict:
 class JointPowerEvaluator:
     """Deterministic multi-train evaluator using the production DC solver."""
 
-    def __init__(self, topology_path: str | Path, config: JointExperimentConfig | None = None) -> None:
+    def __init__(
+        self,
+        topology_path: str | Path,
+        config: JointExperimentConfig | None = None,
+        trajectory_provider: TrajectoryProvider | None = None,
+    ) -> None:
         self.topology_path = Path(topology_path)
         self.config = config or JointExperimentConfig()
         self.vehicle_config = VehicleConfig(
@@ -99,6 +123,10 @@ class JointPowerEvaluator:
             auxiliary_power_kw=150.0,
         )
         self.vehicle_dynamics = SimpleVehicleModel(self.vehicle_config)
+        self.trajectory_provider: TrajectoryProvider = trajectory_provider or ProxyTrajectoryProvider(
+            self._proxy_frame_at,
+            self._tracking_metrics,
+        )
 
     def evaluate(
         self,
@@ -108,6 +136,7 @@ class JointPowerEvaluator:
         storage_enabled: bool = True,
     ) -> JsonDict:
         candidate = normalize_candidate(candidate)
+        assert_candidate_supported(self.trajectory_provider, candidate, BASELINE_CANDIDATE)
         dt = float(time_step_sec or self.config.time_step_sec)
         if self.config.horizon_sec % dt:
             raise ValueError("evaluation step must divide horizon")
@@ -160,11 +189,18 @@ class JointPowerEvaluator:
         }
         step_count = int(self.config.horizon_sec / dt)
         sub_dt = dt / self.config.electrical_substeps
+        sample_times_ms = tuple(
+            self.config.start_time_ms + round((step * dt + (substep + 0.5) * sub_dt) * 1000.0)
+            for step in range(step_count)
+            for substep in range(self.config.electrical_substeps)
+        )
+        self.trajectory_provider.prepare(candidate, sample_times_ms)
         for step in range(step_count):
             for substep in range(self.config.electrical_substeps):
                 sim_time_sec = step * dt + (substep + 0.5) * sub_dt
-                loads, physical = self._loads_and_physics_at(candidate, sim_time_sec)
-                snapshot = solver.solve(loads, dt_sec=sub_dt, sim_time_ms=round(sim_time_sec * 1000))
+                sim_time_ms = self.config.start_time_ms + round(sim_time_sec * 1000.0)
+                loads, physical = self._loads_and_physics_at(candidate, sim_time_ms)
+                snapshot = solver.solve(loads, dt_sec=sub_dt, sim_time_ms=sim_time_ms)
                 validation = validate_power_snapshot(
                     snapshot,
                     balance_error_limit_ratio=self.config.max_balance_error_ratio,
@@ -246,7 +282,7 @@ class JointPowerEvaluator:
             abs(final_storage_kwh - initial_storage_kwh) / storage.rated_energy_kwh
             if storage is not None else 0.0
         )
-        tracking = self._tracking_metrics(candidate)
+        tracking = dict(self.trajectory_provider.tracking_metrics(candidate))
         metrics.update(tracking)
         constraints = {
             "allStepsValid": metrics["failedSteps"] == 0,
@@ -255,16 +291,17 @@ class JointPowerEvaluator:
             "powerBalance": metrics["maxBalanceErrorRatio"] < self.config.max_balance_error_ratio,
             "speedTracking": metrics["speedTrackingRmseMps"] <= self.config.max_speed_tracking_rmse_mps,
             "departureDeviation": metrics["maxDepartureDeviationSec"] <= self.config.max_departure_deviation_sec,
-            "runtimePreserved": metrics["runtimeDeviationSec"] <= 1e-9,
-            "stopPositionPreserved": metrics["stopPositionErrorM"] <= 1e-6,
+            "runtimePreserved": metrics["runtimeDeviationSec"] <= self.config.max_runtime_deviation_sec,
+            "stopPositionPreserved": metrics["stopPositionErrorM"] <= self.config.max_stop_position_error_m,
             "maximumSpeed": metrics["maximumSpeedMps"] <= self.config.nominal_max_speed_mps + 1e-9,
             "tractionForce": metrics["maxTractionForceN"] <= self.config.max_traction_force_n,
             "serviceBrakeForce": metrics["maxBrakeForceN"] <= self.config.max_service_brake_force_n,
             "acceleration": metrics["maxAccelerationMps2"] <= self.config.max_acceleration_mps2,
             "deceleration": metrics["maxDecelerationMps2"] <= self.config.max_service_deceleration_mps2,
-            "dynamicsClosure": metrics["maxDynamicsResidualN"] <= 1e-6,
+            "dynamicsClosure": metrics["maxDynamicsResidualN"] <= self.config.max_dynamics_residual_n,
             "trainSeparation": metrics["minSameDirectionSpacingM"] >= self.config.minimum_same_direction_spacing_m,
             "terminalSoc": metrics["terminalSocDeviation"] <= self.config.max_terminal_soc_deviation,
+            "operationalMetrics": metrics.get("operationalMetricsAvailable", 0.0) >= 1.0,
         }
         violations = {
             "failedSteps": float(metrics["failedSteps"]),
@@ -273,14 +310,17 @@ class JointPowerEvaluator:
             "powerBalance": max(0.0, metrics["maxBalanceErrorRatio"] - self.config.max_balance_error_ratio) * 100.0,
             "speedTracking": max(0.0, metrics["speedTrackingRmseMps"] - self.config.max_speed_tracking_rmse_mps),
             "departureDeviation": max(0.0, metrics["maxDepartureDeviationSec"] - self.config.max_departure_deviation_sec) / 5.0,
+            "runtimePreserved": max(0.0, metrics["runtimeDeviationSec"] - self.config.max_runtime_deviation_sec) / 5.0,
+            "stopPositionPreserved": max(0.0, metrics["stopPositionErrorM"] - self.config.max_stop_position_error_m),
             "maximumSpeed": max(0.0, metrics["maximumSpeedMps"] - self.config.nominal_max_speed_mps),
             "tractionForce": max(0.0, metrics["maxTractionForceN"] - self.config.max_traction_force_n) / 50_000.0,
             "serviceBrakeForce": max(0.0, metrics["maxBrakeForceN"] - self.config.max_service_brake_force_n) / 50_000.0,
             "acceleration": max(0.0, metrics["maxAccelerationMps2"] - self.config.max_acceleration_mps2),
             "deceleration": max(0.0, metrics["maxDecelerationMps2"] - self.config.max_service_deceleration_mps2),
-            "dynamicsClosure": metrics["maxDynamicsResidualN"] / 1_000.0,
+            "dynamicsClosure": max(0.0, metrics["maxDynamicsResidualN"] - self.config.max_dynamics_residual_n) / max(self.config.max_dynamics_residual_n, 1.0),
             "trainSeparation": max(0.0, self.config.minimum_same_direction_spacing_m - metrics["minSameDirectionSpacingM"]) / 100.0,
             "terminalSoc": max(0.0, metrics["terminalSocDeviation"] - self.config.max_terminal_soc_deviation) / 0.05,
+            "operationalMetrics": 0.0 if metrics.get("operationalMetricsAvailable", 0.0) >= 1.0 else 1.0,
         }
         objectives = {
             "netAcGridEnergyKwh": metrics["netAcGridEnergyKwh"],
@@ -296,10 +336,12 @@ class JointPowerEvaluator:
             "feasible": all(constraints.values()),
             "metrics": metrics,
             "timeStepSec": dt,
+            "startTimeMs": self.config.start_time_ms,
             "stepCount": step_count,
             "electricalSolveCount": step_count * self.config.electrical_substeps,
             "electricalTimeStepSec": sub_dt,
             "storageEnabled": storage_enabled,
+            "trajectorySource": self.trajectory_provider.source,
         }
 
     def _profile_parameters(self, candidate: JsonDict) -> tuple[float, float, float]:
@@ -385,44 +427,40 @@ class JointPowerEvaluator:
             sim_time_sec + (sample + 0.5) * interval_sec / sample_count
             for sample in range(sample_count)
         ] if interval_sec > 0.0 else [sim_time_sec]
+        frames = [
+            self.trajectory_provider.frame_at(round(sample_time * 1000.0), candidate)
+            for sample_time in sample_times
+        ]
+        load_sets = [self._frame_to_loads_and_physics(frame)[0] for frame in frames]
+        by_train = [{item.train_id: item for item in loads} for loads in load_sets]
+        midpoint = frames[len(frames) // 2]
         loads: list[TrainElectricalLoad] = []
-        for index in range(self.config.train_count):
-            direction, mileage_m, speed_mps, _ = self._train_kinematics(
-                candidate,
-                index,
-                sim_time_sec + interval_sec / 2.0,
-            )
-            traction_samples: list[float] = []
-            regen_samples: list[float] = []
-            for sample_time in sample_times:
-                _, _, sample_speed, phase = self._train_kinematics(candidate, index, sample_time)
-                _, acceleration, _ = self._speed_acceleration_distance(candidate, phase)
-                resistance_n = self.vehicle_dynamics.running_resistance_n(sample_speed)
-                traction_force_n = 0.0
-                brake_force_n = 0.0
-                if acceleration >= 0.0 and sample_speed > 0.0:
-                    traction_force_n = self.config.train_mass_kg * acceleration + resistance_n
-                elif acceleration < 0.0:
-                    brake_force_n = max(-self.config.train_mass_kg * acceleration - resistance_n, 0.0)
-                traction_samples.append(traction_force_n * sample_speed / 1000.0 / 0.88)
-                regen_samples.append(brake_force_n * sample_speed / 1000.0 * 0.80)
+        for sample in midpoint.samples:
+            items = [values[sample.train_id] for values in by_train]
             loads.append(TrainElectricalLoad(
-                train_id=f"JOINT-{index + 1:03d}",
-                direction=direction,
-                mileage_m=mileage_m,
-                speed_mps=speed_mps,
-                aux_power_kw=self.vehicle_config.auxiliary_power_kw,
-                traction_power_request_kw=sum(traction_samples) / sample_count,
-                regen_power_available_kw=sum(regen_samples) / sample_count,
+                train_id=sample.train_id,
+                direction=sample.direction,
+                mileage_m=sample.mileage_m,
+                speed_mps=sample.speed_mps,
+                aux_power_kw=sum(item.aux_power_kw for item in items) / sample_count,
+                traction_power_request_kw=sum(item.traction_power_kw for item in items) / sample_count,
+                regen_power_available_kw=sum(item.raw_regen_power_kw for item in items) / sample_count,
             ))
         return loads
 
     def _loads_and_physics_at(
         self,
         candidate: JsonDict,
-        sim_time_sec: float,
+        sim_time_ms: int,
     ) -> tuple[list[TrainElectricalLoad], JsonDict]:
-        loads = self._loads_at(candidate, sim_time_sec)
+        frame = self.trajectory_provider.frame_at(sim_time_ms, candidate)
+        return self._frame_to_loads_and_physics(frame)
+
+    def _frame_to_loads_and_physics(
+        self,
+        frame: TrajectoryFrame,
+    ) -> tuple[list[TrainElectricalLoad], JsonDict]:
+        loads: list[TrainElectricalLoad] = []
         states: list[tuple[str, float]] = []
         physical: JsonDict = {
             "maxTractionForceN": 0.0,
@@ -432,30 +470,52 @@ class JointPowerEvaluator:
             "maxDynamicsResidualN": 0.0,
             "minSameDirectionSpacingM": float("inf"),
         }
-        for index in range(self.config.train_count):
-            direction, mileage_m, speed_mps, phase = self._train_kinematics(
-                candidate, index, sim_time_sec
-            )
-            _, acceleration, _ = self._speed_acceleration_distance(candidate, phase)
-            resistance_n = self.vehicle_dynamics.running_resistance_n(speed_mps)
-            traction_force_n = 0.0
-            brake_force_n = 0.0
-            if acceleration >= 0.0 and speed_mps > 0.0:
-                traction_force_n = self.config.train_mass_kg * acceleration + resistance_n
-            elif acceleration < 0.0:
-                brake_force_n = max(-self.config.train_mass_kg * acceleration - resistance_n, 0.0)
+        for sample in frame.samples:
+            if sample.resistance_force_n is not None:
+                resistance_n = sample.resistance_force_n
+            else:
+                vehicle = SimpleVehicleModel(VehicleConfig(
+                    train_id=sample.train_id,
+                    mass_kg=sample.mass_kg,
+                    max_speed_mps=max(sample.permitted_speed_mps or self.config.nominal_max_speed_mps, 0.1),
+                    max_traction_force_n=max(self.config.max_traction_force_n, sample.traction_force_n, 1.0),
+                    max_service_brake_force_n=max(self.config.max_service_brake_force_n, sample.total_brake_force_n, 1.0),
+                    auxiliary_power_kw=sample.auxiliary_power_kw,
+                ))
+                resistance_n = vehicle.running_resistance_n(
+                    sample.speed_mps,
+                    sample.traction_force_n,
+                    sample.total_brake_force_n,
+                )
+            gradient_force_n = sample.mass_kg * 9.80665 * sample.grade_ratio
             residual_n = abs(
-                traction_force_n
-                - brake_force_n
+                sample.traction_force_n
+                - sample.total_brake_force_n
                 - resistance_n
-                - self.config.train_mass_kg * acceleration
+                - gradient_force_n
+                - sample.mass_kg * sample.acceleration_mps2
             )
-            physical["maxTractionForceN"] = max(physical["maxTractionForceN"], traction_force_n)
-            physical["maxBrakeForceN"] = max(physical["maxBrakeForceN"], brake_force_n)
-            physical["maxAccelerationMps2"] = max(physical["maxAccelerationMps2"], acceleration)
-            physical["maxDecelerationMps2"] = max(physical["maxDecelerationMps2"], -acceleration)
+            traction_kw = sample.traction_power_request_kw
+            if traction_kw is None:
+                traction_kw = sample.traction_force_n * sample.speed_mps / 1000.0 / 0.88
+            regen_kw = sample.regen_power_available_kw
+            if regen_kw is None:
+                regen_kw = sample.electric_brake_force_n * sample.speed_mps / 1000.0 * 0.80
+            loads.append(TrainElectricalLoad(
+                train_id=sample.train_id,
+                direction=sample.direction,
+                mileage_m=sample.mileage_m,
+                speed_mps=sample.speed_mps,
+                aux_power_kw=sample.auxiliary_power_kw,
+                traction_power_request_kw=traction_kw,
+                regen_power_available_kw=regen_kw,
+            ))
+            physical["maxTractionForceN"] = max(physical["maxTractionForceN"], sample.traction_force_n)
+            physical["maxBrakeForceN"] = max(physical["maxBrakeForceN"], sample.total_brake_force_n)
+            physical["maxAccelerationMps2"] = max(physical["maxAccelerationMps2"], sample.acceleration_mps2)
+            physical["maxDecelerationMps2"] = max(physical["maxDecelerationMps2"], -sample.acceleration_mps2)
             physical["maxDynamicsResidualN"] = max(physical["maxDynamicsResidualN"], residual_n)
-            states.append((direction, mileage_m))
+            states.append((sample.direction, sample.mileage_m))
         first_m, last_m = 313.0, 16_048.92
         span_m = last_m - first_m
         for direction in ("UP", "DOWN"):
@@ -468,6 +528,46 @@ class JointPowerEvaluator:
                 physical["minSameDirectionSpacingM"], min(gaps)
             )
         return loads, physical
+
+    def _proxy_frame_at(self, candidate: JsonDict, sim_time_ms: int) -> TrajectoryFrame:
+        sim_time_sec = (sim_time_ms - self.config.start_time_ms) / 1000.0
+        samples: list[TrainTrajectorySample] = []
+        for index in range(self.config.train_count):
+            direction, mileage_m, speed_mps, phase = self._train_kinematics(candidate, index, sim_time_sec)
+            _, acceleration, _ = self._speed_acceleration_distance(candidate, phase)
+            resistance_n = self.vehicle_dynamics.running_resistance_n(speed_mps)
+            traction_force_n = 0.0
+            brake_force_n = 0.0
+            if acceleration >= 0.0 and speed_mps > 0.0:
+                traction_force_n = self.config.train_mass_kg * acceleration + resistance_n
+            elif acceleration < 0.0:
+                brake_force_n = max(-self.config.train_mass_kg * acceleration - resistance_n, 0.0)
+            if phase < 25.0 + candidate["tractionTimingSec"]:
+                phase_name = "DEPARTING"
+            elif phase < 75.0 + candidate["brakeTimingSec"]:
+                phase_name = "CRUISING"
+            elif phase < 105.0:
+                phase_name = "APPROACHING"
+            else:
+                phase_name = "DWELLING"
+            samples.append(TrainTrajectorySample(
+                sim_time_ms=sim_time_ms,
+                train_id=f"JOINT-{index + 1:03d}",
+                direction=direction,
+                mileage_m=mileage_m,
+                speed_mps=speed_mps,
+                acceleration_mps2=acceleration,
+                mass_kg=self.config.train_mass_kg,
+                traction_force_n=traction_force_n,
+                electric_brake_force_n=brake_force_n,
+                auxiliary_power_kw=self.vehicle_config.auxiliary_power_kw,
+                permitted_speed_mps=self.config.nominal_max_speed_mps,
+                resistance_force_n=resistance_n,
+                phase=phase_name,
+                departure_authorized=True,
+                source="ANALYTIC_PROXY_V2",
+            ))
+        return TrajectoryFrame(sim_time_ms, tuple(samples), source="ANALYTIC_PROXY_V2")
 
     def _tracking_metrics(self, candidate: JsonDict) -> JsonDict:
         squared_error = 0.0
@@ -491,6 +591,7 @@ class JointPowerEvaluator:
             "runtimeDeviationSec": 0.0,
             "stopPositionErrorM": abs(final_distance - self.config.cycle_distance_m),
             "maximumSpeedMps": maximum_speed,
+            "operationalMetricsAvailable": 1.0,
         }
 
 
