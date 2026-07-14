@@ -75,6 +75,10 @@ class DispatchRuntimeCoordinator:
                 and current[0] not in {"DWELLING", "IDLE"}
                 and previous[1] == current[1]
                 and previous[2] == current[2]
+                # Route-backed terminal reversal movements are not passenger
+                # service departures. The return service starts only after
+                # the physical turnback has completed at its final platform.
+                and getattr(train, "turnback_state", None) in {None, "COMPLETED"}
             )
             if departed:
                 record = DepartureRecord(

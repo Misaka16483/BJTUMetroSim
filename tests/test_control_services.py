@@ -9,6 +9,8 @@ from app.domain.control import (
     AtoTarget,
     CabControlService,
     OperationMode,
+    OptimizedSpeedProfile,
+    SpeedProfilePoint,
     VehicleInteractiveSession,
     estimate_scheduled_run_time_s,
     optimize_speed_profile_dcdp,
@@ -21,6 +23,20 @@ from tests.test_phase0 import tiny_line_map
 
 
 class ATOControllerTests(unittest.TestCase):
+    @staticmethod
+    def _installed_test_profile(target_position_m: float, permitted_speed_mps: float) -> OptimizedSpeedProfile:
+        return OptimizedSpeedProfile(
+            points=(
+                SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0),
+                SpeedProfilePoint(10.0, target_position_m / 2.0, 5.0, "COAST", 0.0, 0.0, 0.0),
+                SpeedProfilePoint(20.0, target_position_m, 0.0, "STOP", 0.0, 0.0, 0.0),
+            ),
+            target_position_m=target_position_m,
+            permitted_speed_mps=permitted_speed_mps,
+            scheduled_run_time_s=20.0,
+            terminal_score=0.0,
+        )
+
     def test_ato_uses_traction_when_target_is_far(self) -> None:
         controller = ATOController()
         state = TrainState("T001", position_m=0.0, speed_mps=0.0, acceleration_mps2=0.0, sim_time_s=0.0)
@@ -151,6 +167,72 @@ class ATOControllerTests(unittest.TestCase):
         for point in profile.points:
             allowed_speed_mps = path_plan.speed_limit_at(point.position_m, 12.0)
             self.assertLessEqual(point.speed_mps, allowed_speed_mps + 1e-6)
+
+    def test_installed_profile_survives_runtime_authority_speed_rounding(self) -> None:
+        path_plan = PathPlanner(tiny_line_map()).plan_between_platforms(
+            20, 21, direction="forward"
+        )
+        controller = ATOController(
+            AtoConfig(target_cruise_speed_mps=22.22),
+            enable_synchronous_profile_optimization=False,
+        )
+        state = TrainState(
+            "T001", position_m=0.0, speed_mps=0.0,
+            acceleration_mps2=0.0, sim_time_s=0.0,
+        )
+        installed_target = AtoTarget(
+            target_position_m=path_plan.total_length_m,
+            permitted_speed_mps=80.0 / 3.6,
+            path_plan=path_plan,
+        )
+        profile = self._installed_test_profile(
+            path_plan.total_length_m,
+            22.22,
+        )
+        controller.install_profile(state, installed_target, profile)
+
+        runtime_target = AtoTarget(
+            target_position_m=path_plan.total_length_m,
+            permitted_speed_mps=22.22,
+            path_plan=path_plan,
+        )
+        controller.target_speed_mps(state, runtime_target)
+
+        self.assertNotEqual(controller.last_profile_mode, "BRAKING_CURVE")
+
+    def test_installed_profile_does_not_override_shortened_authority_endpoint(self) -> None:
+        path_plan = PathPlanner(tiny_line_map()).plan_between_platforms(
+            20, 21, direction="forward"
+        )
+        controller = ATOController(
+            AtoConfig(target_cruise_speed_mps=12.0),
+            enable_synchronous_profile_optimization=False,
+        )
+        state = TrainState(
+            "T001", position_m=0.0, speed_mps=0.0,
+            acceleration_mps2=0.0, sim_time_s=0.0,
+        )
+        full_target = AtoTarget(
+            target_position_m=path_plan.total_length_m,
+            permitted_speed_mps=12.0,
+            path_plan=path_plan,
+        )
+        profile = self._installed_test_profile(
+            path_plan.total_length_m,
+            12.0,
+        )
+        controller.install_profile(state, full_target, profile)
+
+        controller.target_speed_mps(
+            state,
+            AtoTarget(
+                target_position_m=path_plan.total_length_m / 2.0,
+                permitted_speed_mps=12.0,
+                path_plan=path_plan,
+            ),
+        )
+
+        self.assertEqual(controller.last_profile_mode, "BRAKING_CURVE")
 
     def test_ato_dynamic_profile_does_not_start_at_full_speed(self) -> None:
         controller = ATOController(AtoConfig(expected_deceleration_mps2=0.6))

@@ -80,6 +80,7 @@ class AtoConfig:
     traction_slew_rate_percent_per_s: float = 30.0
     brake_apply_slew_rate_percent_per_s: float = 40.0
     brake_release_slew_rate_percent_per_s: float = 18.0
+    low_speed_brake_guard_speed_mps: float = 2.0
     terminal_brake_guard_margin_m: float = 35.0
     terminal_brake_floor_percent: float = 8.0
     terminal_brake_floor_speed_mps: float = 1.0
@@ -94,6 +95,8 @@ class AtoConfig:
     profile_position_step_m: float = 5.0
     profile_speed_step_mps: float = 0.5
     profile_lookahead_m: float = 5.0
+    profile_traction_timing_bias_s: float = 0.0
+    profile_brake_timing_bias_s: float = 0.0
     profile_max_states_per_stage: int = 1800
 
     def __post_init__(self) -> None:
@@ -143,6 +146,8 @@ class AtoConfig:
             raise ValueError("brake_apply_slew_rate_percent_per_s must be positive")
         if self.brake_release_slew_rate_percent_per_s <= 0:
             raise ValueError("brake_release_slew_rate_percent_per_s must be positive")
+        if self.low_speed_brake_guard_speed_mps <= self.creep_speed_threshold_mps:
+            raise ValueError("low_speed_brake_guard_speed_mps must exceed creep_speed_threshold_mps")
         if self.terminal_brake_guard_margin_m < 0:
             raise ValueError("terminal_brake_guard_margin_m must be non-negative")
         _require_percent(self.terminal_brake_floor_percent, "terminal_brake_floor_percent")
@@ -169,6 +174,10 @@ class AtoConfig:
             raise ValueError("profile_speed_step_mps must be positive")
         if self.profile_lookahead_m < 0:
             raise ValueError("profile_lookahead_m must be non-negative")
+        if abs(self.profile_traction_timing_bias_s) > 5.0:
+            raise ValueError("profile_traction_timing_bias_s must be within +/- 5 seconds")
+        if abs(self.profile_brake_timing_bias_s) > 5.0:
+            raise ValueError("profile_brake_timing_bias_s must be within +/- 5 seconds")
         if self.profile_max_states_per_stage <= 0:
             raise ValueError("profile_max_states_per_stage must be positive")
 

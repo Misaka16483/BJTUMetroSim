@@ -3,6 +3,8 @@ import type { MetroLineData } from '../data/amapMetroApi';
 import type {
   PowerNetworkState,
   PowerTopology,
+  DispatchRuntimeState,
+  OperationPlanState,
   SimDispatchDecision,
   SimPowerState,
   SimStateResponse,
@@ -81,6 +83,8 @@ interface SimState {
   simPower: SimPowerState[];
   simPowerNetwork: PowerNetworkState | null;
   dispatchDecisions: SimDispatchDecision[];
+  dispatchRuntime: DispatchRuntimeState | null;
+  operationPlan: OperationPlanState | null;
 
   // 所有列车状态
   trains: SimTrainState[];
@@ -471,6 +475,8 @@ export const useSimStore = create<SimState>((set, get) => ({
   simPower: [],
   simPowerNetwork: null,
   dispatchDecisions: [],
+  dispatchRuntime: null,
+  operationPlan: null,
   trains: [],
   trainColors: {},
   speedHistoryByTrain: {},
@@ -814,7 +820,7 @@ export const useSimStore = create<SimState>((set, get) => ({
   // ═══════════════════════════════════════════════════
 
   updateFromBackend: (data: SimStateResponse, transport = 'REST') => {
-    const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions } = data;
+    const { clock, trains, kpi, stations, power, powerNetwork, dispatchDecisions, dispatchRuntime, operations } = data;
     const state = get();
     const sameStream = state.sessionId === data.sessionId && state.runId === data.runId;
     if (sameStream && data.snapshotSequence <= state.snapshotSequence) return 'stale';
@@ -858,6 +864,8 @@ export const useSimStore = create<SimState>((set, get) => ({
       simPower: power ?? [],
       simPowerNetwork: powerNetwork ?? null,
       dispatchDecisions: dispatchDecisions ?? [],
+      dispatchRuntime: dispatchRuntime ?? null,
+      operationPlan: operations ?? null,
       totalWaitingPax: kpi.totalWaitingPax ?? 0,
       maxPlatformDensity: kpi.maxPlatformDensity ?? 0,
       totalTractionEnergyKwh: kpi.totalTractionEnergyKwh ?? 0,
@@ -1067,6 +1075,8 @@ export const useSimStore = create<SimState>((set, get) => ({
       simPower: [],
       simPowerNetwork: null,
       dispatchDecisions: [],
+      dispatchRuntime: null,
+      operationPlan: null,
       totalWaitingPax: 0,
       maxPlatformDensity: 0,
       totalTractionEnergyKwh: 0,

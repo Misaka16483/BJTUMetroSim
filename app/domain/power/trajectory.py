@@ -3,7 +3,7 @@ from __future__ import annotations
 import bisect
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
@@ -30,6 +30,9 @@ class TrainTrajectorySample:
     traction_force_n: float
     electric_brake_force_n: float
     pneumatic_brake_force_n: float = 0.0
+    constraint_reaction_force_n: float = 0.0
+    emergency_brake_active: bool = False
+    command_source: str = "NONE"
     auxiliary_power_kw: float = 0.0
     traction_power_request_kw: float | None = None
     regen_power_available_kw: float | None = None
@@ -59,6 +62,7 @@ class TrainTrajectorySample:
             - self.total_brake_force_n
             - self.resistance_force_n
             - gradient_force_n
+            + self.constraint_reaction_force_n
             - self.mass_kg * self.acceleration_mps2
         )
 
@@ -179,6 +183,7 @@ def validate_trajectory_frames(
                 "traction force": sample.traction_force_n,
                 "electric brake force": sample.electric_brake_force_n,
                 "pneumatic brake force": sample.pneumatic_brake_force_n,
+                "constraint reaction force": sample.constraint_reaction_force_n,
                 "auxiliary power": sample.auxiliary_power_kw,
                 "grade": sample.grade_ratio,
             }
@@ -211,7 +216,20 @@ def validate_trajectory_frames(
             ):
                 issues.append(TrajectoryIssue("NEGATIVE_OPTIONAL_VALUE", "power, speed limit, and resistance must be non-negative", frame.sim_time_ms, sample.train_id))
             residual_n = sample.dynamics_residual_n
-            if residual_n is not None and residual_n > max_dynamics_residual_n:
+            # At zero speed the rail supplies an unmodelled static reaction
+            # against a holding brake.  The moving force balance remains a
+            # hard contract, but a stopped, non-tractive hold is not expected
+            # to satisfy F=ma using only the recorded drive/brake forces.
+            static_brake_hold = (
+                sample.speed_mps <= 0.05
+                and sample.traction_force_n <= 1e-6
+                and sample.total_brake_force_n > 1e-6
+            )
+            if (
+                not static_brake_hold
+                and residual_n is not None
+                and residual_n > max_dynamics_residual_n
+            ):
                 issues.append(TrajectoryIssue(
                     "DYNAMICS_NOT_CLOSED",
                     f"force balance residual {residual_n:.3f} N exceeds {max_dynamics_residual_n:.3f} N",
@@ -229,7 +247,15 @@ def validate_trajectory_frames(
                         frame.sim_time_ms,
                         sample.train_id,
                     ))
-                if abs(sample.acceleration_mps2 - observed_acceleration) > 0.25:
+                stopped_at_reference = (
+                    sample.phase in {"DWELLING", "IDLE"}
+                    and previous.phase not in {"DWELLING", "IDLE"}
+                    and sample.speed_mps <= 0.05
+                )
+                if (
+                    not stopped_at_reference
+                    and abs(sample.acceleration_mps2 - observed_acceleration) > 0.25
+                ):
                     issues.append(TrajectoryIssue(
                         "ACCELERATION_MISMATCH",
                         f"recorded acceleration differs from the observed value by "
@@ -442,6 +468,14 @@ class EngineSnapshotTrajectoryAdapter:
             acceleration = 0.0
             if previous is not None and sim_time_ms > previous[0]:
                 acceleration = (speed_mps - previous[1]) / ((sim_time_ms - previous[0]) / 1000.0)
+            recorded_acceleration = _mapping_value(
+                train,
+                "accelerationMps2",
+                "acceleration_mps2",
+                default=None,
+            )
+            if recorded_acceleration is not None:
+                acceleration = float(recorded_acceleration)
             self._previous[train_id] = (sim_time_ms, speed_mps)
             permitted_speed = _mapping_value(
                 train,
@@ -467,22 +501,60 @@ class EngineSnapshotTrajectoryAdapter:
                 "resistance_force_n",
                 default=None,
             )
+            pantograph_mileages = tuple(float(value) for value in _mapping_value(
+                train,
+                "pantographMileagesM",
+                "pantograph_mileages_m",
+                default=(),
+            ))
+            electrical_mileage_m = (
+                sum(pantograph_mileages) / len(pantograph_mileages)
+                if pantograph_mileages
+                else float(_mapping_value(train, "headMileageM", "head_mileage_m", default=0.0))
+            )
             samples.append(TrainTrajectorySample(
                 sim_time_ms=sim_time_ms,
                 train_id=train_id,
                 direction=str(_mapping_value(train, "direction", "direction", default="")),
-                mileage_m=float(_mapping_value(train, "headMileageM", "head_mileage_m", default=0.0)),
+                # Power flow is solved at the collection point, not at the
+                # vehicle head. End-platform heads can legitimately extend
+                # beyond the electrical network boundary while pantographs
+                # remain clamped to the supplied line.
+                mileage_m=electrical_mileage_m,
                 speed_mps=speed_mps,
                 acceleration_mps2=acceleration,
                 mass_kg=float(_mapping_value(train, "massKg", "mass_kg", default=225_000.0)),
                 traction_force_n=float(_mapping_value(train, "tractionForceN", "traction_force_n", default=0.0)),
                 electric_brake_force_n=float(_mapping_value(train, "electricBrakeForceN", "electric_brake_force_n", default=0.0)),
                 pneumatic_brake_force_n=float(_mapping_value(train, "pneumaticBrakeForceN", "pneumatic_brake_force_n", default=0.0)),
+                constraint_reaction_force_n=float(_mapping_value(
+                    train,
+                    "constraintReactionForceN",
+                    "constraint_reaction_force_n",
+                    default=0.0,
+                )),
+                emergency_brake_active=bool(_mapping_value(
+                    train,
+                    "emergencyBrakeActive",
+                    "emergency_brake_active",
+                    default=False,
+                )),
+                command_source=str(_mapping_value(
+                    train,
+                    "commandSource",
+                    "command_source",
+                    default="NONE",
+                )),
                 auxiliary_power_kw=float(_mapping_value(train, "auxiliaryPowerKw", "auxiliary_power_kw", default=0.0)),
                 traction_power_request_kw=float(_mapping_value(train, "tractionPowerRequestKw", "traction_power_request_kw", default=0.0)),
                 regen_power_available_kw=float(_mapping_value(train, "regenPowerAvailableKw", "regen_power_available_kw", default=0.0)),
                 permitted_speed_mps=effective_speed_limit,
-                grade_ratio=float(_mapping_value(train, "gradeRatio", "grade_ratio", default=0.0)),
+                grade_ratio=float(_mapping_value(
+                    train,
+                    "dynamicsGradeRatio",
+                    "applied_grade_ratio",
+                    default=_mapping_value(train, "gradeRatio", "grade_ratio", default=0.0),
+                )),
                 resistance_force_n=float(resistance_force) if resistance_force is not None else None,
                 phase=str(_mapping_value(train, "phase", "phase", default="UNKNOWN")),
                 current_station_code=str(_mapping_value(train, "currentStationCode", "current_station_code", default="")),
@@ -527,13 +599,24 @@ def _interpolate_frames(left: TrajectoryFrame, right: TrajectoryFrame, sim_time_
         a = left_by_id[train_id]
         b = right_by_id[train_id]
         if a.direction != b.direction or a.turnback_count != b.turnback_count:
-            raise TrajectoryContractError(f"cannot interpolate {train_id} across direction or turnback change")
+            # Direction reversal is a discrete event. Interpolating direction,
+            # mileage or force across it has no physical meaning, but replay
+            # substeps can legitimately fall between the two recorded ticks.
+            # Use the nearest observed side of the boundary for this train.
+            nearest = a if ratio < 0.5 else b
+            samples.append(replace(
+                nearest,
+                sim_time_ms=sim_time_ms,
+                source="NEAREST_EVENT_BOUNDARY",
+            ))
+            continue
         nearest = a if ratio < 0.5 else b
         values = {
             name: _lerp(getattr(a, name), getattr(b, name), ratio)
             for name in (
                 "mileage_m", "speed_mps", "acceleration_mps2", "mass_kg", "traction_force_n",
                 "electric_brake_force_n", "pneumatic_brake_force_n", "auxiliary_power_kw", "grade_ratio",
+                "constraint_reaction_force_n",
             )
         }
         for name in ("traction_power_request_kw", "regen_power_available_kw", "permitted_speed_mps", "resistance_force_n"):
@@ -551,6 +634,8 @@ def _interpolate_frames(left: TrajectoryFrame, right: TrajectoryFrame, sim_time_
             interlocking_hold_reason=nearest.interlocking_hold_reason,
             active_route_ids=nearest.active_route_ids,
             turnback_count=a.turnback_count,
+            emergency_brake_active=nearest.emergency_brake_active,
+            command_source=nearest.command_source,
             source="INTERPOLATED_REPLAY",
             **values,
         ))

@@ -67,7 +67,8 @@ class EngineMemberDLoopTests(unittest.TestCase):
         absolute_time_ms = engine._absolute_sim_time_ms()
         generator = engine.station_service.flow_generator
         self.assertGreater(generator.arrival_rate_pax_per_min("GGZ", "UP", absolute_time_ms), 0)
-        self.assertGreater(generator.arrival_rate_pax_per_min("GGZ", "DOWN", absolute_time_ms), 0)
+        self.assertEqual(generator.arrival_rate_pax_per_min("GGZ", "DOWN", absolute_time_ms), 0)
+        self.assertEqual(generator.arrival_rate_pax_per_min("GTG", "UP", absolute_time_ms), 0)
 
     def test_speed_multiplier_is_snapshot_state_and_validated(self) -> None:
         engine = self._engine()
@@ -157,7 +158,8 @@ class EngineMemberDLoopTests(unittest.TestCase):
     def test_initial_station_uses_simulated_door_sequence_and_history(self) -> None:
         engine = self._engine()
         train = engine.trains[0]
-        self.assertEqual(train.door_state, "PREPARE_OPEN")
+        self.assertEqual(train.door_state, "CLOSED")
+        self.assertEqual(train.door_notice, "PREPARE_OPEN")
         self.assertEqual(train.door_side, "LEFT")
 
         engine.clock.start()
@@ -262,8 +264,9 @@ class EngineMemberDLoopTests(unittest.TestCase):
     def test_open_door_exchange_smoothly_distributes_alighting(self) -> None:
         engine = self._engine()
         train = engine.trains[0]
+        train.current_station_code = "FSP"
         train.onboard_pax = 200
-        engine.station_service.ensure_platform("GGZ", "UP").waiting_pax = 500
+        engine.station_service.ensure_platform("FSP", "UP").waiting_pax = 500
         engine._process_station_stop(train, 28_800_000)
         rates: list[tuple[float, float]] = []
         for step in range(120):
@@ -271,7 +274,7 @@ class EngineMemberDLoopTests(unittest.TestCase):
             rates.append((train.current_boarding_rate_pax_per_sec, train.current_alighting_rate_pax_per_sec))
             train.dwell_remaining_sec = max(0.0, train.dwell_remaining_sec - 0.25)
 
-        self.assertEqual(train.last_alighting, 10)  # GGZ UP fixed alighting ratio: 5%
+        self.assertEqual(train.last_alighting, 8)  # FSP UP calibrated synthetic ratio: 4%.
         self.assertGreater(train.last_boarding, 90)
         self.assertGreater(max(rate for rate, _ in rates), rates[0][0])
         self.assertGreater(max(rate for _, rate in rates), 0.0)

@@ -53,7 +53,10 @@ class ATOController:
 
         target_position_m = self._target_position_m(target)
         distance_to_target_m = max(0.0, target_position_m - state.position_m)
-        if distance_to_target_m > self.config.creep_distance_m:
+        creep_handover_distance_m = (
+            self.config.creep_distance_m + self.config.stop_tolerance_m
+        )
+        if distance_to_target_m > creep_handover_distance_m:
             self._reset_creep_transition()
         if distance_to_target_m <= self.config.stop_tolerance_m:
             self.reset()
@@ -76,7 +79,7 @@ class ATOController:
             ))
 
         creep_entry_allowed = (
-            distance_to_target_m <= self.config.creep_distance_m
+            distance_to_target_m <= creep_handover_distance_m
             and state.speed_mps <= self.config.creep_speed_threshold_mps
         )
         if self._creep_mode_active or creep_entry_allowed:
@@ -201,6 +204,14 @@ class ATOController:
     def _profile_for(self, state: TrainState, target: AtoTarget) -> OptimizedSpeedProfile | None:
         if not self.config.use_dynamic_programming_profile:
             return None
+        # An externally installed full-path profile remains valid while CI/MA
+        # changes only the instantaneous speed cap.  Requiring the runtime
+        # AtoTarget cache key to match exactly made benign differences such as
+        # 80/3.6 versus a 22.22 m/s vehicle cap discard the DCDP curve for the
+        # whole interval.  A shortened movement authority is different: the
+        # train must fall back to a braking curve for that temporary endpoint.
+        if self._installed_profile_matches_target(target):
+            return self._profile_cache
         # During fast-forward, never construct a new cache key or solve DCDP.
         # Path changes call reset(), so an existing cache is still the profile
         # for the active interval.
@@ -247,6 +258,20 @@ class ATOController:
         self._profile_cache_key = cache_key
         return self._profile_cache
 
+    def _installed_profile_matches_target(self, target: AtoTarget) -> bool:
+        profile = self._profile_cache
+        cache_key = self._profile_cache_key
+        if profile is None or cache_key is None:
+            return False
+        target_position_m = self._target_position_m(target)
+        if abs(profile.target_position_m - target_position_m) > 1e-3:
+            return False
+        installed_path_key = cache_key[-1]
+        runtime_path_key = (
+            target.path_plan.cache_key() if target.path_plan is not None else None
+        )
+        return installed_path_key == runtime_path_key
+
     def _make_profile_cache_key(
         self,
         state: TrainState,
@@ -286,7 +311,44 @@ class ATOController:
         target_position_m = self._target_position_m(target)
         remaining_distance_m = max(0.0, target_position_m - state.position_m)
         lookahead_m = min(self.config.profile_lookahead_m, remaining_distance_m * 0.35)
-        return min(target_position_m, state.position_m + lookahead_m)
+        nominal_position_m = min(target_position_m, state.position_m + lookahead_m)
+        profile = self._profile_cache
+        if profile is None or state.speed_mps <= 0.0:
+            return nominal_position_m
+
+        # Positive timing bias delays the corresponding DCDP phase transition
+        # by looking behind the nominal profile position; negative bias looks
+        # ahead and advances it. Brake transition has priority so an early
+        # brake request cannot be hidden by an overlapping traction bias.
+        reference_speed_mps = max(state.speed_mps, 1.0)
+        traction_position_m = min(
+            target_position_m,
+            max(
+                0.0,
+                nominal_position_m
+                - self.config.profile_traction_timing_bias_s * reference_speed_mps,
+            ),
+        )
+        brake_position_m = min(
+            target_position_m,
+            max(
+                0.0,
+                nominal_position_m
+                - self.config.profile_brake_timing_bias_s * reference_speed_mps,
+            ),
+        )
+        nominal_mode = profile.mode_at_position(nominal_position_m)
+        brake_mode = profile.mode_at_position(brake_position_m)
+        if self._is_profile_brake_mode(nominal_mode) or self._is_profile_brake_mode(brake_mode):
+            return brake_position_m
+        traction_mode = profile.mode_at_position(traction_position_m)
+        if nominal_mode == "MAX_TRACTION" or traction_mode == "MAX_TRACTION":
+            return traction_position_m
+        return nominal_position_m
+
+    @staticmethod
+    def _is_profile_brake_mode(mode: str) -> bool:
+        return mode == "MAX_BRAKE" or mode.startswith("BRAKE_")
 
     def _apply_profile_feedforward(
         self,
@@ -385,7 +447,8 @@ class ATOController:
             self._terminal_braking_target_position_m = target_position_m
 
         creep_allowed = (
-            remaining_distance_m <= self.config.creep_distance_m
+            remaining_distance_m
+            <= self.config.creep_distance_m + self.config.stop_tolerance_m
             and state.speed_mps <= self.config.creep_speed_threshold_mps
         )
         desired_traction = requested.traction_percent
@@ -431,6 +494,23 @@ class ATOController:
         else:
             brake = 0.0
             traction = max(0.0, previous_traction - traction_step)
+
+        # Outside the explicit creep-release sequence, do not let a small
+        # terminal brake command cross directly to zero at low speed. The next
+        # control sample may request braking again, which appears as a brief
+        # release/reapplication pulse in the force trace. Holding the existing
+        # hysteresis floor preserves the normal 18 %/s actuator release rate
+        # everywhere else and still permits a full release before creep.
+        if (
+            brake <= 0.0
+            and desired_brake <= 0.0
+            and previous_brake > 0.0
+            and self._terminal_braking_latched
+            and not creep_allowed
+            and state.speed_mps
+            <= self.config.low_speed_brake_guard_speed_mps + self.config.pid_deadband_mps
+        ):
+            brake = min(previous_brake, self.config.brake_hysteresis_hold_percent)
 
         stabilized = ControlCommand(
             state.train_id,

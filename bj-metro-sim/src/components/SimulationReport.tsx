@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { fetchSimReport, type SimReport } from '../data/backendApi';
 import { DynamicsCharts, PassengerCharts, PowerCharts } from './ReportCharts';
@@ -56,22 +56,54 @@ function downloadReportJson(report: SimReport): void {
   URL.revokeObjectURL(url);
 }
 
+/** 报告历史摘要项 */
+interface ReportSummary {
+  runId: number;
+  scenarioName: string;
+  durationStr: string;
+}
+
+/** 从后端获取近3次报告摘要 */
+async function loadReportsList(): Promise<ReportSummary[]> {
+  try {
+    const res = await fetch('/api/sim/reports').then((r) => r.json());
+    if (res.ok && Array.isArray(res.reports)) return res.reports;
+  } catch { /* 静默降级 */ }
+  return [];
+}
+
 export default function SimulationReport({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<SimReport | null>(null);
   const [tab, setTab] = useState<TabKey>('dynamics');
+  const [reports, setReports] = useState<ReportSummary[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [showSelector, setShowSelector] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     let active = true;
     setLoading(true);
     setError(null);
-    fetchSimReport()
+    // 先加载报告摘要列表
+    loadReportsList()
+      .then((list) => {
+        if (!active) return;
+        setReports(list);
+        // 默认加载最新一份报告
+        return fetchSimReport(selectedRunId ?? undefined);
+      })
       .then((res) => {
         if (!active) return;
-        if (res.ok && res.report) setReport(res.report);
-        else setError(res.error || '暂无报告，请先运行并停止一次仿真');
+        if (res && res.ok && res.report) {
+          setReport(res.report);
+          if (selectedRunId === null) setSelectedRunId(res.report.runId);
+        } else if (res && res.error) {
+          setError(res.error);
+        } else {
+          setError('暂无报告，请先运行并停止一次仿真');
+        }
         setLoading(false);
       })
       .catch((e) => {
@@ -82,11 +114,18 @@ export default function SimulationReport({ open, onClose }: { open: boolean; onC
     return () => {
       active = false;
     };
-  }, [open]);
+  }, [open, selectedRunId]);
+
+  /** 切换到指定 run_id 的历史报告 */
+  const switchToRun = useCallback((runId: number) => {
+    setShowSelector(false);
+    setSelectedRunId(runId);
+  }, []);
 
   if (!open) return null;
 
   const s = report?.summary;
+  const currentRunId = report?.runId ?? selectedRunId;
 
   return (
     <div
@@ -130,7 +169,67 @@ export default function SimulationReport({ open, onClose }: { open: boolean; onC
           }}
         >
           <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: '#e6edf3' }}>仿真运行报告</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: '#e6edf3' }}>仿真运行报告</span>
+              {reports.length > 1 && (
+                <div style={{ position: 'relative' }}>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setShowSelector((v) => !v); }}
+                    style={{
+                      padding: '3px 8px',
+                      borderRadius: 5,
+                      fontSize: 10,
+                      color: currentRunId && reports.some((r) => r.runId === currentRunId) ? '#58a6ff' : '#8b949e',
+                      background: 'rgba(88,166,255,0.08)',
+                      border: '1px solid rgba(88,166,255,0.25)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    历史运行 ▾
+                  </button>
+                  {showSelector && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: '100%',
+                        left: 0,
+                        marginTop: 4,
+                        background: '#161b22',
+                        border: '1px solid #30363d',
+                        borderRadius: 8,
+                        padding: '4px 0',
+                        minWidth: 220,
+                        zIndex: 100,
+                        boxShadow: '0 8px 24px rgba(0,0,0,.6)',
+                      }}
+                    >
+                      {reports.map((r) => (
+                        <button
+                          key={r.runId}
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); switchToRun(r.runId); }}
+                          style={{
+                            display: 'block',
+                            width: '100%',
+                            textAlign: 'left',
+                            padding: '6px 12px',
+                            fontSize: 11,
+                            color: r.runId === currentRunId ? '#58a6ff' : '#c9d1d9',
+                            background: r.runId === currentRunId ? 'rgba(88,166,255,0.08)' : 'transparent',
+                            border: 'none',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          #{r.runId} · {r.scenarioName}
+                          <span style={{ color: '#8b949e', marginLeft: 6 }}>{r.durationStr}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             {s && (
               <div style={{ fontSize: 10, color: '#8b949e', marginTop: 2 }}>
                 {s.scenarioName} · 运行 #{s.runId} · 时长 {s.durationStr} · 列车 {s.trainCount} · 站点 {s.stationCount}

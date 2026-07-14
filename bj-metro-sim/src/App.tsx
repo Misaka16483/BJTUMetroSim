@@ -16,6 +16,7 @@ import MemberCInterlockingDemo from './components/MemberCInterlockingDemo';
 import SimulationLifecycleControls from './components/SimulationLifecycleControls';
 import SimulationReport from './components/SimulationReport';
 import DriverCabConnectionButton from './components/DriverCabConnectionButton';
+import AutoDispatchPanel from './components/AutoDispatchPanel';
 import { useSimStore } from './store/useSimStore';
 import type { MetroLineData } from './data/amapMetroApi';
 import { fetchAmapBeijingMetro, getCachedAmapData, getPartialAmapCache, cacheAmapData } from './data/amapMetroApi';
@@ -48,9 +49,12 @@ export default function App() {
   const isRunning = useSimStore((s) => s.isRunning);
   const engineClockState = useSimStore((s) => s.engineClockState);
   const trains = useSimStore((s) => s.trains);
+  const operationPlan = useSimStore((s) => s.operationPlan);
+  const dispatchRuntime = useSimStore((s) => s.dispatchRuntime);
   const [collapsed, setCollapsed] = useState(false);
   const [showTrainMgmt, setShowTrainMgmt] = useState(false);
   const [showReport, setShowReport] = useState(false);
+  const [showAutoDispatch, setShowAutoDispatch] = useState(false);
   const modeIndex = viewMode === 'macro'
     ? 0
     : viewMode === 'micro'
@@ -300,18 +304,48 @@ export default function App() {
 
         {backendStatus === 'connected' && dataMode === 'LIVE_SIM' ? <DriverCabConnectionButton /> : null}
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1.5 shrink-0" style={{ flexBasis: 'auto' }}>
           <button
-            onClick={() => setShowTrainMgmt(true)}
-            className="flex items-center gap-1.5 cursor-pointer label text-[10px] rounded-lg"
+            onClick={() => setShowAutoDispatch(true)}
+            className="flex items-center justify-center gap-1.5 shrink-0 whitespace-nowrap cursor-pointer label text-[10px] rounded-lg"
             style={{
               padding: '5px 10px',
+              minWidth: 96,
+              whiteSpace: 'nowrap',
+              color: operationPlan?.enabled ? 'var(--cyan)' : 'var(--text-muted)',
+              border: `1px solid ${operationPlan?.enabled ? 'rgba(88,166,255,0.28)' : 'rgba(255,255,255,0.1)'}`,
+              background: operationPlan?.enabled ? 'rgba(88,166,255,0.08)' : 'rgba(255,255,255,0.03)',
+            }}
+            title="打开运行图自动发车控制台"
+          >
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+              <path d="M2 8.5V3.2C2 2.54 2.54 2 3.2 2h5.6c.66 0 1.2.54 1.2 1.2v5.3" stroke="currentColor" strokeWidth="1" />
+              <path d="M3.2 6.7h5.6M4 4h4M3 10l1-1.5h4L9 10" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+            </svg>
+            自动发车
+            {operationPlan?.enabled && (
+              <span style={{
+                fontSize: 9, color: '#fff', background: 'var(--cyan)',
+                borderRadius: 50, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}>
+                {dispatchRuntime?.registeredTrainCount ?? 0}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setShowTrainMgmt(true)}
+            className="flex items-center justify-center gap-1.5 shrink-0 whitespace-nowrap cursor-pointer label text-[10px] rounded-lg"
+            style={{
+              padding: '5px 10px',
+              minWidth: 96,
+              whiteSpace: 'nowrap',
               color: 'var(--l9)',
               border: '1px solid rgba(168,214,74,0.2)',
               background: 'rgba(168,214,74,0.06)',
             }}
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ flexShrink: 0 }}>
               <rect x="2" y="1" width="6" height="8" rx="1" stroke="currentColor" strokeWidth="0.8" />
               <rect x="3" y="2.5" width="4" height="1.5" rx="0.3" stroke="currentColor" strokeWidth="0.6" />
               <rect x="3" y="5" width="4" height="1.5" rx="0.3" stroke="currentColor" strokeWidth="0.6" />
@@ -321,6 +355,7 @@ export default function App() {
               <span style={{
                 fontSize: 9, color: '#fff', background: 'var(--l9)',
                 borderRadius: 50, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
               }}>
                 {trains.length}
               </span>
@@ -328,7 +363,7 @@ export default function App() {
           </button>
         </div>
 
-        <div className="flex items-center gap-3 text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
+        <div className="flex items-center justify-end gap-3 min-w-0 overflow-hidden whitespace-nowrap text-[10px] board-num" style={{ color: 'var(--text-muted)' }}>
           <span className="led led-online" /> SYS ONLINE
           <span style={{ color: 'rgba(255,255,255,0.06)' }}>|</span>
           <span>
@@ -515,6 +550,8 @@ export default function App() {
       {showReport && (
         <SimulationReport open={showReport} onClose={() => setShowReport(false)} />
       )}
+
+      <AutoDispatchPanel open={showAutoDispatch} onClose={() => setShowAutoDispatch(false)} />
     </div>
   );
 }

@@ -58,6 +58,23 @@ class DispatchRuntimeTests(unittest.TestCase):
         self.assertEqual(front, 45.0)
         self.assertIsNone(rear)
 
+    def test_physical_turnback_motion_is_not_recorded_as_service_departure(self) -> None:
+        service = RuleBasedDispatchService()
+        runtime = DispatchRuntimeCoordinator(service)
+        train = FakeTrain("T1")
+        train.turnback_state = "RUNNING"
+        runtime.register_train(train)
+
+        train.phase = "DEPARTING"
+        self.assertEqual(runtime.observe([train], 100.0), [])
+
+        train.phase = DWELLING
+        runtime.observe([train], 110.0)
+        train.turnback_state = "COMPLETED"
+        train.phase = "DEPARTING"
+        records = runtime.observe([train], 120.0)
+        self.assertEqual([item.train_id for item in records], ["T1"])
+
 
 class InterlockingRuntimeTests(unittest.TestCase):
     def test_missing_route_table_path_holds_instead_of_using_legacy_motion(self) -> None:

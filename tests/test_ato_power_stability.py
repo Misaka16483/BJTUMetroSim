@@ -6,6 +6,8 @@ from app.domain.control import (
     ATOController,
     AtoConfig,
     AtoTarget,
+    OptimizedSpeedProfile,
+    SpeedProfilePoint,
     estimate_scheduled_run_time_s,
     optimize_speed_profile_dcdp,
 )
@@ -21,6 +23,48 @@ def _command_group(point: object) -> str:
 
 
 class AtoPowerStabilityTests(unittest.TestCase):
+    @staticmethod
+    def _phase_test_profile() -> OptimizedSpeedProfile:
+        return OptimizedSpeedProfile(
+            points=(
+                SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0),
+                SpeedProfilePoint(5.0, 50.0, 10.0, "MAX_TRACTION", 100.0, 0.0, 1.0),
+                SpeedProfilePoint(7.0, 70.0, 10.0, "COAST", 0.0, 0.0, 1.0),
+                SpeedProfilePoint(9.0, 90.0, 5.0, "BRAKE_40", 0.0, 40.0, 1.0),
+                SpeedProfilePoint(10.0, 100.0, 0.0, "STOP", 0.0, 0.0, 1.0),
+            ),
+            target_position_m=100.0,
+            permitted_speed_mps=12.0,
+            scheduled_run_time_s=10.0,
+            terminal_score=0.0,
+        )
+
+    def test_profile_timing_bias_moves_real_phase_lookup(self) -> None:
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+
+        traction = ATOController(AtoConfig(
+            profile_lookahead_m=0.0,
+            profile_traction_timing_bias_s=1.0,
+        ))
+        traction._profile_cache = self._phase_test_profile()
+        traction_position = traction._profile_lookup_position_m(
+            TrainState("T1", position_m=55.0, speed_mps=10.0),
+            target,
+        )
+
+        braking = ATOController(AtoConfig(
+            profile_lookahead_m=0.0,
+            profile_brake_timing_bias_s=-2.0,
+        ))
+        braking._profile_cache = self._phase_test_profile()
+        brake_position = braking._profile_lookup_position_m(
+            TrainState("T1", position_m=60.0, speed_mps=10.0),
+            target,
+        )
+
+        self.assertEqual(traction_position, 45.0)
+        self.assertEqual(brake_position, 80.0)
+
     def test_dcdp_profile_has_no_direct_traction_brake_chatter(self) -> None:
         scheduled_time_s = estimate_scheduled_run_time_s(
             target_position_m=200.0,
@@ -172,6 +216,63 @@ class AtoPowerStabilityTests(unittest.TestCase):
         self.assertGreaterEqual(command.brake_percent, controller.config.terminal_brake_floor_percent)
         self.assertEqual(command.traction_percent, 0.0)
 
+    def test_terminal_low_speed_brake_release_does_not_cross_zero_in_one_tick(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+        controller._terminal_braking_latched = True
+        controller._terminal_braking_target_position_m = 100.0
+        controller._last_command = ControlCommand(
+            "T1",
+            brake_percent=4.0,
+            source=CommandSource.ATO,
+        )
+        controller._last_command_sim_time_s = 0.0
+
+        releasing = controller._stabilize_command(
+            TrainState("T1", position_m=90.0, speed_mps=1.3, sim_time_s=0.25),
+            target,
+            ControlCommand.coast("T1", source=CommandSource.ATO),
+        )
+        reapplied = controller._stabilize_command(
+            TrainState("T1", position_m=90.3, speed_mps=1.28, sim_time_s=0.5),
+            target,
+            ControlCommand(
+                "T1",
+                brake_percent=8.0,
+                source=CommandSource.ATO,
+            ),
+        )
+
+        self.assertGreater(releasing.brake_percent, 0.0)
+        self.assertEqual(
+            releasing.brake_percent,
+            controller.config.brake_hysteresis_hold_percent,
+        )
+        self.assertEqual(releasing.traction_percent, 0.0)
+        self.assertGreater(reapplied.brake_percent, releasing.brake_percent)
+        self.assertEqual(reapplied.traction_percent, 0.0)
+
+    def test_low_speed_brake_guard_includes_pid_deadband_tolerance(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+        controller._terminal_braking_latched = True
+        controller._terminal_braking_target_position_m = 100.0
+        controller._last_command = ControlCommand(
+            "T1",
+            brake_percent=1.9,
+            source=CommandSource.ATO,
+        )
+        controller._last_command_sim_time_s = 0.0
+
+        command = controller._stabilize_command(
+            TrainState("T1", position_m=92.5, speed_mps=2.01, sim_time_s=0.5),
+            target,
+            ControlCommand.coast("T1", source=CommandSource.ATO),
+        )
+
+        self.assertAlmostEqual(command.brake_percent, 1.9)
+        self.assertEqual(command.traction_percent, 0.0)
+
     def test_creep_waits_for_full_brake_release_and_neutral_dwell(self) -> None:
         controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
         target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
@@ -196,6 +297,34 @@ class AtoPowerStabilityTests(unittest.TestCase):
         self.assertEqual(commands[1].brake_percent, 0.0)
         self.assertEqual(commands[2].brake_percent, 0.0)
         self.assertEqual(commands[3].brake_percent, 0.0)
+        self.assertGreater(commands[-1].traction_percent, 0.0)
+
+    def test_stopped_train_just_outside_nominal_creep_zone_can_recover(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+        controller._terminal_braking_latched = True
+        controller._terminal_braking_target_position_m = 100.0
+        controller._last_command = ControlCommand(
+            "T1",
+            brake_percent=3.0,
+            source=CommandSource.ATO,
+        )
+        controller._last_command_sim_time_s = 0.0
+
+        commands = [
+            controller.decide(
+                TrainState(
+                    "T1",
+                    position_m=94.5,
+                    speed_mps=0.0,
+                    sim_time_s=sim_time_s,
+                ),
+                target,
+            )
+            for sim_time_s in (0.25, 0.5, 0.75, 1.0, 1.25)
+        ]
+
+        self.assertTrue(all(command.brake_percent == 0.0 for command in commands[1:]))
         self.assertGreater(commands[-1].traction_percent, 0.0)
 
 

@@ -55,7 +55,7 @@ class EngineMultiTrainManagementTests(unittest.TestCase):
         self.assertEqual(engine.add_train(valid)["error"], "TRAIN_ID_EXISTS")
         self.assertEqual(engine.add_train({**valid, "trainId": "BAD-1", "direction": "SIDE"})["error"], "INVALID_DIRECTION")
         self.assertEqual(engine.add_train({**valid, "trainId": "BAD-2", "initialStationCode": "NONE"})["error"], "INVALID_INITIAL_STATION")
-        self.assertEqual(engine.add_train({**valid, "trainId": "BAD-3", "initialLoadPax": 601})["error"], "INVALID_INITIAL_LOAD")
+        self.assertEqual(engine.add_train({**valid, "trainId": "BAD-3", "initialLoadPax": 1461})["error"], "INVALID_INITIAL_LOAD")
 
         self.assertTrue(engine.remove_train("T-DYN-01")["ok"])
         self.assertEqual(engine.remove_train("T-DYN-01")["error"], "TRAIN_NOT_FOUND")

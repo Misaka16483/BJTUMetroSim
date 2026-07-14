@@ -73,6 +73,19 @@ export default function MetroMap() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
     mapRef.current = map;
 
+    // MapTiler streets-v2-dark 样式中 Town/City/Capital city labels 图层
+    // 在高缩放级别用空字符串作为 icon-image 值来隐藏图标，MapLibre 5.x 会尝试加载
+    // 这些"图片"并报错。在此拦截并为空白 ID 提供一个 1x1 透明占位图。
+    map.on('styleimagemissing', (e) => {
+      const id = e.id;
+      if (!id || id.trim() === '') {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1;
+        canvas.height = 1;
+        map.addImage(id, { width: 1, height: 1, data: new Uint8Array(4) });
+      }
+    });
+
     map.on('style.load', () => {
       styleLoaded.current = true;
       setStyleLoadTick((tick) => tick + 1);

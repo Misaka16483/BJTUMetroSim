@@ -1,0 +1,169 @@
+{
+  "schemaVersion": "PASSENGER-PROFILE-V1",
+  "profileId": "LINE9-CALIBRATED-SYNTHETIC-V1",
+  "lineId": "9",
+  "quality": "CALIBRATED_SYNTHETIC",
+  "expectedStationCodes": [
+    "GGZ", "FSP", "KYL", "FTN", "FTD", "QLZ", "LLQ",
+    "LLE", "BWR", "JBG", "BDZ", "BQS", "GTG"
+  ],
+  "scenario": {
+    "dayType": "MON_THU",
+    "lineScale": 1.0,
+    "randomSeed": 42,
+    "usePoisson": true
+  },
+  "directionPeriodFactors": {
+    "UP": {
+      "EARLY": 1.0,
+      "AM_PEAK": 1.15,
+      "MIDDAY": 1.0,
+      "PM_PEAK": 0.85,
+      "EVENING": 0.9,
+      "NIGHT": 1.0
+    },
+    "DOWN": {
+      "EARLY": 1.0,
+      "AM_PEAK": 0.85,
+      "MIDDAY": 1.0,
+      "PM_PEAK": 1.15,
+      "EVENING": 1.1,
+      "NIGHT": 1.0
+    }
+  },
+  "rollingStock": {
+    "trainCapacityPax": 1460,
+    "averagePassengerMassKg": 65.0,
+    "quality": "ENGINEERING_ASSUMPTION"
+  },
+  "dwell": {
+    "baseDwellSec": 30.0,
+    "alphaBoardingSecPerPax": 0.08,
+    "betaAlightingSecPerPax": 0.06,
+    "gammaDensitySecPerPaxM2": 2.0,
+    "minDwellSec": 20.0,
+    "maxDwellSec": 90.0,
+    "doorCapacityPaxPerSec": 3.0,
+    "quality": "ENGINEERING_ASSUMPTION"
+  },
+  "calibration": {
+    "estimatedWeekdayArrivalsPax": 549986,
+    "estimatedWestStationAreaArrivalsPax": 400059,
+    "westStationAreaShare": 0.7274,
+    "westStationAreaCodes": ["LLE", "BWR", "JBG", "BDZ", "BQS", "GTG"],
+    "benchmarkDescription": "北京西站站区六站日均客运量约40万人次，占9号线总客运量70%以上；本配置只按该聚合量级校准，不是AFC站间OD。",
+    "benchmarkUrl": "https://yjglj.beijing.gov.cn/art/2022/12/20/art_9408_638032.html",
+    "limitations": [
+      "No AFC origin-destination matrix",
+      "Fixed alighting ratios are transitional and not OD-conserving before terminal clearance",
+      "Station platform areas and rolling-stock capacity are engineering assumptions",
+      "Beijing West railway-arrival pulses are not represented"
+    ]
+  },
+  "stations": [
+    {
+      "stationCode": "GGZ",
+      "effectivePlatformAreaM2": 160.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 35.0, "alightingRatio": 0.0},
+        "DOWN": {"baseArrivalRatePaxPerMin": 0.0, "alightingRatio": 1.0}
+      }
+    },
+    {
+      "stationCode": "FSP",
+      "effectivePlatformAreaM2": 110.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 20.0, "alightingRatio": 0.04},
+        "DOWN": {"baseArrivalRatePaxPerMin": 15.0, "alightingRatio": 0.18}
+      }
+    },
+    {
+      "stationCode": "KYL",
+      "effectivePlatformAreaM2": 100.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 12.0, "alightingRatio": 0.05},
+        "DOWN": {"baseArrivalRatePaxPerMin": 8.0, "alightingRatio": 0.12}
+      }
+    },
+    {
+      "stationCode": "FTN",
+      "effectivePlatformAreaM2": 120.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 18.0, "alightingRatio": 0.07},
+        "DOWN": {"baseArrivalRatePaxPerMin": 12.0, "alightingRatio": 0.10}
+      }
+    },
+    {
+      "stationCode": "FTD",
+      "effectivePlatformAreaM2": 120.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 12.0, "alightingRatio": 0.08},
+        "DOWN": {"baseArrivalRatePaxPerMin": 8.0, "alightingRatio": 0.10}
+      }
+    },
+    {
+      "stationCode": "QLZ",
+      "effectivePlatformAreaM2": 150.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 20.0, "alightingRatio": 0.10},
+        "DOWN": {"baseArrivalRatePaxPerMin": 15.0, "alightingRatio": 0.12}
+      }
+    },
+    {
+      "stationCode": "LLQ",
+      "effectivePlatformAreaM2": 160.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 28.0, "alightingRatio": 0.12},
+        "DOWN": {"baseArrivalRatePaxPerMin": 22.0, "alightingRatio": 0.15}
+      }
+    },
+    {
+      "stationCode": "LLE",
+      "effectivePlatformAreaM2": 130.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 40.0, "alightingRatio": 0.16},
+        "DOWN": {"baseArrivalRatePaxPerMin": 40.0, "alightingRatio": 0.14}
+      }
+    },
+    {
+      "stationCode": "BWR",
+      "effectivePlatformAreaM2": 240.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 90.0, "alightingRatio": 0.26},
+        "DOWN": {"baseArrivalRatePaxPerMin": 90.0, "alightingRatio": 0.28}
+      }
+    },
+    {
+      "stationCode": "JBG",
+      "effectivePlatformAreaM2": 180.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 53.0, "alightingRatio": 0.18},
+        "DOWN": {"baseArrivalRatePaxPerMin": 52.0, "alightingRatio": 0.10}
+      }
+    },
+    {
+      "stationCode": "BDZ",
+      "effectivePlatformAreaM2": 100.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 25.0, "alightingRatio": 0.12},
+        "DOWN": {"baseArrivalRatePaxPerMin": 25.0, "alightingRatio": 0.05}
+      }
+    },
+    {
+      "stationCode": "BQS",
+      "effectivePlatformAreaM2": 150.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 37.0, "alightingRatio": 0.20},
+        "DOWN": {"baseArrivalRatePaxPerMin": 38.0, "alightingRatio": 0.05}
+      }
+    },
+    {
+      "stationCode": "GTG",
+      "effectivePlatformAreaM2": 180.0,
+      "directions": {
+        "UP": {"baseArrivalRatePaxPerMin": 0.0, "alightingRatio": 1.0},
+        "DOWN": {"baseArrivalRatePaxPerMin": 110.0, "alightingRatio": 0.0}
+      }
+    }
+  ]
+}
