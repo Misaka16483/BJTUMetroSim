@@ -77,11 +77,59 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--storage-seed", type=int, default=20260714)
     parser.add_argument("--population", type=int, default=6)
     parser.add_argument("--generations", type=int, default=1)
+    parser.add_argument(
+        "--local-grid-step-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Replace the three V1 cases with a 3x3 traction/brake timing grid "
+            "at {-step, 0, +step}; departure spread remains zero."
+        ),
+    )
     parser.add_argument("--wall-timeout-sec", type=float, default=600.0)
     parser.add_argument("--skip-high-fidelity-validation", action="store_true")
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser
+
+
+def build_local_timing_grid(step_seconds: float) -> tuple[dict[str, Any], ...]:
+    step = float(step_seconds)
+    if not 0.0 < step <= 5.0:
+        raise ValueError("local-grid-step-seconds must be in (0, 5]")
+
+    def token(value: float) -> str:
+        if abs(value) < 1e-12:
+            return "ZERO"
+        sign = "MINUS" if value < 0.0 else "PLUS"
+        return f"{sign}_{abs(value):.2f}".replace(".", "P")
+
+    values = (-step, 0.0, step)
+    baseline = {
+        "caseId": "BASELINE",
+        "candidate": {
+            "departureSpreadSec": 0.0,
+            "tractionTimingSec": 0.0,
+            "brakeTimingSec": 0.0,
+        },
+    }
+    alternatives = []
+    for traction_timing in values:
+        for brake_timing in values:
+            if traction_timing == 0.0 and brake_timing == 0.0:
+                continue
+            alternatives.append({
+                "caseId": (
+                    f"TRACTION_{token(traction_timing)}_"
+                    f"BRAKE_{token(brake_timing)}"
+                ),
+                "candidate": {
+                    "departureSpreadSec": 0.0,
+                    "tractionTimingSec": traction_timing,
+                    "brakeTimingSec": brake_timing,
+                },
+            })
+    return (baseline, *alternatives)
 
 
 def _frame_fingerprint(frames: list[TrajectoryFrame]) -> str:
@@ -110,6 +158,21 @@ def _improvements(objectives: dict[str, float], baseline: dict[str, float]) -> d
         name: (1.0 - float(objectives[name]) / max(float(value), 1e-9)) * 100.0
         for name, value in baseline.items()
     }
+
+
+def _recommendation_key(case: dict[str, Any]) -> tuple[float, float, float, float, str]:
+    """Prefer the least intrusive timing change when utilities are equivalent."""
+    candidate = case["timingCandidate"]
+    departure = abs(float(candidate["departureSpreadSec"]))
+    traction = abs(float(candidate["tractionTimingSec"]))
+    brake = abs(float(candidate["brakeTimingSec"]))
+    return (
+        round(float(case["relativeUtilityVsGlobalBaseline"]), 12),
+        departure + traction + brake,
+        brake,
+        departure,
+        str(case["caseId"]),
+    )
 
 
 def _capture_case(
@@ -300,6 +363,12 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("population must be at least 4 and generations must be positive")
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
 
+    timing_cases = (
+        build_local_timing_grid(args.local_grid_step_seconds)
+        if args.local_grid_step_seconds is not None
+        else DEFAULT_TIMING_CASES
+    )
+
     screen_cases = [
         _capture_case(
             case_id=item["caseId"],
@@ -316,7 +385,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             artifact_dir=args.artifact_dir,
             suffix="screen",
         )
-        for item in DEFAULT_TIMING_CASES
+        for item in timing_cases
     ]
     global_baseline = screen_cases[0]["zeroThroughputBaseline"]["objectives"]
     for case in screen_cases:
@@ -337,10 +406,7 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("NO_FEASIBLE_CLOSED_LOOP_SCREENING_CASE")
     recommended = min(
         eligible,
-        key=lambda case: (
-            case["relativeUtilityVsGlobalBaseline"],
-            case["caseId"],
-        ),
+        key=_recommendation_key,
     )
 
     baseline_fingerprint = screen_cases[0]["frameFingerprintSha256"]
@@ -391,8 +457,13 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             True if high_fidelity is None else high_fidelity["passed"]
         ),
     }
+    local_grid_enabled = args.local_grid_step_seconds is not None
     return {
-        "experimentId": "CLOSED-LOOP-JOINT-TIMING-STORAGE-SCREENING-V1",
+        "experimentId": (
+            "CLOSED-LOOP-JOINT-TIMING-STORAGE-LOCAL-GRID-V2"
+            if local_grid_enabled
+            else "CLOSED-LOOP-JOINT-TIMING-STORAGE-SCREENING-V1"
+        ),
         "status": "COMPLETED",
         "quality": "ENGINEERING_ESTIMATE_SCREENING",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -401,7 +472,11 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             "simulation; storage is then optimized on that candidate-specific trajectory."
         ),
         "design": {
-            "screeningMethod": "THREE_CASE_ENGINE_SWEEP_PLUS_NESTED_STORAGE_NSGA2",
+            "screeningMethod": (
+                "LOCAL_3X3_ENGINE_SWEEP_PLUS_NESTED_STORAGE_NSGA2"
+                if local_grid_enabled
+                else "THREE_CASE_ENGINE_SWEEP_PLUS_NESTED_STORAGE_NSGA2"
+            ),
             "screenTickSeconds": args.screen_tick_seconds,
             "validationTickSeconds": args.validation_tick_seconds,
             "captureSeconds": args.capture_seconds,
@@ -409,7 +484,8 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
             "storageSeed": args.storage_seed,
             "storagePopulation": args.population,
             "storageGenerations": args.generations,
-            "timingCases": list(DEFAULT_TIMING_CASES),
+            "localGridStepSeconds": args.local_grid_step_seconds,
+            "timingCases": list(timing_cases),
             "terminalSocPolicy": "HARD_CONSTRAINT_MAX_5_PERCENT_DEVIATION",
         },
         "globalBaselineObjectives": global_baseline,
