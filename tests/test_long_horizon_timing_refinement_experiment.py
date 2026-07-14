@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from tools.run_long_horizon_timing_refinement_experiment import (
     _operation_gates,
     _timing_selection_key,
     parse_traction_values,
 )
-from tools.run_timetable_power_experiment import _non_storage_constraints_pass
+from tools.run_timetable_power_experiment import (
+    _non_storage_constraints_pass,
+    _wait_for_operation_profile_prewarm,
+)
 
 
 class LongHorizonTimingRefinementTests(unittest.TestCase):
@@ -95,6 +100,45 @@ class LongHorizonTimingRefinementTests(unittest.TestCase):
                 "dynamicsClosure": False,
             }
         }))
+
+    def test_batch_capture_waits_for_every_profile_before_clock_start(self) -> None:
+        status = {
+            "ready": True,
+            "failedProfileCount": 0,
+            "pendingCacheKeys": [],
+            "errors": {},
+        }
+        service = Mock()
+        service.wait_for.return_value = status
+        engine = SimpleNamespace(
+            _operation_profile_requests={"profile-b": object(), "profile-a": object()},
+            speed_profile_service=service,
+            _refresh_operation_profile_warmup=Mock(),
+        )
+
+        self.assertIs(
+            _wait_for_operation_profile_prewarm(engine, 12.5),
+            status,
+        )
+        service.wait_for.assert_called_once_with(("profile-b", "profile-a"), 12.5)
+        engine._refresh_operation_profile_warmup.assert_called_once_with()
+
+    def test_batch_capture_rejects_incomplete_profile_prewarm(self) -> None:
+        service = Mock()
+        service.wait_for.return_value = {
+            "ready": False,
+            "failedProfileCount": 0,
+            "pendingCacheKeys": ["profile-a"],
+            "errors": {},
+        }
+        engine = SimpleNamespace(
+            _operation_profile_requests={"profile-a": object()},
+            speed_profile_service=service,
+            _refresh_operation_profile_warmup=Mock(),
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "profile-a"):
+            _wait_for_operation_profile_prewarm(engine, 0.0)
 
 
 if __name__ == "__main__":

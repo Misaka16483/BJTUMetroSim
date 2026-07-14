@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.domain.power.trajectory import validate_trajectory_frames
+from tools.run_closed_loop_joint_experiment import _frame_fingerprint
 from tools.run_timetable_power_experiment import (
     DEFAULT_SCENARIO,
     capture_timetable_trajectory,
@@ -28,6 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture-seconds", type=int, default=900)
     parser.add_argument("--tick-seconds", type=float, default=0.5)
     parser.add_argument("--wall-timeout-sec", type=float, default=600.0)
+    parser.add_argument("--profile-prewarm-timeout-sec", type=float, default=900.0)
+    parser.add_argument("--profile-cache-dir", type=Path, default=None)
     parser.add_argument("--issue-limit", type=int, default=20)
     return parser
 
@@ -40,6 +43,8 @@ def main() -> int:
         capture_seconds=args.capture_seconds,
         tick_seconds=args.tick_seconds,
         wall_timeout_sec=args.wall_timeout_sec,
+        profile_prewarm_timeout_sec=args.profile_prewarm_timeout_sec,
+        profile_cache_dir=args.profile_cache_dir,
         timing_candidate={
             "departureSpreadSec": 0.0,
             "tractionTimingSec": 0.0,
@@ -72,6 +77,7 @@ def main() -> int:
         if previous_speed - current_speed > 1.0:
             problematic_transitions.append(transition)
     payload = {
+        "frameFingerprintSha256": _frame_fingerprint(frames),
         "validation": {
             "passed": validation.passed,
             "issueCount": len(validation.issues),

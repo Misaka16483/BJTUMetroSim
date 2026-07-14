@@ -211,6 +211,7 @@ def _capture_case(
         tick_seconds=tick_seconds,
         wall_timeout_sec=wall_timeout_sec,
         timing_candidate=timing_candidate,
+        profile_prewarm_timeout_sec=wall_timeout_sec,
     )
     validation = validate_trajectory_frames(frames, allow_roster_changes=False)
     validation.require_valid()

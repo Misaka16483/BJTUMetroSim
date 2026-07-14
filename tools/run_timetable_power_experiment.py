@@ -138,6 +138,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--population", type=int, default=8)
     parser.add_argument("--generations", type=int, default=2)
     parser.add_argument("--wall-timeout-sec", type=float, default=300.0)
+    parser.add_argument(
+        "--profile-prewarm-timeout-sec",
+        type=float,
+        default=600.0,
+        help="Wait for every operation-plan DCDP profile before advancing simulation time.",
+    )
+    parser.add_argument(
+        "--profile-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional DCDP cache directory, useful for cold-cache reproducibility checks.",
+    )
     parser.add_argument("--trajectory", type=Path, default=DEFAULT_TRAJECTORY)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser
@@ -343,6 +355,26 @@ def _compact_train_diagnostic(train: Mapping[str, Any]) -> dict[str, Any]:
     return {name: train.get(name) for name in fields}
 
 
+def _wait_for_operation_profile_prewarm(
+    engine: SimulationEngine,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    """Make batch trajectories independent of persistent DCDP cache state."""
+    profile_keys = tuple(engine._operation_profile_requests)
+    status = engine.speed_profile_service.wait_for(
+        profile_keys,
+        max(0.0, timeout_sec),
+    )
+    engine._refresh_operation_profile_warmup()
+    if status["failedProfileCount"]:
+        raise RuntimeError(f"DCDP_PROFILE_PREWARM_FAILED:{status['errors']}")
+    if not status["ready"]:
+        raise TimeoutError(
+            f"DCDP_PROFILE_PREWARM_TIMEOUT:{status['pendingCacheKeys']}"
+        )
+    return status
+
+
 def capture_timetable_trajectory(
     *,
     scenario_path: Path,
@@ -351,12 +383,16 @@ def capture_timetable_trajectory(
     tick_seconds: float,
     wall_timeout_sec: float,
     timing_candidate: Mapping[str, float] | None = None,
+    profile_prewarm_timeout_sec: float = 600.0,
+    profile_cache_dir: Path | None = None,
 ) -> tuple[list[TrajectoryFrame], dict[str, Any]]:
     engine = SimulationEngine.load_from_files(
         scenario_path=scenario_path,
         line_map_path=ROOT / "data" / "cache" / "line_map.json",
         stations_csv_path=ROOT / "data" / "line9" / "stations.csv",
     )
+    if profile_cache_dir is not None:
+        engine.speed_profile_service.cache_dir = profile_cache_dir
     operation_plan = replace(
         engine.scenario.operation_plan,
         max_duties=max(2, max_duties),
@@ -383,6 +419,7 @@ def capture_timetable_trajectory(
     deadline = float("inf")
     next_progress_at = float("inf")
     last_diagnostic: dict[str, Any] = {}
+    profile_warmup_before_clock_start: dict[str, Any] = {}
     try:
         load_started_at = time.monotonic()
         print("[capture] ENGINE_LOAD_STARTED", file=sys.stderr, flush=True)
@@ -390,6 +427,19 @@ def capture_timetable_trajectory(
         load_elapsed_sec = time.monotonic() - load_started_at
         print(
             f"[capture] ENGINE_LOAD_COMPLETED elapsedSec={load_elapsed_sec:.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
+        profile_warmup_before_clock_start = _wait_for_operation_profile_prewarm(
+            engine,
+            profile_prewarm_timeout_sec,
+        )
+        print(
+            "[capture] "
+            + json.dumps({
+                "event": "PROFILE_PREWARM_COMPLETED",
+                **profile_warmup_before_clock_start,
+            }, ensure_ascii=False),
             file=sys.stderr,
             flush=True,
         )
@@ -593,6 +643,7 @@ def capture_timetable_trajectory(
             "operationDiagnosticsAtCaptureEnd": operation_diagnostics,
             "speedLimitTransitions": speed_limit_transitions,
             "profileWarmup": final_state["profileWarmup"],
+            "profileWarmupBeforeClockStart": profile_warmup_before_clock_start,
             "coverage": coverage,
             "controlQuality": control_quality,
             "timingControl": timing_control,
@@ -792,6 +843,8 @@ def main() -> int:
         capture_seconds=args.capture_seconds,
         tick_seconds=args.tick_seconds,
         wall_timeout_sec=args.wall_timeout_sec,
+        profile_prewarm_timeout_sec=args.profile_prewarm_timeout_sec,
+        profile_cache_dir=args.profile_cache_dir,
     )
     validation = validate_trajectory_frames(frames, allow_roster_changes=False)
     validation.require_valid()

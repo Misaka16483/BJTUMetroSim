@@ -9,6 +9,7 @@
     "scenarioSha256": "053f243ac1ca66ac2e6c82c6f8854da5e692699ad31116b36bfcfe50130e1b50",
     "topologySha256": "985c6b1e91dd6a8e66ce2f9bf5b878d9cde80d27a3b4bbcb14d88acc6c0781ac",
     "baselineTrajectorySha256": "e2494c52cefca1b9476af7f53f23728ff6b6bbbea1eeff6a4284e4ff2b9d521e",
+    "baselineFrameFingerprintSha256": "b1568435b7c429598f7fc3f7bd5e86f57b050bc2cc1b0b5d9735bc69023b5020",
     "storageReportSha256": "f33bc2b8d52b99099608cd89184a180933cc736d469e7ccf5ded502e0cb132e1"
   },
   "design": {
@@ -22,6 +23,14 @@
     "storageGenerations": 1,
     "storageEvaluationCount": 7,
     "randomComparatorEvaluationCount": 7
+  },
+  "reproducibility": {
+    "allProfilesPrewarmedBeforeClockStart": true,
+    "coldCacheProfileCount": 26,
+    "coldCacheCompletedDutyCount": 3,
+    "coldCacheCompletedServiceCount": 6,
+    "coldCacheMaximumAbsoluteDeviationSec": 17.9,
+    "coldCacheFrameFingerprintMatchesBaseline": true
   },
   "baselineAcceptance": {
     "completedDutyCount": 3,
