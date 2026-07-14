@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from app.domain.power.joint_optimization import (
@@ -107,6 +108,53 @@ class PowerTrajectoryContractTests(unittest.TestCase):
         self.assertIn("TRACTION_BRAKE_OVERLAP", codes)
         self.assertIn("POSITION_DISCONTINUITY", codes)
 
+    def test_static_holding_brake_does_not_require_unmodelled_rail_reaction(self) -> None:
+        sample = _sample(
+            1_000,
+            "T1",
+            1_000.0,
+            speed_mps=0.0,
+            traction_force_n=0.0,
+            electric_brake_force_n=60_000.0,
+        )
+
+        report = validate_trajectory_frames((TrajectoryFrame(1_000, (sample,)),))
+
+        self.assertNotIn("DYNAMICS_NOT_CLOSED", {item.code for item in report.issues})
+
+    def test_moving_force_imbalance_remains_invalid(self) -> None:
+        sample = replace(_sample(
+            1_000,
+            "T1",
+            1_000.0,
+            speed_mps=5.0,
+            traction_force_n=0.0,
+            electric_brake_force_n=60_000.0,
+        ), resistance_force_n=0.0)
+
+        report = validate_trajectory_frames((TrajectoryFrame(1_000, (sample,)),))
+
+        self.assertIn("DYNAMICS_NOT_CLOSED", {item.code for item in report.issues})
+
+    def test_speed_ceiling_reaction_closes_force_balance_explicitly(self) -> None:
+        sample = replace(
+            _sample(
+                1_000,
+                "T1",
+                1_000.0,
+                speed_mps=5.0,
+                traction_force_n=60_000.0,
+                electric_brake_force_n=0.0,
+            ),
+            permitted_speed_mps=5.0,
+            resistance_force_n=0.0,
+            constraint_reaction_force_n=-60_000.0,
+        )
+
+        report = validate_trajectory_frames((TrajectoryFrame(1_000, (sample,)),))
+
+        self.assertNotIn("DYNAMICS_NOT_CLOSED", {item.code for item in report.issues})
+
     def test_jsonl_round_trip_preserves_metadata_and_interpolates(self) -> None:
         frames = _frames()
         with tempfile.TemporaryDirectory() as directory:
@@ -125,6 +173,31 @@ class PowerTrajectoryContractTests(unittest.TestCase):
         self.assertAlmostEqual(midpoint.samples[0].mileage_m, 1_025.0)
         self.assertEqual(provider.tracking_metrics(BASELINE_CANDIDATE)["operationalMetricsAvailable"], 1.0)
 
+    def test_replay_uses_nearest_real_frame_across_turnback_boundary(self) -> None:
+        before_sample = replace(
+            _sample(1_000, "T1", 1_000.0, speed_mps=0.0),
+            direction="UP",
+            turnback_count=0,
+        )
+        after_sample = replace(
+            _sample(2_000, "T1", 900.0, speed_mps=0.0),
+            direction="DOWN",
+            turnback_count=1,
+        )
+        provider = InMemoryTrajectoryProvider((
+            TrajectoryFrame(1_000, (before_sample,)),
+            TrajectoryFrame(2_000, (after_sample,)),
+        ))
+
+        before_boundary = provider.frame_at(1_250, BASELINE_CANDIDATE).samples[0]
+        after_boundary = provider.frame_at(1_750, BASELINE_CANDIDATE).samples[0]
+
+        self.assertEqual(before_boundary.direction, "UP")
+        self.assertEqual(before_boundary.mileage_m, 1_000.0)
+        self.assertEqual(after_boundary.direction, "DOWN")
+        self.assertEqual(after_boundary.mileage_m, 900.0)
+        self.assertEqual(after_boundary.source, "NEAREST_EVENT_BOUNDARY")
+
     def test_snapshot_adapter_maps_public_fields_and_derives_acceleration(self) -> None:
         adapter = EngineSnapshotTrajectoryAdapter()
         base_train = {
@@ -136,6 +209,8 @@ class PowerTrajectoryContractTests(unittest.TestCase):
             "tractionForceN": 10_000.0,
             "electricBrakeForceN": 0.0,
             "pneumaticBrakeForceN": 0.0,
+            "emergencyBrakeActive": True,
+            "commandSource": "ATP_OVERRIDE",
             "auxiliaryPowerKw": 150.0,
             "tractionPowerRequestKw": 120.0,
             "regenPowerAvailableKw": 0.0,
@@ -164,6 +239,8 @@ class PowerTrajectoryContractTests(unittest.TestCase):
 
         self.assertEqual(first.samples[0].active_route_ids, ("R-1",))
         self.assertTrue(first.samples[0].departure_authorized)
+        self.assertTrue(first.samples[0].emergency_brake_active)
+        self.assertEqual(first.samples[0].command_source, "ATP_OVERRIDE")
         self.assertAlmostEqual(second.samples[0].acceleration_mps2, 1.0)
         self.assertEqual(second.samples[0].source, "ENGINE_SNAPSHOT")
 
@@ -225,6 +302,61 @@ class ReplayJointPowerEvaluationTests(unittest.TestCase):
         self.assertFalse(result["feasible"])
         self.assertFalse(result["constraints"]["operationalMetrics"])
         self.assertEqual(result["constraintViolations"]["operationalMetrics"], 1.0)
+
+    def test_replay_evaluation_preserves_raw_frame_force_peak(self) -> None:
+        frames = list(_frames())
+        peak = replace(
+            frames[1].samples[0],
+            traction_force_n=300_000.0,
+            resistance_force_n=300_000.0,
+        )
+        frames[1] = replace(
+            frames[1],
+            samples=(peak, frames[1].samples[1]),
+        )
+        evaluator = self._evaluator(InMemoryTrajectoryProvider(
+            tuple(frames),
+            tracking_metrics=TRACKING_METRICS,
+        ))
+
+        result = evaluator.evaluate(BASELINE_CANDIDATE)
+
+        self.assertEqual(result["metrics"]["maxTractionForceN"], 300_000.0)
+
+    def test_replay_physics_includes_explicit_speed_constraint_reaction(self) -> None:
+        evaluator = self._evaluator(InMemoryTrajectoryProvider(
+            _frames(),
+            tracking_metrics=TRACKING_METRICS,
+        ))
+        sample = replace(
+            _sample(100_000, "T1", 1_000.0, traction_force_n=60_000.0),
+            resistance_force_n=0.0,
+            constraint_reaction_force_n=-60_000.0,
+        )
+
+        _, physical = evaluator._frame_to_loads_and_physics(
+            TrajectoryFrame(100_000, (sample,))
+        )
+
+        self.assertAlmostEqual(physical["maxDynamicsResidualN"], 0.0)
+
+    def test_idle_depot_samples_are_not_moving_block_obstacles(self) -> None:
+        evaluator = self._evaluator(InMemoryTrajectoryProvider(
+            _frames(),
+            tracking_metrics=TRACKING_METRICS,
+        ))
+        active_a = _sample(100_000, "ACTIVE-1", 1_000.0)
+        active_b = _sample(100_000, "ACTIVE-2", 2_000.0)
+        stored = replace(
+            _sample(100_000, "STORED", 1_000.1, speed_mps=0.0),
+            phase="IDLE",
+        )
+
+        _, physical = evaluator._frame_to_loads_and_physics(
+            TrajectoryFrame(100_000, (active_a, active_b, stored))
+        )
+
+        self.assertAlmostEqual(physical["minSameDirectionSpacingM"], 1_000.0)
 
 
 if __name__ == "__main__":

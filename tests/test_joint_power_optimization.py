@@ -155,6 +155,28 @@ class JointPowerOptimizationTests(unittest.TestCase):
                 self.assertGreaterEqual(trial["candidate"][name], lower)
                 self.assertLessEqual(trial["candidate"][name], upper)
 
+    def test_optimizer_reports_least_infeasible_candidate_without_crashing(self) -> None:
+        evaluator = JointPowerEvaluator(
+            TOPOLOGY,
+            JointExperimentConfig(
+                train_count=6,
+                horizon_sec=120,
+                time_step_sec=10.0,
+                min_voltage_v=1_000.0,
+            ),
+        )
+
+        result = Nsga2JointOptimizer(evaluator).run(
+            "STORAGE_ONLY",
+            seed=19,
+            population_size=4,
+            generations=1,
+        )
+
+        self.assertFalse(result["feasibleSolutionFound"])
+        self.assertFalse(result["recommended"]["feasible"])
+        self.assertGreater(result["recommended"]["totalConstraintViolation"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -108,6 +108,8 @@ class SimTrainState:
     # 鈹€鈹€ 椹鹃┒鍙板弽棣堝瓧娈?鈹€鈹€
     traction_percent: float = 0.0
     brake_percent: float = 0.0
+    emergency_brake_active: bool = False
+    command_source: str = "NONE"
     energy_kwh: float = 0.0
     traction_energy_kwh: float = 0.0
     auxiliary_energy_kwh: float = 0.0
@@ -133,6 +135,7 @@ class SimTrainState:
     traction_force_n: float = 0.0
     electric_brake_force_n: float = 0.0
     pneumatic_brake_force_n: float = 0.0
+    constraint_reaction_force_n: float = 0.0
     requested_power_kw: float = 0.0
     traction_power_request_kw: float = 0.0
     traction_power_delivered_kw: float = 0.0
@@ -229,6 +232,8 @@ class SimTrainState:
             "lastDispatchReason": self.last_dispatch_reason,
             "tractionPercent": round(self.traction_percent, 1),
             "brakePercent": round(self.brake_percent, 1),
+            "emergencyBrakeActive": self.emergency_brake_active,
+            "commandSource": self.command_source,
             "energyKwh": round(self.energy_kwh, 2),
             "tractionEnergyKwh": round(self.traction_energy_kwh, 4),
             "auxiliaryEnergyKwh": round(self.auxiliary_energy_kwh, 4),
@@ -254,6 +259,7 @@ class SimTrainState:
             "tractionForceN": round(self.traction_force_n, 1),
             "electricBrakeForceN": round(self.electric_brake_force_n, 1),
             "pneumaticBrakeForceN": round(self.pneumatic_brake_force_n, 1),
+            "constraintReactionForceN": round(self.constraint_reaction_force_n, 3),
             "requestedPowerKw": round(self.requested_power_kw, 3),
             "tractionPowerRequestKw": round(self.traction_power_request_kw, 3),
             "tractionPowerDeliveredKw": round(self.traction_power_delivered_kw, 3),
@@ -1732,7 +1738,12 @@ class SimulationEngine:
     def _other_train_positions(self, train: SimTrainState) -> tuple[TrainPosition, ...]:
         positions: list[TrainPosition] = []
         for other in self.trains:
-            if other.train_id == train.train_id or other._path_plan is None:
+            if (
+                other.train_id == train.train_id
+                or other._path_plan is None
+                or other.lifecycle_state
+                in {"IN_DEPOT", "READY", "RETURN_REQUESTED", "STORED"}
+            ):
                 continue
             positions.append(
                 TrainPosition(
@@ -1782,6 +1793,10 @@ class SimulationEngine:
         sim_time_ms: int,
     ) -> tuple[bool, PreparedTrainStep | None]:
         """Prepare a PathPlan train without advancing physics; return whether the train was handled."""
+        # Command observability is per tick. Early-return states must not retain
+        # an emergency flag from the preceding physical step.
+        train.emergency_brake_active = False
+        train.command_source = "NONE"
         if train.lifecycle_state in {"IN_DEPOT", "RETURN_REQUESTED", "STORED"}:
             train.speed_mps = 0.0
             train.traction_percent = 0.0
@@ -1862,6 +1877,7 @@ class SimulationEngine:
             train.traction_force_n = 0.0
             train.electric_brake_force_n = 0.0
             train.pneumatic_brake_force_n = 0.0
+            train.constraint_reaction_force_n = 0.0
             self._update_train_path_context(train)
 
             limit_source_idx = train.station_index if train.direction == "UP" else next_idx
@@ -2031,7 +2047,11 @@ class SimulationEngine:
             path_plan = prepared.path_plan
             new_position_m = min(max(0.0, result.position_m), path_plan.total_length_m)
             next_limit_mps = path_plan.speed_limit_at(new_position_m, train.permitted_speed_mps)
-            train.speed_mps = min(max(0.0, result.speed_mps), next_limit_mps)
+            upper_speed_bound_mps = min(
+                next_limit_mps,
+                prepared.vehicle_config.max_speed_mps,
+            )
+            train.speed_mps = min(max(0.0, result.speed_mps), upper_speed_bound_mps)
             train.path_position_m = new_position_m
             train.path_total_length_m = path_plan.total_length_m
             train.segment_progress = min(1.0, new_position_m / path_plan.total_length_m) if path_plan.total_length_m else 1.0
@@ -2039,9 +2059,14 @@ class SimulationEngine:
             train.target_distance_m = path_plan.total_length_m
             train.traction_percent = prepared.command.traction_percent
             train.brake_percent = prepared.command.brake_percent
+            train.emergency_brake_active = prepared.command.emergency_brake
+            train.command_source = prepared.command.source.value
             train.target_speed_mps = self._ato_for_train(train.train_id).last_target_speed_mps
             train.mass_kg = prepared.vehicle_config.mass_kg
-            train.acceleration_mps2 = result.acceleration_mps2
+            train.acceleration_mps2 = (
+                (train.speed_mps - prepared.state.speed_mps)
+                / self.clock.tick_seconds
+            )
             train.resistance_force_n = resistance_force_n
             train.applied_grade_ratio = (
                 prepared.gradient_force_n
@@ -2050,6 +2075,28 @@ class SimulationEngine:
             train.traction_force_n = traction_force_n
             train.electric_brake_force_n = blend.electric_brake_force_n
             train.pneumatic_brake_force_n = blend.pneumatic_brake_force_n
+            longitudinal_force_n = (
+                traction_force_n
+                - blend.total_brake_force_n
+                - resistance_force_n
+                - prepared.gradient_force_n
+            )
+            force_gap_n = (
+                longitudinal_force_n
+                - prepared.vehicle_config.mass_kg * train.acceleration_mps2
+            )
+            lower_constraint_active = (
+                train.speed_mps <= 1e-9 and force_gap_n < -1.0
+            )
+            upper_constraint_active = (
+                train.speed_mps >= upper_speed_bound_mps - 1e-9
+                and force_gap_n > 1.0
+            )
+            train.constraint_reaction_force_n = (
+                -force_gap_n
+                if lower_constraint_active or upper_constraint_active
+                else 0.0
+            )
             train.traction_limit_ratio = max(0.0, min(1.0, traction_limit))
             train.regen_limit_ratio = max(0.0, min(1.0, regen_limit))
             if prepared.command.traction_percent > 0 and train.traction_limit_ratio < 0.999:
@@ -2096,12 +2143,15 @@ class SimulationEngine:
             print(f"[Engine] Prepared advancement failed for {train.train_id}: {exc}")
             train.traction_percent = 0.0
             train.brake_percent = 0.0
+            train.emergency_brake_active = False
+            train.command_source = "NONE"
             train.acceleration_mps2 = 0.0
             train.resistance_force_n = 0.0
             train.applied_grade_ratio = 0.0
             train.traction_force_n = 0.0
             train.electric_brake_force_n = 0.0
             train.pneumatic_brake_force_n = 0.0
+            train.constraint_reaction_force_n = 0.0
             train.speed_mps = max(0.0, train.speed_mps - 0.8 * self.clock.tick_seconds)
 
     def _advance_train(self, train: SimTrainState, sim_time_ms: int) -> None:
@@ -2478,6 +2528,7 @@ class SimulationEngine:
         train.traction_force_n = 0.0
         train.electric_brake_force_n = 0.0
         train.pneumatic_brake_force_n = 0.0
+        train.constraint_reaction_force_n = 0.0
         self._record_operation_arrival(train, sim_time_ms)
 
         # The station platform is the explicit end of the previous interval.

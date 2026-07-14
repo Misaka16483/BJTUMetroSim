@@ -135,6 +135,36 @@ class MovementAuthorityTests(unittest.TestCase):
         self.assertTrue(command.emergency_brake)
         self.assertEqual(command.source, CommandSource.ATP_OVERRIDE)
 
+    def test_atp_tolerates_small_tracking_excess_near_station_stop(self) -> None:
+        authority = MovementAuthority(
+            "T1", 100.0, "STATION_STOP", 0.66, 80.0, 89.0, ("1",), ("1",)
+        )
+        requested = ControlCommand(
+            "T1", brake_percent=31.0, source=CommandSource.ATO
+        )
+
+        command = self.service.supervise(
+            requested, authority, position_m=99.2, speed_mps=0.69
+        )
+
+        self.assertEqual(command, requested)
+
+    def test_atp_uses_full_service_before_emergency_overspeed_threshold(self) -> None:
+        authority = MovementAuthority(
+            "T1", 100.0, "STATION_STOP", 0.60, 80.0, 89.0, ("1",), ("1",)
+        )
+
+        command = self.service.supervise(
+            ControlCommand("T1", brake_percent=43.0, source=CommandSource.ATO),
+            authority,
+            position_m=99.3,
+            speed_mps=0.87,
+        )
+
+        self.assertFalse(command.emergency_brake)
+        self.assertEqual(command.brake_percent, 100.0)
+        self.assertEqual(command.source, CommandSource.ATP_OVERRIDE)
+
     def test_ato_respects_authority_target_even_when_path_continues(self) -> None:
         controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
         command = controller.decide(TrainState("T1", position_m=195.0, speed_mps=6.0, sim_time_s=10.0), AtoTarget(200.0, 10.0, path_plan=self.path))

@@ -87,6 +87,20 @@ class OperationPlanLifecycleTests(unittest.TestCase):
         self.assertEqual(train.lifecycle_state, "STORED")
         self.assertEqual(train.phase, "IDLE")
 
+    def test_stored_train_is_not_a_moving_block_obstacle(self) -> None:
+        engine = load_engine()
+        engine.load()
+        following, stored = engine.trains[:2]
+        path_plan = engine._ensure_interval_path(following, following.station_index + 1)
+        self.assertIsNotNone(path_plan)
+        stored._path_plan = path_plan
+        stored.path_position_m = path_plan.total_length_m
+        stored.lifecycle_state = "STORED"
+
+        positions = engine._other_train_positions(following)
+
+        self.assertNotIn(stored.train_id, {item.train_id for item in positions})
+
     def test_plan_uses_dcdp_runtime_and_exposes_reproducible_window(self) -> None:
         engine = load_engine()
         engine.load()

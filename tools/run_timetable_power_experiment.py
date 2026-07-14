@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict, deque
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.engine import SimulationEngine
+from app.domain.control.models import AtoTarget
 from app.domain.power.joint_optimization import (
     BASELINE_CANDIDATE,
     VARIABLE_BOUNDS,
@@ -35,6 +37,7 @@ from app.domain.power.trajectory import (
     TrajectoryFrame,
     validate_trajectory_frames,
 )
+from app.domain.vehicle.models import TrainState
 
 
 DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_timetable_operation.json"
@@ -59,6 +62,21 @@ LIVE_STORAGE_VARIABLE_BOUNDS = {
     "storageDischargeLimitKw": (0.0, 2000.0),
     "storageTriggerKw": (0.0, 2500.0),
 }
+STORAGE_REMEDIABLE_CONSTRAINTS = frozenset({
+    "minimumVoltage",
+    "substationCapacity",
+    "terminalSoc",
+})
+
+
+def _non_storage_constraints_pass(evaluation: Mapping[str, Any]) -> bool:
+    """Return whether a replay is valid apart from storage-remediable limits."""
+    constraints = evaluation.get("constraints", {})
+    return bool(constraints) and all(
+        bool(passed)
+        for name, passed in constraints.items()
+        if name not in STORAGE_REMEDIABLE_CONSTRAINTS
+    )
 
 
 def configure_engine_timing_candidate(
@@ -217,13 +235,16 @@ def _operation_tracking_metrics(engine: SimulationEngine, snapshots: list[Any]) 
     }
 
 
-def _control_quality(frames: list[TrajectoryFrame]) -> dict[str, int | float]:
-    previous: dict[str, tuple[bool, float]] = {}
+def _control_quality(frames: list[TrajectoryFrame]) -> dict[str, Any]:
+    previous: dict[str, tuple[bool, float, bool]] = {}
     last_low_speed_release_ms: dict[str, int] = {}
     low_speed_transitions = 0
     rapid_reapplications = 0
+    emergency_brake_interventions = 0
     traction_brake_overlaps = 0
     minimum_reapplication_interval_sec = float("inf")
+    rapid_reapplication_events: list[dict[str, Any]] = []
+    emergency_brake_events: list[dict[str, Any]] = []
     for frame in frames:
         for sample in frame.samples:
             braking = sample.total_brake_force_n > 100.0
@@ -231,7 +252,22 @@ def _control_quality(frames: list[TrajectoryFrame]) -> dict[str, int | float]:
             if braking and traction:
                 traction_brake_overlaps += 1
             prior = previous.get(sample.train_id)
-            previous[sample.train_id] = (braking, sample.speed_mps)
+            previous[sample.train_id] = (
+                braking,
+                sample.speed_mps,
+                sample.emergency_brake_active,
+            )
+            if sample.emergency_brake_active and (prior is None or not prior[2]):
+                emergency_brake_interventions += 1
+                emergency_brake_events.append({
+                    "trainId": sample.train_id,
+                    "appliedAtMs": frame.sim_time_ms,
+                    "speedMps": sample.speed_mps,
+                    "phase": sample.phase,
+                    "currentStationCode": sample.current_station_code,
+                    "nextStationCode": sample.next_station_code,
+                    "commandSource": sample.command_source,
+                })
             if prior is None or braking == prior[0]:
                 continue
             low_speed = min(prior[1], sample.speed_mps) <= 2.0
@@ -251,16 +287,60 @@ def _control_quality(frames: list[TrajectoryFrame]) -> dict[str, int | float]:
             )
             if interval_sec <= 2.0:
                 rapid_reapplications += 1
+                rapid_reapplication_events.append({
+                    "trainId": sample.train_id,
+                    "releasedAtMs": released_ms,
+                    "reappliedAtMs": frame.sim_time_ms,
+                    "intervalSec": interval_sec,
+                    "speedMps": sample.speed_mps,
+                    "phase": sample.phase,
+                    "currentStationCode": sample.current_station_code,
+                    "nextStationCode": sample.next_station_code,
+                })
     return {
         "lowSpeedBrakeTransitionCount": low_speed_transitions,
         "rapidLowSpeedBrakeReapplicationCount": rapid_reapplications,
+        "rapidLowSpeedBrakeReapplications": rapid_reapplication_events,
         "minimumLowSpeedBrakeReapplicationIntervalSec": (
             minimum_reapplication_interval_sec
             if math.isfinite(minimum_reapplication_interval_sec) else -1.0
         ),
         "tractionBrakeOverlapSampleCount": traction_brake_overlaps,
+        "emergencyBrakeInterventionCount": emergency_brake_interventions,
+        "emergencyBrakeInterventions": emergency_brake_events,
         "rapidReapplicationThresholdSec": 2.0,
     }
+
+
+def _compact_train_diagnostic(train: Mapping[str, Any]) -> dict[str, Any]:
+    fields = (
+        "trainId",
+        "dutyId",
+        "serviceId",
+        "lifecycleState",
+        "phase",
+        "direction",
+        "currentStationCode",
+        "nextStationCode",
+        "speedMps",
+        "pathPositionM",
+        "pathTotalLengthM",
+        "distanceToNextM",
+        "tractionPercent",
+        "brakePercent",
+        "emergencyBrakeActive",
+        "commandSource",
+        "departureAuthorized",
+        "interlockingHoldReason",
+        "activeRouteIds",
+        "turnbackCount",
+        "turnbackState",
+        "movementAuthorityEndM",
+        "movementAuthorityReason",
+        "movementAuthoritySpeedMps",
+        "scheduleDeviationSec",
+    )
+    return {name: train.get(name) for name in fields}
 
 
 def capture_timetable_trajectory(
@@ -292,6 +372,12 @@ def capture_timetable_trajectory(
 
     frames: list[TrajectoryFrame] = []
     captured_snapshots: list[Any] = []
+    recent_control_states: dict[str, deque[dict[str, Any]]] = defaultdict(
+        lambda: deque(maxlen=24)
+    )
+    control_state_history: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    previous_local_limit: dict[str, float] = {}
+    speed_limit_transitions: list[dict[str, Any]] = []
     adapter = EngineSnapshotTrajectoryAdapter()
     capture_start_ms: int | None = None
     deadline = float("inf")
@@ -343,6 +429,80 @@ def capture_timetable_trajectory(
                 continue
             frames.append(frame)
             captured_snapshots.append(snapshot)
+            sim_trains = {item.train_id: item for item in engine.trains}
+            for train_state in snapshot.trains:
+                train_id = str(train_state.get("trainId", ""))
+                local_limit = float(train_state.get("localSpeedLimitMps", 0.0))
+                controller = engine._ato_for_train(train_id)
+                profile = controller.current_profile
+                sim_train = sim_trains[train_id]
+                runtime_target = AtoTarget(
+                    target_position_m=sim_train.movement_authority_end_m,
+                    permitted_speed_mps=max(
+                        0.05,
+                        min(
+                            sim_train.permitted_speed_mps,
+                            sim_train.movement_authority_speed_mps,
+                        ),
+                    ),
+                    path_plan=sim_train._path_plan,
+                )
+                runtime_state = TrainState(
+                    train_id=train_id,
+                    position_m=sim_train.path_position_m,
+                    speed_mps=sim_train.speed_mps,
+                    sim_time_s=engine.clock.sim_time_seconds,
+                )
+                runtime_cache_key = controller._make_profile_cache_key(
+                    runtime_state,
+                    runtime_target,
+                )
+                installed_cache_key = controller._profile_cache_key
+                trace = recent_control_states[train_id]
+                control_record = {
+                    "simTimeMs": snapshot.sim_time_ms,
+                    "pathPositionM": train_state.get("pathPositionM"),
+                    "speedMps": train_state.get("speedMps"),
+                    "targetSpeedMps": train_state.get("targetSpeedMps"),
+                    "localSpeedLimitMps": local_limit,
+                    "tractionPercent": train_state.get("tractionPercent"),
+                    "brakePercent": train_state.get("brakePercent"),
+                    "emergencyBrakeActive": train_state.get("emergencyBrakeActive"),
+                    "commandSource": train_state.get("commandSource"),
+                    "movementAuthorityEndM": train_state.get("movementAuthorityEndM"),
+                    "movementAuthorityReason": train_state.get("movementAuthorityReason"),
+                    "movementAuthoritySpeedMps": train_state.get("movementAuthoritySpeedMps"),
+                    "accelerationMps2": train_state.get("accelerationMps2"),
+                    "phase": train_state.get("phase"),
+                    "currentSegmentId": train_state.get("currentSegmentId"),
+                    "profileInstalled": profile is not None,
+                    "profileMode": controller.last_profile_mode,
+                    "profileTargetPositionM": (
+                        round(profile.target_position_m, 3) if profile is not None else None
+                    ),
+                    "profilePermittedSpeedMps": (
+                        round(profile.permitted_speed_mps, 3) if profile is not None else None
+                    ),
+                    "profileCacheKeyMatchesRuntime": (
+                        installed_cache_key == runtime_cache_key
+                    ),
+                    "installedCacheKeyCore": (
+                        list(installed_cache_key[1:9])
+                        if installed_cache_key is not None else None
+                    ),
+                    "runtimeCacheKeyCore": list(runtime_cache_key[1:9]),
+                }
+                trace.append(control_record)
+                control_state_history[train_id].append(control_record)
+                old_limit = previous_local_limit.get(train_id)
+                if old_limit is not None and local_limit < old_limit - 0.05:
+                    speed_limit_transitions.append({
+                        "trainId": train_id,
+                        "fromLimitMps": old_limit,
+                        "toLimitMps": local_limit,
+                        "trace": list(trace),
+                    })
+                previous_local_limit[train_id] = local_limit
             if frame.sim_time_ms >= capture_start_ms + capture_seconds * 1000:
                 break
         else:
@@ -371,6 +531,49 @@ def capture_timetable_trajectory(
             ),
         }
         control_quality = _control_quality(frames)
+        for event in control_quality["rapidLowSpeedBrakeReapplications"]:
+            released_at_ms = int(event["releasedAtMs"])
+            reapplied_at_ms = int(event["reappliedAtMs"])
+            event["controlTrace"] = [
+                item
+                for item in control_state_history[str(event["trainId"])]
+                if released_at_ms - 3_000
+                <= int(item["simTimeMs"])
+                <= reapplied_at_ms + 1_000
+            ]
+        for event in control_quality["emergencyBrakeInterventions"]:
+            applied_at_ms = int(event["appliedAtMs"])
+            event["controlTrace"] = [
+                item
+                for item in control_state_history[str(event["trainId"])]
+                if applied_at_ms - 3_000
+                <= int(item["simTimeMs"])
+                <= applied_at_ms + 1_000
+            ]
+        final_snapshot = captured_snapshots[-1]
+        final_acceptance = final_state["acceptance"]
+        stuck_train_ids = {
+            str(item["trainId"])
+            for item in final_acceptance["stuckTrains"]
+        }
+        interlocking_snapshot = final_snapshot.interlocking
+        operation_diagnostics = {
+            "trainStates": [
+                _compact_train_diagnostic(item) for item in final_snapshot.trains
+            ],
+            "stuckTrainStates": [
+                _compact_train_diagnostic(item) for item in final_snapshot.trains
+                if str(item.get("trainId", "")) in stuck_train_ids
+            ],
+            "lockedRoutes": [
+                item for item in interlocking_snapshot.get("routes", [])
+                if item.get("state") in {"LOCKED", "APPROACH_LOCKED"}
+            ],
+            "departureAuthorities": list(
+                interlocking_snapshot.get("departureAuthorities", [])
+            ),
+            "recentEvents": list(final_state["recentEvents"][-30:]),
+        }
         metadata = {
             "scenarioId": engine.scenario.name,
             "scenarioSha256": _sha256(scenario_path),
@@ -386,7 +589,9 @@ def capture_timetable_trajectory(
                 "departureAndRuntime": "OPERATION_PLAN_EVENTS",
                 "stopPosition": "PATHPLAN_PLATFORM_REFERENCE_ANCHOR",
             },
-            "operationAcceptanceAtCaptureEnd": final_state["acceptance"],
+            "operationAcceptanceAtCaptureEnd": final_acceptance,
+            "operationDiagnosticsAtCaptureEnd": operation_diagnostics,
+            "speedLimitTransitions": speed_limit_transitions,
             "profileWarmup": final_state["profileWarmup"],
             "coverage": coverage,
             "controlQuality": control_quality,
@@ -445,8 +650,11 @@ def run_storage_experiment(
         evaluator.baseline_candidate,
         storage_enabled=False,
     )
-    if not baseline["feasible"]:
-        raise RuntimeError(f"TIMETABLE_POWER_BASELINE_INFEASIBLE: {baseline['constraintViolations']}")
+    if not _non_storage_constraints_pass(baseline):
+        raise RuntimeError(
+            "TIMETABLE_POWER_BASELINE_REPLAY_INVALID: "
+            f"{baseline['constraintViolations']}"
+        )
 
     optimizer = Nsga2JointOptimizer(evaluator)
     repeats = [
@@ -480,8 +688,10 @@ def run_storage_experiment(
         for name, value in baseline["objectives"].items()
     }
     execution_gates = {
-        "baselineFeasible": baseline["feasible"],
-        "noStorageBaselineFeasible": no_storage_baseline["feasible"],
+        "baselineNonStorageConstraintsPassed": _non_storage_constraints_pass(baseline),
+        "noStorageBaselineNonStorageConstraintsPassed": (
+            _non_storage_constraints_pass(no_storage_baseline)
+        ),
         "allRecommendedFeasible": all(
             repeat["recommended"]["feasible"] for repeat in repeats
         ),
@@ -495,11 +705,15 @@ def run_storage_experiment(
         "noRapidLowSpeedBrakeReapplication": (
             metadata["controlQuality"]["rapidLowSpeedBrakeReapplicationCount"] == 0
         ),
+        "noEmergencyBrakeIntervention": (
+            metadata["controlQuality"].get("emergencyBrakeInterventionCount", 0) == 0
+        ),
         "noTractionBrakeOverlap": (
             metadata["controlQuality"]["tractionBrakeOverlapSampleCount"] == 0
         ),
     }
     hypothesis_checks = {
+        "recommendedSatisfiesAllConstraints": recommended["feasible"],
         "recommendedDoesNotIncreaseNetEnergy": (
             recommended["objectives"]["netAcGridEnergyKwh"]
             <= baseline["objectives"]["netAcGridEnergyKwh"]

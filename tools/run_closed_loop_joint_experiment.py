@@ -336,6 +336,9 @@ def _fixed_storage_validation(
         "noRapidLowSpeedBrakeReapplication": (
             control_quality["rapidLowSpeedBrakeReapplicationCount"] == 0
         ),
+        "noEmergencyBrakeIntervention": (
+            control_quality.get("emergencyBrakeInterventionCount", 0) == 0
+        ),
         "noTractionBrakeOverlap": (
             control_quality["tractionBrakeOverlapSampleCount"] == 0
         ),

@@ -252,6 +252,27 @@ class AtoPowerStabilityTests(unittest.TestCase):
         self.assertGreater(reapplied.brake_percent, releasing.brake_percent)
         self.assertEqual(reapplied.traction_percent, 0.0)
 
+    def test_low_speed_brake_guard_includes_pid_deadband_tolerance(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+        controller._terminal_braking_latched = True
+        controller._terminal_braking_target_position_m = 100.0
+        controller._last_command = ControlCommand(
+            "T1",
+            brake_percent=1.9,
+            source=CommandSource.ATO,
+        )
+        controller._last_command_sim_time_s = 0.0
+
+        command = controller._stabilize_command(
+            TrainState("T1", position_m=92.5, speed_mps=2.01, sim_time_s=0.5),
+            target,
+            ControlCommand.coast("T1", source=CommandSource.ATO),
+        )
+
+        self.assertAlmostEqual(command.brake_percent, 1.9)
+        self.assertEqual(command.traction_percent, 0.0)
+
     def test_creep_waits_for_full_brake_release_and_neutral_dwell(self) -> None:
         controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
         target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
@@ -276,6 +297,34 @@ class AtoPowerStabilityTests(unittest.TestCase):
         self.assertEqual(commands[1].brake_percent, 0.0)
         self.assertEqual(commands[2].brake_percent, 0.0)
         self.assertEqual(commands[3].brake_percent, 0.0)
+        self.assertGreater(commands[-1].traction_percent, 0.0)
+
+    def test_stopped_train_just_outside_nominal_creep_zone_can_recover(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+        controller._terminal_braking_latched = True
+        controller._terminal_braking_target_position_m = 100.0
+        controller._last_command = ControlCommand(
+            "T1",
+            brake_percent=3.0,
+            source=CommandSource.ATO,
+        )
+        controller._last_command_sim_time_s = 0.0
+
+        commands = [
+            controller.decide(
+                TrainState(
+                    "T1",
+                    position_m=94.5,
+                    speed_mps=0.0,
+                    sim_time_s=sim_time_s,
+                ),
+                target,
+            )
+            for sim_time_s in (0.25, 0.5, 0.75, 1.0, 1.25)
+        ]
+
+        self.assertTrue(all(command.brake_percent == 0.0 for command in commands[1:]))
         self.assertGreater(commands[-1].traction_percent, 0.0)
 
 

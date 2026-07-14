@@ -1,0 +1,88 @@
+{
+  "experimentId": "LONG-HORIZON-TRACTION-TIMING-REFINEMENT-V3",
+  "status": "COMPLETED_NO_GLOBALLY_FEASIBLE_STORAGE_CONTROL",
+  "quality": "ENGINEERING_ESTIMATE_LONG_HORIZON",
+  "scope": "Parallel-world Line 9; teacher-desensitized data; not a claim about the real Line 9",
+  "source": {
+    "branch": "fix/station-stop-reference",
+    "baseCommit": "1a6856c9dfc3958209d42e1c6abcd5d9af446d3f",
+    "scenarioSha256": "053f243ac1ca66ac2e6c82c6f8854da5e692699ad31116b36bfcfe50130e1b50",
+    "topologySha256": "985c6b1e91dd6a8e66ce2f9bf5b878d9cde80d27a3b4bbcb14d88acc6c0781ac",
+    "baselineTrajectorySha256": "e2494c52cefca1b9476af7f53f23728ff6b6bbbea1eeff6a4284e4ff2b9d521e",
+    "storageReportSha256": "f33bc2b8d52b99099608cd89184a180933cc736d469e7ccf5ded502e0cb132e1"
+  },
+  "design": {
+    "captureSeconds": 3900,
+    "trainDuties": 3,
+    "services": 6,
+    "screenTickSeconds": 0.5,
+    "evaluationStepSeconds": 1.0,
+    "tractionTimingValuesSec": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "storagePopulation": 4,
+    "storageGenerations": 1,
+    "storageEvaluationCount": 7,
+    "randomComparatorEvaluationCount": 7
+  },
+  "baselineAcceptance": {
+    "completedDutyCount": 3,
+    "completedServiceCount": 6,
+    "maximumAbsoluteDeviationSec": 17.9,
+    "stuckTrainCount": 0,
+    "rapidLowSpeedBrakeReapplicationCount": 0,
+    "emergencyBrakeInterventionCount": 0,
+    "tractionBrakeOverlapSampleCount": 0,
+    "maxBrakeForceN": 300000.0,
+    "maxDecelerationMps2": 1.375284,
+    "maxDynamicsResidualN": 0.231865,
+    "minSameDirectionSpacingM": 3063.255
+  },
+  "recommendedTiming": {
+    "departureSpreadSec": 0.0,
+    "tractionTimingSec": 0.0,
+    "brakeTimingSec": 0.0
+  },
+  "noStorageBaseline": {
+    "netAcGridEnergyKwh": 1871.298787,
+    "aggregateAcGridPeakKw": 5769.25635,
+    "wastedRegenRatio": 0.657017552,
+    "minVoltageV": 635.764078,
+    "minVoltageAtSimTimeMs": 23409750,
+    "minVoltageTrainId": "EMU-9-001",
+    "minVoltageTrainMileageM": 16048.92,
+    "minVoltageTrainDirection": "UP"
+  },
+  "recommendedStorageControl": {
+    "candidate": {
+      "storageChargeLimitKw": 588.139207,
+      "storageDischargeLimitKw": 227.840756,
+      "storageTriggerKw": 672.765824
+    },
+    "feasible": false,
+    "failedConstraints": ["minimumVoltage"],
+    "netAcGridEnergyKwh": 1837.337365,
+    "aggregateAcGridPeakKw": 5769.25635,
+    "wastedRegenRatio": 0.59705996,
+    "minVoltageV": 635.764078,
+    "terminalSocDeviation": 0.005488,
+    "storageChargedKwh": 38.381,
+    "storageDischargedKwh": 31.447,
+    "improvementPercent": {
+      "netAcGridEnergyKwh": 2.001481,
+      "aggregateAcGridPeakKw": 0.0,
+      "wastedRegenRatio": 9.12566
+    }
+  },
+  "halfStepValidation": {
+    "electricalTimeStepSec": 0.25,
+    "feasible": false,
+    "failedConstraints": ["minimumVoltage"],
+    "minVoltageV": 633.957434,
+    "terminalSocDeviation": 0.000166
+  },
+  "feasibilityEvidence": {
+    "nsga2FeasibleCount": 0,
+    "randomSearchFeasibleCount": 0,
+    "rootCause": "SCESS-0905 cannot influence the global minimum-voltage event at the line-end mileage 16048.92 m",
+    "nextStep": "Add storage placement or distributed end-of-line storage as a decision variable before expanding the control-search budget"
+  }
+}

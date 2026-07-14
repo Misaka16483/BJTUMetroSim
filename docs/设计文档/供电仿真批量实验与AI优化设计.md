@@ -94,4 +94,5 @@ python tools/run_power_optimization.py --problem N1_ROBUST_TIMETABLE --populatio
 - 实现：`app/domain/power/joint_optimization.py`
 - 执行入口：`tools/run_joint_power_optimization.py`
 - 冻结摘要：`data/contracts/joint_power_optimization_v1_summary.json`
-- 完整报告：`docs/测试与验收/多车时序与超级电容联合优化实验报告.md`
+- V2 代理轨迹报告：`docs/测试与验收/多车时序与超级电容联合优化实验报告.md`
+- V3 主引擎长时域报告：`docs/测试与验收/多车时序与超级电容联合优化实验报告V3.md`

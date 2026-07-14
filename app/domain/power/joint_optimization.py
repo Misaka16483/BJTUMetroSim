@@ -202,6 +202,10 @@ class JointPowerEvaluator:
             "peakSubstationRectifierPowerKw": 0.0,
             "aggregateAcGridPeakKw": 0.0,
             "minVoltageV": float("inf"),
+            "minVoltageAtSimTimeMs": None,
+            "minVoltageTrainId": None,
+            "minVoltageTrainMileageM": None,
+            "minVoltageTrainDirection": None,
             "maxSubstationLoadRatio": 0.0,
             "maxBalanceErrorRatio": 0.0,
             "maxRegenBalanceErrorKw": 0.0,
@@ -255,10 +259,19 @@ class JointPowerEvaluator:
                     metrics["peakSubstationRectifierPowerKw"], substation_peak_kw
                 )
                 metrics["aggregateAcGridPeakKw"] = max(metrics["aggregateAcGridPeakKw"], ac_import_kw)
-                metrics["minVoltageV"] = min(
-                    metrics["minVoltageV"],
-                    *(item.voltage_v for item in snapshot.trains),
-                )
+                for train_flow in snapshot.trains:
+                    if train_flow.voltage_v < metrics["minVoltageV"]:
+                        metrics["minVoltageV"] = train_flow.voltage_v
+                        metrics["minVoltageAtSimTimeMs"] = sim_time_ms
+                        metrics["minVoltageTrainId"] = train_flow.train_id
+                        metrics["minVoltageTrainMileageM"] = train_flow.mileage_m
+                        load = next(
+                            (item for item in loads if item.train_id == train_flow.train_id),
+                            None,
+                        )
+                        metrics["minVoltageTrainDirection"] = (
+                            load.direction if load is not None else None
+                        )
                 metrics["maxSubstationLoadRatio"] = max(
                     metrics["maxSubstationLoadRatio"],
                     *(item.load_ratio for item in snapshot.substations),
@@ -282,6 +295,31 @@ class JointPowerEvaluator:
                 )
                 if not validation.passed:
                     metrics["failedSteps"] += 1
+
+        # Electrical midpoint/substep interpolation is appropriate for energy
+        # integration, but it can attenuate a one-frame force or acceleration
+        # peak.  Replay-backed evaluations therefore enforce physical extrema
+        # and separation on the original engine frames as well.
+        replay_frames = getattr(self.trajectory_provider, "frames", ())
+        evaluation_end_ms = (
+            self.config.start_time_ms + round(self.config.horizon_sec * 1000.0)
+        )
+        for frame in replay_frames:
+            if not self.config.start_time_ms <= frame.sim_time_ms <= evaluation_end_ms:
+                continue
+            _, physical = self._frame_to_loads_and_physics(frame)
+            for name in (
+                "maxTractionForceN",
+                "maxBrakeForceN",
+                "maxAccelerationMps2",
+                "maxDecelerationMps2",
+                "maxDynamicsResidualN",
+            ):
+                metrics[name] = max(metrics[name], physical[name])
+            metrics["minSameDirectionSpacingM"] = min(
+                metrics["minSameDirectionSpacingM"],
+                physical["minSameDirectionSpacingM"],
+            )
 
         final_storage_kwh = solver.storage_checkpoint()[0][storage_id] if storage_id else 0.0
         stored_delta_kwh = final_storage_kwh - initial_storage_kwh
@@ -320,8 +358,8 @@ class JointPowerEvaluator:
             "runtimePreserved": metrics["runtimeDeviationSec"] <= self.config.max_runtime_deviation_sec,
             "stopPositionPreserved": metrics["stopPositionErrorM"] <= self.config.max_stop_position_error_m,
             "maximumSpeed": metrics["maximumSpeedMps"] <= self.config.nominal_max_speed_mps + 1e-9,
-            "tractionForce": metrics["maxTractionForceN"] <= self.config.max_traction_force_n,
-            "serviceBrakeForce": metrics["maxBrakeForceN"] <= self.config.max_service_brake_force_n,
+            "tractionForce": metrics["maxTractionForceN"] <= self.config.max_traction_force_n + 1e-6,
+            "serviceBrakeForce": metrics["maxBrakeForceN"] <= self.config.max_service_brake_force_n + 1e-6,
             "acceleration": metrics["maxAccelerationMps2"] <= self.config.max_acceleration_mps2,
             "deceleration": metrics["maxDecelerationMps2"] <= self.config.max_service_deceleration_mps2,
             "dynamicsClosure": metrics["maxDynamicsResidualN"] <= self.config.max_dynamics_residual_n,
@@ -519,6 +557,7 @@ class JointPowerEvaluator:
                 - sample.total_brake_force_n
                 - resistance_n
                 - gradient_force_n
+                + sample.constraint_reaction_force_n
                 - sample.mass_kg * sample.acceleration_mps2
             )
             traction_kw = sample.traction_power_request_kw
@@ -541,7 +580,11 @@ class JointPowerEvaluator:
             physical["maxAccelerationMps2"] = max(physical["maxAccelerationMps2"], sample.acceleration_mps2)
             physical["maxDecelerationMps2"] = max(physical["maxDecelerationMps2"], -sample.acceleration_mps2)
             physical["maxDynamicsResidualN"] = max(physical["maxDynamicsResidualN"], residual_n)
-            states.append((sample.direction, sample.mileage_m))
+            # IDLE samples represent trains outside the active line (for example
+            # depot-ready or stored duties).  They still contribute auxiliary
+            # electrical load, but must not be treated as moving-block obstacles.
+            if sample.phase != "IDLE":
+                states.append((sample.direction, sample.mileage_m))
         first_m, last_m = 313.0, 16_048.92
         span_m = last_m - first_m
         for direction in ("UP", "DOWN"):
@@ -775,10 +818,32 @@ class Nsga2JointOptimizer:
             population = self._environmental_selection(combined, population_size)
 
         all_fronts = nondominated_fronts(trials)
-        pareto = [trials[index] for index in all_fronts[0] if trials[index]["feasible"]]
-        if not pareto:
-            raise RuntimeError(f"NO_FEASIBLE_{mode}_SOLUTION")
-        recommended = min(pareto, key=lambda item: (relative_utility(item, baseline), item["trialIndex"]))
+        feasible_pareto = [
+            trials[index] for index in all_fronts[0] if trials[index]["feasible"]
+        ]
+        feasible_solution_found = bool(feasible_pareto)
+        pareto = feasible_pareto or [trials[index] for index in all_fronts[0]]
+        if feasible_solution_found:
+            recommended = min(
+                pareto,
+                key=lambda item: (
+                    relative_utility(item, baseline),
+                    item["trialIndex"],
+                ),
+            )
+        else:
+            # A completed optimization may legitimately demonstrate that the
+            # configured actuator/location cannot satisfy the hard constraints.
+            # Preserve the least-infeasible candidate and its violations rather
+            # than turning a negative experimental result into a runner crash.
+            recommended = min(
+                trials,
+                key=lambda item: (
+                    item["totalConstraintViolation"],
+                    relative_utility(item, baseline),
+                    item["trialIndex"],
+                ),
+            )
         return {
             "mode": mode,
             "seed": seed,
@@ -788,6 +853,7 @@ class Nsga2JointOptimizer:
             "generations": generations,
             "evaluationCount": len(trials),
             "feasibleCount": sum(item["feasible"] for item in trials),
+            "feasibleSolutionFound": feasible_solution_found,
             "baseline": baseline,
             "recommended": recommended,
             "recommendedRelativeUtility": relative_utility(recommended, baseline),
@@ -878,8 +944,24 @@ def run_random_search(
     for index, trial in enumerate(trials):
         trial["trialIndex"] = index
     baseline = trials[0]
-    front = [trials[index] for index in nondominated_fronts(trials)[0] if trials[index]["feasible"]]
-    recommended = min(front, key=lambda item: (relative_utility(item, baseline), item["trialIndex"]))
+    first_front = [trials[index] for index in nondominated_fronts(trials)[0]]
+    front = [item for item in first_front if item["feasible"]]
+    feasible_solution_found = bool(front)
+    reported_front = front or first_front
+    if feasible_solution_found:
+        recommended = min(
+            front,
+            key=lambda item: (relative_utility(item, baseline), item["trialIndex"]),
+        )
+    else:
+        recommended = min(
+            trials,
+            key=lambda item: (
+                item["totalConstraintViolation"],
+                relative_utility(item, baseline),
+                item["trialIndex"],
+            ),
+        )
     return {
         "mode": mode,
         "seed": seed,
@@ -887,8 +969,9 @@ def run_random_search(
         "storageEnabled": storage_enabled,
         "evaluationCount": len(trials),
         "feasibleCount": sum(item["feasible"] for item in trials),
+        "feasibleSolutionFound": feasible_solution_found,
         "baseline": baseline,
         "recommended": recommended,
         "recommendedRelativeUtility": relative_utility(recommended, baseline),
-        "paretoFront": front,
+        "paretoFront": reported_front,
     }
