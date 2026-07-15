@@ -10,7 +10,7 @@ import math
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -71,6 +71,24 @@ CRUISING = "CRUISING"           # 区间巡航
 IDLE = "IDLE"                   # 尚未启动或已完成
 
 
+def _accumulate_unclamped_path_position(
+    previous_bounded_position_m: float,
+    previous_unclamped_position_m: float,
+    integration_start_position_m: float,
+    candidate_position_m: float,
+    target_position_m: float,
+) -> float:
+    """Keep physical overrun while the topology-facing position is clamped."""
+    if (
+        previous_bounded_position_m >= target_position_m - 1e-9
+        and previous_unclamped_position_m >= target_position_m - 1e-9
+    ):
+        return previous_unclamped_position_m + (
+            candidate_position_m - integration_start_position_m
+        )
+    return candidate_position_m
+
+
 @dataclass
 class SimTrainState:
     """鍒楄溅瀹炴椂鐘舵€?"""
@@ -125,7 +143,14 @@ class SimTrainState:
     target_speed_mps: float = 0.0
     estimated_run_time_s: float = 0.0   # 棰勮鍖洪棿杩愯鏃堕棿锛岀敱閫熷害鏇茬嚎绉垎寰楀嚭
     path_position_m: float = 0.0
+    unclamped_path_position_m: float = 0.0
     path_total_length_m: float = 0.0
+    last_arrival_raw_stop_error_m: float | None = None
+    last_arrival_speed_mps: float | None = None
+    last_arrival_unclamped_path_position_m: float | None = None
+    last_arrival_constraint_reaction_force_n: float | None = None
+    last_arrival_sim_time_ms: int | None = None
+    last_arrival_ato_config_fingerprint: str | None = None
     current_platform_id: int | None = None
     current_segment_id: int | None = None
     current_segment_offset_m: float = 0.0
@@ -252,7 +277,26 @@ class SimTrainState:
             "targetSpeedMps": round(self.target_speed_mps, 2),
             "estimatedRunTimeS": round(self.estimated_run_time_s, 1),
             "pathPositionM": round(self.path_position_m, 1),
+            "unclampedPathPositionM": round(self.unclamped_path_position_m, 6),
             "pathTotalLengthM": round(self.path_total_length_m, 1),
+            "lastArrivalRawStopErrorM": (
+                round(self.last_arrival_raw_stop_error_m, 6)
+                if self.last_arrival_raw_stop_error_m is not None else None
+            ),
+            "lastArrivalSpeedMps": (
+                round(self.last_arrival_speed_mps, 6)
+                if self.last_arrival_speed_mps is not None else None
+            ),
+            "lastArrivalUnclampedPathPositionM": (
+                round(self.last_arrival_unclamped_path_position_m, 6)
+                if self.last_arrival_unclamped_path_position_m is not None else None
+            ),
+            "lastArrivalConstraintReactionN": (
+                round(self.last_arrival_constraint_reaction_force_n, 3)
+                if self.last_arrival_constraint_reaction_force_n is not None else None
+            ),
+            "lastArrivalSimTimeMs": self.last_arrival_sim_time_ms,
+            "lastArrivalAtoConfigFingerprint": self.last_arrival_ato_config_fingerprint,
             "currentPlatformId": self.current_platform_id,
             "currentSegmentId": self.current_segment_id,
             "currentSegmentOffsetM": round(self.current_segment_offset_m, 1),
@@ -863,6 +907,17 @@ class SimulationEngine:
         if vehicle_config is not None:
             self._vehicle_config_by_train[train_id] = vehicle_config
             train.mass_kg = vehicle_config.mass_kg
+
+        # Start the first exact profile while the user is still preparing the
+        # run.  Previously a manually added train waited for the first running
+        # tick, making optimizer wall time look like extra station dwell.
+        if train._path_plan is not None:
+            limit_source_idx = station_index if direction == "UP" else next_index
+            limit_kmh = int(
+                self._station_list[limit_source_idx].get("speedLimitToNextKmh", 80)
+            )
+            train.permitted_speed_mps = (limit_kmh if limit_kmh > 0 else 80) / 3.6
+            train._profile_triggered = self._prime_path_profile(train, train._path_plan)
 
         self._train_power_geometry(train, self._make_vehicle_config(train_id, train.onboard_pax))
         self.trains.append(train)
@@ -1983,7 +2038,14 @@ class SimulationEngine:
             # provides, so keep the train at the platform until the exact
             # profile is installed instead of departing on the fallback curve.
             if self._ato_config.use_dynamic_programming_profile and not train._profile_triggered:
+                train.door_notice = "WAITING_SPEED_PROFILE"
+                train.last_dispatch_action = "HOLD"
+                train.last_dispatch_reason = "DCDP_PROFILE_PENDING"
                 return True, None
+            if train.last_dispatch_reason == "DCDP_PROFILE_PENDING":
+                train.door_notice = "READY_TO_DEPART"
+                train.last_dispatch_action = "FOLLOW_TIMETABLE"
+                train.last_dispatch_reason = "DCDP_PROFILE_READY"
             train.estimated_run_time_s = self._profile_run_times.get(train.train_id, 0.0)
             if (
                 train.duty_id is not None
@@ -2079,6 +2141,13 @@ class SimulationEngine:
             )
 
             path_plan = prepared.path_plan
+            train.unclamped_path_position_m = _accumulate_unclamped_path_position(
+                train.path_position_m,
+                train.unclamped_path_position_m,
+                prepared.state.position_m,
+                result.position_m,
+                path_plan.total_length_m,
+            )
             new_position_m = min(max(0.0, result.position_m), path_plan.total_length_m)
             next_limit_mps = path_plan.speed_limit_at(new_position_m, train.permitted_speed_mps)
             upper_speed_bound_mps = min(
@@ -2444,6 +2513,13 @@ class SimulationEngine:
                 gradient_force_n=gradient_force_n,
             )
 
+            train.unclamped_path_position_m = _accumulate_unclamped_path_position(
+                train.path_position_m,
+                train.unclamped_path_position_m,
+                state.position_m,
+                result.position_m,
+                path_plan.total_length_m,
+            )
             new_position_m = min(max(0.0, result.position_m), path_plan.total_length_m)
             next_limit_mps = path_plan.speed_limit_at(new_position_m, train.permitted_speed_mps)
             train.speed_mps = min(max(0.0, result.speed_mps), next_limit_mps)
@@ -2524,6 +2600,26 @@ class SimulationEngine:
             if completed_plan is not None
             else None
         )
+        if completed_plan is not None:
+            raw_position_m = (
+                train.unclamped_path_position_m
+                if train.unclamped_path_position_m > 0.0
+                else train.path_position_m
+            )
+            train.last_arrival_raw_stop_error_m = raw_position_m - completed_plan.total_length_m
+            train.last_arrival_speed_mps = train.speed_mps
+            train.last_arrival_unclamped_path_position_m = raw_position_m
+            train.last_arrival_constraint_reaction_force_n = train.constraint_reaction_force_n
+            train.last_arrival_sim_time_ms = sim_time_ms
+            config_payload = json.dumps(
+                asdict(self._ato_config),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            train.last_arrival_ato_config_fingerprint = hashlib.sha256(
+                config_payload.encode("utf-8")
+            ).hexdigest()
         train.speed_mps = 0.0
         # Keep the completed path through the post-movement CI scan. Clearing
         # it here made the train disappear from its destination detector before
@@ -3067,19 +3163,10 @@ class SimulationEngine:
             path_plan=path_plan,
         )
         if self._ato_config.use_dynamic_programming_profile:
-            if train.duty_id is not None and self.scenario.operation_plan.enabled:
-                # A frozen reference load makes the planned DCDP curve and the
-                # executed curve identical across all duties. Passenger mass
-                # still affects the force/power model at every physical tick.
-                load_bucket_pax = self.scenario.operation_plan.profile_reference_load_pax
-            else:
-                load_bucket_pax = int((max(0, train.onboard_pax) + 25) // 50 * 50)
-            vehicle_config = self._make_vehicle_config(train.train_id, load_bucket_pax)
-            request = build_speed_profile_request(
+            request = self._build_runtime_profile_request(
+                train,
                 path_plan,
                 train.permitted_speed_mps,
-                self._ato_config,
-                vehicle_config,
             )
             profile = self.speed_profile_service.request(request)
             if profile is None:
@@ -3089,7 +3176,68 @@ class SimulationEngine:
             ato.install_profile(state, target, profile)
         train.target_speed_mps = ato.target_speed_mps(state, target)
         self._store_path_profile(train, path_plan, ato)
+        self._prewarm_following_interval_profile(train, path_plan)
         return True
+
+    def _build_runtime_profile_request(
+        self,
+        train: SimTrainState,
+        path_plan: PathPlan,
+        permitted_speed_mps: float,
+    ) -> SpeedProfileRequest:
+        """Build a reusable nominal-load plan; actual load remains in dynamics."""
+        reference_load_pax = self.scenario.operation_plan.profile_reference_load_pax
+        vehicle_config = self._make_vehicle_config(train.train_id, reference_load_pax)
+        return build_speed_profile_request(
+            path_plan,
+            permitted_speed_mps,
+            self._ato_config,
+            vehicle_config,
+        )
+
+    def _prewarm_following_interval_profile(
+        self,
+        train: SimTrainState,
+        current_path_plan: PathPlan,
+    ) -> str | None:
+        """Queue the next interval while the train is still running this one."""
+        if not self._ato_config.use_dynamic_programming_profile:
+            return None
+        destination_idx = train._path_destination_station_index
+        origin_idx = train._path_origin_station_index
+        if (
+            destination_idx is None
+            or origin_idx is None
+            or abs(destination_idx - origin_idx) != 1
+            or train.turnback_state not in {None, "COMPLETED"}
+            or train._path_plan is not current_path_plan
+        ):
+            return None
+        following_idx = destination_idx + (1 if train.direction == "UP" else -1)
+        if not 0 <= following_idx < len(self._station_list):
+            return None
+        try:
+            route_plan = self._route_chain_plan_for_station_pair(
+                destination_idx,
+                following_idx,
+                int(current_path_plan.destination_platform_id),
+                train_length_m=train.train_length_m,
+            )
+        except ValueError:
+            return None
+        if route_plan is None:
+            return None
+        limit_source_idx = destination_idx if train.direction == "UP" else following_idx
+        limit_kmh = int(self._station_list[limit_source_idx].get("speedLimitToNextKmh", 80))
+        if limit_kmh <= 0:
+            limit_kmh = 80
+        request = self._build_runtime_profile_request(
+            train,
+            route_plan.path_plan,
+            limit_kmh / 3.6,
+        )
+        self.speed_profile_service.request(request)
+        return request.cache_key
 
     def _store_path_profile(
         self,
@@ -4486,6 +4634,11 @@ class SimulationEngine:
             "plannedTimeMs": planned_ms,
             "actualTimeMs": sim_time_ms,
             "deviationSec": train.schedule_deviation_sec,
+            "rawStopErrorM": train.last_arrival_raw_stop_error_m,
+            "arrivalSpeedMps": train.last_arrival_speed_mps,
+            "unclampedPathPositionM": train.last_arrival_unclamped_path_position_m,
+            "arrivalConstraintReactionN": train.last_arrival_constraint_reaction_force_n,
+            "atoConfigFingerprint": train.last_arrival_ato_config_fingerprint,
         })
 
     def _activate_return_service(self, train: SimTrainState, sim_time_ms: int) -> None:

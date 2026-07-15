@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from app.core.engine import SimulationEngine
+from app.core.engine import SimulationEngine, _accumulate_unclamped_path_position
 from app.domain.interlocking.models import RouteRequest
 from app.domain.signal.models import TrainState as InterlockingTrainState
 
@@ -34,6 +34,13 @@ def load_engine(scenario_path: Path = INTERACTIVE_SCENARIO) -> SimulationEngine:
 
 
 class EngineStateContractTests(unittest.TestCase):
+    def test_unclamped_arrival_position_accumulates_boundary_overrun(self) -> None:
+        first = _accumulate_unclamped_path_position(99.8, 99.8, 99.8, 100.2, 100.0)
+        second = _accumulate_unclamped_path_position(100.0, first, 100.0, 100.3, 100.0)
+
+        self.assertAlmostEqual(first, 100.2)
+        self.assertAlmostEqual(second, 100.5)
+
     def test_start_is_idempotent_while_running(self) -> None:
         engine = load_engine(SINGLE_SCENARIO)
         self.assertEqual(engine.start(), "STARTED")

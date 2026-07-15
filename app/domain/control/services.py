@@ -81,7 +81,11 @@ class ATOController:
 
         creep_entry_allowed = (
             distance_to_target_m <= creep_handover_distance_m
-            and state.speed_mps <= self.config.creep_speed_threshold_mps
+            # Creep is a recovery mode for a train that has stopped short.
+            # Entering it while the train is still rolling can release the
+            # terminal brake just outside the tolerance boundary and then
+            # reapply it a few samples later when the train coasts inside.
+            and state.speed_mps <= self.config.stop_speed_threshold_mps
         )
         if self._creep_mode_active or creep_entry_allowed:
             return self._creep_command(state, target)

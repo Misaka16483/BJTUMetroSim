@@ -5,7 +5,12 @@ import math
 from typing import TYPE_CHECKING
 
 from app.domain.vehicle.models import CommandSource, ControlCommand, TrainState, VehicleConfig
-from app.domain.vehicle.services import BrakeBlendService, SimpleVehicleModel, TractionDriveModel
+from app.domain.vehicle.services import (
+    BrakeBlendService,
+    SimpleVehicleModel,
+    TractionDriveModel,
+    VehicleForceDemand,
+)
 
 if TYPE_CHECKING:
     from app.domain.line.services import PathPlan
@@ -61,15 +66,17 @@ class OptimizedSpeedProfile:
         return self.points[-1]
 
 
-@dataclass(frozen=True)
+@dataclass
 class _SearchNode:
     state: TrainState
     cost_kwh: float
-    path: tuple[SpeedProfilePoint, ...]
+    point: SpeedProfilePoint
+    parent: _SearchNode | None = None
     control_penalty: float = 0.0
     mode_group: str = "NEUTRAL"
     mode_hold_steps: int = 0
     terminal_braking_started: bool = False
+    ranking_score: float = math.inf
 
 
 def stopping_target_speed_mps(
@@ -147,7 +154,7 @@ def optimize_speed_profile_dcdp(
     initial = TrainState(config.train_id, position_m=0.0, speed_mps=0.0, acceleration_mps2=0.0, sim_time_s=0.0)
     initial_point = SpeedProfilePoint(0.0, 0.0, 0.0, "START", 0.0, 0.0, 0.0)
     states: dict[tuple[object, ...], _SearchNode] = {
-        (0, 0): _SearchNode(state=initial, cost_kwh=0.0, path=(initial_point,))
+        (0, 0): _SearchNode(state=initial, cost_kwh=0.0, point=initial_point)
     }
     terminal_candidates: list[_SearchNode] = []
     reference_profile = _reference_braking_profile(
@@ -162,16 +169,25 @@ def optimize_speed_profile_dcdp(
         remaining_stages = stages - stage
         for node in states.values():
             gradient_force_n = _gradient_force_n(node.state.position_m, path_plan, config)
+            traction_capacity_n = drive.traction_capacity_n(node.state.speed_mps)
+            electric_brake_capacity_n = drive.electric_brake_capacity_n(node.state.speed_mps)
             for mode, command in _candidate_commands(
                 config.train_id,
                 node.state.speed_mps,
                 config,
                 gradient_force_n,
+                vehicle=vehicle,
+                traction_capacity_n=traction_capacity_n,
             ):
                 mode_group = _command_group(command)
                 if not _transition_allowed(node, mode_group):
                     continue
-                demand = drive.demand(command, node.state.speed_mps)
+                demand = _demand_from_capacities(
+                    command,
+                    config,
+                    traction_capacity_n,
+                    electric_brake_capacity_n,
+                )
                 blend = BrakeBlendService.blend(demand, 1.0)
                 resistance_force_n = vehicle.running_resistance_n(
                     node.state.speed_mps,
@@ -197,7 +213,14 @@ def optimize_speed_profile_dcdp(
                 # cap cannot masquerade as a physically valid cruise state.
                 if raw_next_speed_mps > local_speed_limit_mps + 1e-6:
                     continue
-                next_state = vehicle.step(node.state, command, dt_s=dt_s, gradient_force_n=gradient_force_n)
+                next_state = vehicle.step_with_forces(
+                    node.state,
+                    traction_force_n=demand.traction_force_n,
+                    brake_force_n=blend.total_brake_force_n,
+                    electric_brake_force_n=blend.electric_brake_force_n,
+                    dt_s=dt_s,
+                    gradient_force_n=gradient_force_n,
+                )
                 local_speed_limit_mps = _speed_limit_at_position(next_state.position_m, permitted_speed_mps, path_plan)
                 if next_state.speed_mps > local_speed_limit_mps + 1e-6:
                     continue
@@ -255,7 +278,8 @@ def optimize_speed_profile_dcdp(
                 candidate = _SearchNode(
                     state=next_state,
                     cost_kwh=next_state.net_energy_kwh,
-                    path=node.path + (point,),
+                    point=point,
+                    parent=node,
                     control_penalty=node.control_penalty + _transition_penalty(node, next_state, mode_group),
                     mode_group=mode_group,
                     mode_hold_steps=mode_hold_steps,
@@ -270,20 +294,15 @@ def optimize_speed_profile_dcdp(
                 ):
                     terminal_candidates.append(candidate)
                     continue
-                current = next_states.get(key)
-                if current is None or _state_score(
+                candidate.ranking_score = _state_score(
                     candidate,
                     effective_target_position_m,
                     stages,
                     stage + 1,
                     reference_profile,
-                ) < _state_score(
-                    current,
-                    effective_target_position_m,
-                    stages,
-                    stage + 1,
-                    reference_profile,
-                ):
+                )
+                current = next_states.get(key)
+                if current is None or candidate.ranking_score < current.ranking_score:
                     next_states[key] = candidate
 
         if terminal_candidates and stage + 1 >= max(1, int(requested_stages * 0.75)):
@@ -309,7 +328,11 @@ def optimize_speed_profile_dcdp(
             scheduled_run_time_s,
         )
         return OptimizedSpeedProfile(
-            points=_with_terminal_point(best.path, effective_target_position_m, best.state.sim_time_s),
+            points=_with_terminal_point(
+                _reconstruct_path(best),
+                effective_target_position_m,
+                best.state.sim_time_s,
+            ),
             target_position_m=effective_target_position_m,
             permitted_speed_mps=permitted_speed_mps,
             scheduled_run_time_s=round(best.state.sim_time_s, 6),
@@ -373,17 +396,24 @@ def _candidate_commands(
     speed_mps: float,
     config: VehicleConfig,
     gradient_force_n: float = 0.0,
+    *,
+    vehicle: SimpleVehicleModel | None = None,
+    traction_capacity_n: float | None = None,
 ) -> tuple[tuple[str, ControlCommand], ...]:
     cruise_traction_percent = 0.0
     cruise_brake_percent = 0.0
     if speed_mps > config.stop_speed_threshold_mps:
-        vehicle = SimpleVehicleModel(config)
-        drive = TractionDriveModel(config)
+        vehicle = vehicle or SimpleVehicleModel(config)
+        traction_capacity_n = (
+            traction_capacity_n
+            if traction_capacity_n is not None
+            else TractionDriveModel(config).traction_capacity_n(speed_mps)
+        )
         hold_force_n = vehicle.running_resistance_n(speed_mps) + gradient_force_n
         if hold_force_n >= 0.0:
             cruise_traction_percent = min(
                 100.0,
-                hold_force_n / max(drive.traction_capacity_n(speed_mps), 1.0) * 100.0,
+                hold_force_n / max(traction_capacity_n, 1.0) * 100.0,
             )
         else:
             cruise_brake_percent = min(
@@ -479,6 +509,39 @@ def _state_score(
         + node.control_penalty
         + energy_tiebreaker
     )
+
+
+def _demand_from_capacities(
+    command: ControlCommand,
+    config: VehicleConfig,
+    traction_capacity_n: float,
+    electric_brake_capacity_n: float,
+) -> VehicleForceDemand:
+    """Match TractionDriveModel.demand while sharing capacity interpolation per node."""
+    if command.emergency_brake:
+        return VehicleForceDemand(0.0, config.emergency_brake_force_n, 0.0)
+    traction_force_n = traction_capacity_n * command.traction_percent / 100.0
+    total_brake_force_n = config.max_service_brake_force_n * command.brake_percent / 100.0
+    candidate_electric_brake_force_n = min(
+        total_brake_force_n,
+        electric_brake_capacity_n * command.brake_percent / 100.0,
+    )
+    return VehicleForceDemand(
+        traction_force_n,
+        total_brake_force_n,
+        candidate_electric_brake_force_n,
+    )
+
+
+def _reconstruct_path(node: _SearchNode) -> tuple[SpeedProfilePoint, ...]:
+    """Materialize the winning path once instead of copying it for every DP candidate."""
+    reversed_points: list[SpeedProfilePoint] = []
+    current: _SearchNode | None = node
+    while current is not None:
+        reversed_points.append(current.point)
+        current = current.parent
+    reversed_points.reverse()
+    return tuple(reversed_points)
 
 
 def _terminal_score(

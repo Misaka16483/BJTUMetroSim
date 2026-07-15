@@ -70,6 +70,28 @@ class SpeedProfileRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(first.cache_key, second.cache_key)
 
+    def test_shared_capacity_demand_matches_vehicle_drive_model(self) -> None:
+        from app.domain.control.speed_profile import (
+            _candidate_commands,
+            _demand_from_capacities,
+        )
+        from app.domain.vehicle.services import TractionDriveModel
+
+        config = VehicleConfig(train_id="T1")
+        drive = TractionDriveModel(config)
+        for speed_mps in (0.0, 8.0, 20.0):
+            traction_capacity_n = drive.traction_capacity_n(speed_mps)
+            electric_brake_capacity_n = drive.electric_brake_capacity_n(speed_mps)
+            for _, command in _candidate_commands("T1", speed_mps, config):
+                expected = drive.demand(command, speed_mps)
+                actual = _demand_from_capacities(
+                    command,
+                    config,
+                    traction_capacity_n,
+                    electric_brake_capacity_n,
+                )
+                self.assertEqual(actual, expected)
+
     def test_three_train_first_tick_is_non_blocking_and_deduplicated(self) -> None:
         engine = load_engine()
         try:
@@ -106,6 +128,89 @@ class SpeedProfileRuntimeTests(unittest.TestCase):
                         engine.export_speed_profile_meta(train.train_id)["source"],
                         "DCDP_PENDING",
                     )
+        finally:
+            engine.speed_profile_service.shutdown()
+
+    def test_manual_train_primes_first_profile_when_added(self) -> None:
+        engine = load_engine()
+        try:
+            with patch.object(engine, "_prime_path_profile", return_value=False) as prime:
+                result = engine.add_train({
+                    "trainId": "T-EAGER",
+                    "initialStationCode": "GGZ",
+                    "direction": "UP",
+                    "initialLoadPax": 100,
+                })
+
+            self.assertTrue(result["ok"])
+            prime.assert_called_once()
+            self.assertEqual(engine.clock.current_tick, 0)
+        finally:
+            engine.speed_profile_service.shutdown()
+
+    def test_runtime_profile_key_uses_reference_load_not_live_passenger_count(self) -> None:
+        engine = load_engine()
+        try:
+            with patch.object(engine, "_prime_path_profile", return_value=False):
+                result = engine.add_train({
+                    "trainId": "T-REFERENCE",
+                    "initialStationCode": "GGZ",
+                    "direction": "UP",
+                    "initialLoadPax": 50,
+                })
+            self.assertTrue(result["ok"])
+            train = engine.trains[-1]
+            assert train._path_plan is not None
+            first = engine._build_runtime_profile_request(
+                train,
+                train._path_plan,
+                train.permitted_speed_mps,
+            )
+            train.onboard_pax = 1_200
+            second = engine._build_runtime_profile_request(
+                train,
+                train._path_plan,
+                train.permitted_speed_mps,
+            )
+
+            self.assertEqual(first.cache_key, second.cache_key)
+            expected_mass = engine._make_vehicle_config(
+                train.train_id,
+                engine.scenario.operation_plan.profile_reference_load_pax,
+            ).mass_kg
+            self.assertEqual(first.vehicle_config.mass_kg, expected_mass)
+        finally:
+            engine.speed_profile_service.shutdown()
+
+    def test_installed_profile_prewarm_queues_following_interval(self) -> None:
+        engine = load_engine()
+        try:
+            with patch.object(engine, "_prime_path_profile", return_value=False):
+                result = engine.add_train({
+                    "trainId": "T-LOOKAHEAD",
+                    "initialStationCode": "GGZ",
+                    "direction": "UP",
+                    "initialLoadPax": 100,
+                })
+            self.assertTrue(result["ok"])
+            train = engine.trains[-1]
+            assert train._path_plan is not None
+
+            with patch.object(engine.speed_profile_service, "request", return_value=None) as request:
+                cache_key = engine._prewarm_following_interval_profile(
+                    train,
+                    train._path_plan,
+                )
+
+            self.assertIsNotNone(cache_key)
+            request.assert_called_once()
+            queued = request.call_args.args[0]
+            self.assertEqual(queued.cache_key, cache_key)
+            self.assertEqual(
+                queued.path_plan.origin_platform_id,
+                train._path_plan.destination_platform_id,
+            )
+            self.assertNotEqual(queued.path_plan.cache_key(), train._path_plan.cache_key())
         finally:
             engine.speed_profile_service.shutdown()
 

@@ -8,6 +8,12 @@ function phaseLabel(phase: string): string {
   return map[phase] ?? phase;
 }
 
+function trainPhaseLabel(train: { phase: string; lastDispatchReason?: string }): string {
+  return train.lastDispatchReason === 'DCDP_PROFILE_PENDING'
+    ? '曲线准备'
+    : phaseLabel(train.phase);
+}
+
 function phaseColor(phase: string): string {
   const map: Record<string, string> = {
     IDLE: '#484f58', DWELLING: '#58a6ff', DEPARTING: '#f59e0b', CRUISING: '#30d158',
@@ -71,7 +77,7 @@ export default function FullLineTrainPanel() {
                         </span>
                         <span className="rounded px-1 py-px text-[8px]"
                           style={{ color: phaseColor(t.phase), background: `${phaseColor(t.phase)}15` }}>
-                          {phaseLabel(t.phase)}
+                          {trainPhaseLabel(t)}
                         </span>
                       </div>
                     </div>

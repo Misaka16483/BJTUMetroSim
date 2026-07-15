@@ -107,6 +107,7 @@ function crowdingMeta(level: SimStationInfo['crowdingLevel']) {
 
 function trainSignalText(train: SimTrainState) {
   const side = train.doorSide === 'LEFT' ? '左门' : '右门';
+  if (train.lastDispatchReason === 'DCDP_PROFILE_PENDING') return '车门已锁闭，等待速度曲线';
   if (train.doorNotice === 'PREPARE_OPEN') return `准备开启${side}`;
   if (train.doorNotice === 'PREPARE_CLOSE') return '准备关门';
   if (train.doorState === 'OPEN') return `${side}开启，上下客中`;
@@ -118,6 +119,7 @@ function trainSignalText(train: SimTrainState) {
 function trainLocationText(train: SimTrainState) {
   const current = train.currentStation || train.currentStationCode;
   const next = train.nextStation || train.nextStationCode;
+  if (train.lastDispatchReason === 'DCDP_PROFILE_PENDING') return `发车准备：${current} → ${next}`;
   if (train.phase === 'DWELLING') return `停靠：${current}`;
   if (train.phase === 'DEPARTING') return `驶离：${current}`;
   return `运行：${current} → ${next}`;
@@ -363,11 +365,12 @@ export default function StationPassengerView() {
             const loadPercent = Math.round(train.loadFactor * 100);
             const loadColor = loadPercent >= 100 ? '#ef4444' : loadPercent >= 80 ? '#f59e0b' : UP;
             const isDwelling = train.phase === 'DWELLING';
-            const signalColor = train.doorState === 'OPEN' ? UP : train.doorNotice === 'PREPARE_OPEN' || train.doorNotice === 'PREPARE_CLOSE' ? '#f59e0b' : '#94a3b8';
+            const isProfilePending = train.lastDispatchReason === 'DCDP_PROFILE_PENDING';
+            const signalColor = isProfilePending ? '#c084fc' : train.doorState === 'OPEN' ? UP : train.doorNotice === 'PREPARE_OPEN' || train.doorNotice === 'PREPARE_CLOSE' ? '#f59e0b' : '#94a3b8';
             return <div key={train.trainId} className="border-t py-2 text-[10px]" style={{ contentVisibility: 'auto', containIntrinsicSize: '0 104px', borderColor: 'rgba(255,255,255,.06)' }}>
               <div className="flex justify-between"><span style={{ color: '#d7e0eb' }}>{train.trainId} · {train.direction === 'UP' ? '上行' : '下行'}</span><b style={{ color: loadColor }}>{loadPercent}%</b></div>
               <div className="mt-1 h-1.5 overflow-hidden rounded" style={{ background: 'rgba(255,255,255,.08)' }}><div className="h-full rounded" style={{ width: `${Math.min(100, Math.max(0, loadPercent))}%`, background: loadColor }} /></div>
-              <div className="mt-1 flex justify-between font-mono" style={{ color: '#94a3b8' }}><span>{train.onboardPax}/{train.capacityPax} 人</span><span>{isDwelling ? `停站 ${Math.ceil(train.dwellRemainingSec)}s` : train.phase}</span></div>
+              <div className="mt-1 flex justify-between font-mono" style={{ color: '#94a3b8' }}><span>{train.onboardPax}/{train.capacityPax} 人</span><span>{isProfilePending ? '速度曲线准备中' : isDwelling ? `停站 ${Math.ceil(train.dwellRemainingSec)}s` : train.phase}</span></div>
               <div className="mt-1 truncate" style={{ color: isDwelling ? '#d7e0eb' : '#94a3b8' }}>{trainLocationText(train)}</div>
               <div className="mt-1" style={{ color: signalColor }}>信号：{trainSignalText(train)}</div>
               <PassengerExchangeMetrics train={train} />
@@ -415,11 +418,11 @@ export default function StationPassengerView() {
           <small style={{ color: '#94a3b8' }}>本站停站列车</small>
           {focusedTrains.length === 0 ? <p className="mt-2 text-[10px]" style={{ color: '#64748b' }}>暂无列车停站；候车人数由主仿真持续累积。</p> : focusedTrains.map((train) => <div key={train.trainId} className="mt-2 border-t pt-2 text-[10px]" style={{ color: '#d7e0eb', borderColor: 'rgba(255,255,255,.06)' }}>
             <div>{train.trainId}　{Math.round(train.loadFactor * 100)}%　{train.onboardPax}/{train.capacityPax}</div>
-            <div className="mt-1" style={{ color: train.doorState === 'OPEN' ? UP : train.doorNotice === 'PREPARE_OPEN' || train.doorNotice === 'PREPARE_CLOSE' ? '#f59e0b' : '#94a3b8' }}>
-              {train.doorNotice === 'PREPARE_OPEN' ? `模拟信号：准备开启${train.doorSide === 'LEFT' ? '左门' : '右门'}` : train.doorNotice === 'PREPARE_CLOSE' ? '模拟信号：准备关门' : train.doorState === 'OPEN' ? `模拟信号：${train.doorSide === 'LEFT' ? '左门' : '右门'}开启` : train.doorState === 'CLOSING' ? '模拟信号：正在关门' : '车门关闭'}
+            <div className="mt-1" style={{ color: train.lastDispatchReason === 'DCDP_PROFILE_PENDING' ? '#c084fc' : train.doorState === 'OPEN' ? UP : train.doorNotice === 'PREPARE_OPEN' || train.doorNotice === 'PREPARE_CLOSE' ? '#f59e0b' : '#94a3b8' }}>
+              {train.lastDispatchReason === 'DCDP_PROFILE_PENDING' ? '发车条件：速度曲线准备中' : train.doorNotice === 'PREPARE_OPEN' ? `模拟信号：准备开启${train.doorSide === 'LEFT' ? '左门' : '右门'}` : train.doorNotice === 'PREPARE_CLOSE' ? '模拟信号：准备关门' : train.doorState === 'OPEN' ? `模拟信号：${train.doorSide === 'LEFT' ? '左门' : '右门'}开启` : train.doorState === 'CLOSING' ? '模拟信号：正在关门' : '车门关闭'}
             </div>
             <PassengerExchangeMetrics train={train} compact />
-            <div className="mt-1 text-right font-mono text-[8px]" style={{ color: '#64748b' }}>剩余停站 {Math.ceil(train.dwellRemainingSec)} s</div>
+            <div className="mt-1 text-right font-mono text-[8px]" style={{ color: '#64748b' }}>{train.lastDispatchReason === 'DCDP_PROFILE_PENDING' ? '正常停站已结束' : `剩余停站 ${Math.ceil(train.dwellRemainingSec)} s`}</div>
           </div>)}
         </div>
       </aside>

@@ -124,6 +124,9 @@ class EngineMemberDLoopTests(unittest.TestCase):
         self.assertEqual(train.phase, "DWELLING")
         self.assertEqual(train.speed_mps, 0.0)
         self.assertFalse(train._profile_triggered)
+        self.assertEqual(train.door_notice, "WAITING_SPEED_PROFILE")
+        self.assertEqual(train.last_dispatch_action, "HOLD")
+        self.assertEqual(train.last_dispatch_reason, "DCDP_PROFILE_PENDING")
 
     def test_60x_samples_power_once_per_simulated_second(self) -> None:
         engine = self._engine()

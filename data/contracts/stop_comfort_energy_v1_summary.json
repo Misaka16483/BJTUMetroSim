@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "stop-comfort-energy-v1-summary",
+  "generatedDate": "2026-07-15",
+  "lineClaim": "PARALLEL_WORLD_LINE_9_DEIDENTIFIED_DATA_ONLY",
+  "result": "TRAINING_PARETO_FOUND_BUT_NO_HOLDOUT_SUPPORTED_CANDIDATE",
+  "mainEngineCandidateDeployed": false,
+  "preflight": {
+    "passed": true,
+    "scenario": "FSP-KYL-load700",
+    "timeStepsSec": [0.1, 0.05],
+    "controlPeriodSec": 0.1,
+    "stopErrorDeltaM": 0.004782099709586873,
+    "netEnergyRelativeDelta": 0.00011633037162929553,
+    "p95JerkRelativeDelta": 0.00003678438437847815
+  },
+  "screening": {
+    "sampleCount": 64,
+    "scenarioCount": 3,
+    "feasibleCandidateCount": 2,
+    "profileCacheEntryCount": 15,
+    "selectedParameters": [
+      "brake_apply_slew_rate_percent_per_s",
+      "profile_brake_timing_bias_s",
+      "terminal_brake_floor_percent",
+      "brake_release_slew_rate_percent_per_s"
+    ],
+    "dominantFinding": "brake apply slew controls comfort; brake phase bias controls stop error and energy"
+  },
+  "optimization": {
+    "populationSize": 32,
+    "generations": 15,
+    "seeds": [20260715, 20260716, 20260717],
+    "scenarioCount": 9,
+    "combinedParetoSize": 49,
+    "nsga2Runs": [
+      {"seed": 20260715, "evaluations": 474, "feasible": 108, "paretoSize": 46, "hypervolume": 0.0013564796768588449},
+      {"seed": 20260716, "evaluations": 475, "feasible": 99, "paretoSize": 33, "hypervolume": 0.0013195685023558725},
+      {"seed": 20260717, "evaluations": 474, "feasible": 107, "paretoSize": 45, "hypervolume": 0.0012809071335190745}
+    ],
+    "randomSearchRuns": [
+      {"seed": 20260715, "evaluations": 474, "feasible": 10, "paretoSize": 9, "hypervolume": 0.0010258048339880405},
+      {"seed": 20260716, "evaluations": 475, "feasible": 18, "paretoSize": 12, "hypervolume": 0.0016363992864921947},
+      {"seed": 20260717, "evaluations": 474, "feasible": 16, "paretoSize": 11, "hypervolume": 0.0018111628714543727}
+    ],
+    "trainingComfortPriority": {
+      "p95AbsoluteStopErrorM": 0.9363221875645649,
+      "meanP95TerminalAbsJerkMps3": 0.3779358950368877,
+      "meanNetEnergyRatioToBaseline": 1.0034807091988034,
+      "relativeChanges": {
+        "stopErrorPercent": -4.9748395162978,
+        "comfortPercent": -16.3865889074186,
+        "energyPercent": 0.348070919880339
+      }
+    },
+    "algorithmConclusion": "NSGA-II found many more feasible candidates, but did not dominate random search hypervolume in every seed"
+  },
+  "holdoutValidation": {
+    "scenarioCount": 12,
+    "timeStepsSec": [0.1, 0.05],
+    "profileCacheEntryCount": 12,
+    "supportedCandidates": [],
+    "baselineP95AbsoluteStopErrorM": 3.572748853411835,
+    "baselineFailures": [
+      {"scenarioId": "reverse-long-BDZ-JBG-load1400", "status": "OVERSHOT_STOPPED", "rawStopErrorM": 1.500363010002502},
+      {"scenarioId": "unseen-FTN-FTD-load700", "status": "MAX_TIME", "rawStopErrorM": -6.105664884245471}
+    ],
+    "comfortPriority": {
+      "feasible": false,
+      "p95AbsoluteStopErrorM": 1.2855983789397327,
+      "meanP95TerminalAbsJerkMps3": 0.37610985973047567,
+      "meanNetEnergyRatioToBaseline": 0.9917602710845744,
+      "comfortChangeRatio": -0.1244803583666676,
+      "energyChangeRatio": -0.00823972891542557,
+      "failedConvergenceScenarioCount": 2
+    }
+  },
+  "nextRequiredWork": [
+    "add first-stop error and creep recovery distance metrics",
+    "fix stopped-short terminal-brake latch recovery outside the nominal creep handover",
+    "replace one global brake phase bias with path/load-aware compensation",
+    "create a new training/holdout split before rerunning optimization",
+    "run full timetable validation only after a candidate passes the new holdout set"
+  ]
+}

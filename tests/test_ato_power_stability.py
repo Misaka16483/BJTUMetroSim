@@ -299,6 +299,27 @@ class AtoPowerStabilityTests(unittest.TestCase):
         self.assertEqual(commands[3].brake_percent, 0.0)
         self.assertGreater(commands[-1].traction_percent, 0.0)
 
+    def test_rolling_train_does_not_release_brake_into_stop_tolerance(self) -> None:
+        controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
+        target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)
+        controller._terminal_braking_latched = True
+        controller._terminal_braking_target_position_m = 100.0
+        controller._last_command = ControlCommand(
+            "T1",
+            brake_percent=4.0,
+            source=CommandSource.ATO,
+        )
+        controller._last_command_sim_time_s = 0.0
+
+        command = controller.decide(
+            TrainState("T1", position_m=98.95, speed_mps=0.12, sim_time_s=0.1),
+            target,
+        )
+
+        self.assertGreater(command.brake_percent, 0.0)
+        self.assertEqual(command.traction_percent, 0.0)
+        self.assertFalse(controller._creep_release_in_progress)
+
     def test_stopped_train_just_outside_nominal_creep_zone_can_recover(self) -> None:
         controller = ATOController(AtoConfig(use_dynamic_programming_profile=False))
         target = AtoTarget(target_position_m=100.0, permitted_speed_mps=12.0)

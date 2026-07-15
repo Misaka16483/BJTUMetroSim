@@ -182,6 +182,10 @@ class RouteLifecycleTopologyRegressionTests(unittest.TestCase):
         self.assertIsNotNone(path)
         self.assertEqual(path.destination_platform_id, 14)
 
+        train.unclamped_path_position_m = path.total_length_m - 0.4
+        train.speed_mps = 0.12
+        train.constraint_reaction_force_n = 125.0
+
         # Complete the already approved 12 -> 14 PathPlan in one deterministic
         # arrival tick.  The engine must retain the actual path destination.
         engine._complete_path_arrival(
@@ -191,6 +195,14 @@ class RouteLifecycleTopologyRegressionTests(unittest.TestCase):
         self.assertEqual(train.current_segment_id, 103)
         self.assertNotEqual(train.current_segment_id, 88)
         self.assertEqual(getattr(train, "current_platform_id", None), 14)
+        self.assertAlmostEqual(train.last_arrival_raw_stop_error_m, -0.4)
+        self.assertEqual(train.last_arrival_speed_mps, 0.12)
+        self.assertEqual(train.last_arrival_constraint_reaction_force_n, 125.0)
+        self.assertEqual(train.last_arrival_sim_time_ms, 1)
+        self.assertEqual(len(train.last_arrival_ato_config_fingerprint or ""), 64)
+        payload = train.to_dict()
+        self.assertEqual(payload["pathPositionM"], round(path.total_length_m, 1))
+        self.assertEqual(payload["lastArrivalRawStopErrorM"], -0.4)
 
     def test_route_50_observes_s103_until_the_train_tail_clears(self) -> None:
         engine = _load_engine()

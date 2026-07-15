@@ -362,14 +362,17 @@ export default function PowerSystemView() {
                 const train = trains.find((candidate) => candidate.trainId === item.trainId);
                 const traction = train?.tractionPercent ?? 0;
                 const brake = train?.brakePercent ?? 0;
-                const command = brake > 0
+                const profilePending = train?.lastDispatchReason === 'DCDP_PROFILE_PENDING';
+                const command = profilePending
+                  ? '等待速度曲线'
+                  : brake > 0
                   ? `制动 ${fmt(brake, 0)}%`
                   : traction > 0
                     ? `牵引 ${fmt(traction, 0)}%`
                     : '惰行/停站';
                 return [
                   item.trainId,
-                  train?.phase ?? '-',
+                  profilePending ? '曲线准备' : train?.phase ?? '-',
                   command,
                   fmt(train?.tractionPowerDeliveredKw, 0),
                   fmt(train?.regenPowerAvailableKw, 0),
