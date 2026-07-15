@@ -600,6 +600,7 @@ export interface DispatchRuntimeState {
     stationId: string;
     direction: string;
     simTimeS: number;
+    simTimeMs?: number;
   }>;
 }
 
@@ -669,6 +670,15 @@ export interface OperationPlanState {
   services: OperationServiceState[];
   duties: OperationDutyState[];
   recentEvents: Array<Record<string, unknown>>;
+}
+
+export interface AutoDispatchRescheduleResponse {
+  ok: boolean;
+  changed: boolean;
+  duty: OperationDutyState;
+  operationPlan: OperationPlanState;
+  error?: string;
+  message?: string;
 }
 
 export interface SimStateResponse {
@@ -827,6 +837,22 @@ export function simPause(): Promise<unknown> {
 
 export function simResume(): Promise<unknown> {
   return postJson('/api/sim/resume');
+}
+
+export async function simRescheduleAutoDispatchDuty(
+  dutyId: string,
+  plannedStartS: number,
+): Promise<AutoDispatchRescheduleResponse> {
+  const response = await fetch('/api/sim/auto-dispatch/queue/reschedule', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dutyId, plannedStartS }),
+  });
+  const result = await response.json() as AutoDispatchRescheduleResponse;
+  if (!response.ok || !result.ok) {
+    throw new Error(result.message ?? result.error ?? `${response.status} ${response.statusText}`);
+  }
+  return result;
 }
 
 export function simStop(): Promise<unknown> {

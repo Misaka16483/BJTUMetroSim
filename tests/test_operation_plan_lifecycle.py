@@ -147,6 +147,86 @@ class OperationPlanLifecycleTests(unittest.TestCase):
         self.assertTrue(all(train.lifecycle_state in {"READY", "IN_DEPOT"} for train in engine.trains))
         engine.stop()
 
+    def test_pending_duty_reschedule_shifts_the_complete_round_trip(self) -> None:
+        engine = load_engine()
+        engine.load()
+        duties = sorted(
+            engine._operation_duties.values(),
+            key=lambda item: item.planned_start_s,
+        )
+        duty = duties[1]
+        services = [engine._operation_services[item] for item in duty.service_ids]
+        previous_stops = [
+            [(stop.planned_arrival_s, stop.planned_departure_s) for stop in service.stops]
+            for service in services
+        ]
+        previous_start_s = duty.planned_start_s
+        previous_end_s = duty.planned_end_s
+        previous_hash = engine.operation_plan_state()["planHash"]
+        train = next(item for item in engine.trains if item.duty_id == duty.duty_id)
+        previous_train_departure_ms = train.planned_departure_ms
+        requested_start_s = previous_start_s + 30.0
+
+        result = engine.reschedule_operation_duty(duty.duty_id, requested_start_s)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual(duty.planned_start_s, requested_start_s)
+        self.assertEqual(duty.planned_end_s, previous_end_s + 30.0)
+        self.assertEqual(train.planned_departure_ms, previous_train_departure_ms + 30_000)
+        for service, original in zip(services, previous_stops):
+            self.assertEqual(
+                [(stop.planned_arrival_s, stop.planned_departure_s) for stop in service.stops],
+                [(arrival + 30.0, departure + 30.0) for arrival, departure in original],
+            )
+        state = engine.operation_plan_state()
+        self.assertNotEqual(state["planHash"], previous_hash)
+        self.assertEqual(state["recentEvents"][-1]["event"], "AUTO_DISPATCH_QUEUE_RESCHEDULED")
+        self.assertEqual(result["operationPlan"]["planHash"], state["planHash"])
+
+    def test_duty_reschedule_enforces_pause_and_minimum_headway(self) -> None:
+        engine = load_engine()
+        engine.load()
+        duties = sorted(
+            engine._operation_duties.values(),
+            key=lambda item: item.planned_start_s,
+        )
+        target = duties[1]
+
+        engine.clock.start()
+        running_result = engine.reschedule_operation_duty(
+            target.duty_id,
+            target.planned_start_s + 30.0,
+        )
+        engine.clock.pause()
+        conflict_result = engine.reschedule_operation_duty(
+            target.duty_id,
+            duties[0].planned_start_s + 10.0,
+        )
+
+        self.assertFalse(running_result["ok"])
+        self.assertEqual(running_result["error"], "SIMULATION_MUST_BE_PAUSED")
+        self.assertFalse(conflict_result["ok"])
+        self.assertEqual(conflict_result["error"], "MINIMUM_HEADWAY_CONFLICT")
+        self.assertEqual(conflict_result["conflictingDutyId"], duties[0].duty_id)
+
+    def test_active_duty_cannot_be_rescheduled(self) -> None:
+        engine = load_engine()
+        engine.load()
+        duty = sorted(
+            engine._operation_duties.values(),
+            key=lambda item: item.planned_start_s,
+        )[1]
+        duty.lifecycle_state = "IN_SERVICE"
+
+        result = engine.reschedule_operation_duty(
+            duty.duty_id,
+            duty.planned_start_s + 30.0,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "DUTY_NOT_EDITABLE")
+
     def test_lifecycle_transitions_are_recorded_with_the_authoritative_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             recorder = RunRecorder(Path(tmp) / "operations.sqlite")

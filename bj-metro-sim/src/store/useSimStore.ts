@@ -18,7 +18,7 @@ import type {
   AddTrainPayload,
   DriverCabHardwareStatus,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simRescheduleAutoDispatchDuty, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow' | 'memberCDemo' | 'topologyLayout';
 export type DataMode = 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
@@ -169,6 +169,7 @@ interface SimState {
   pauseBackendSim: () => Promise<void>;
   resumeBackendSim: () => Promise<void>;
   stopBackendSim: () => Promise<void>;
+  rescheduleAutoDispatchDuty: (dutyId: string, plannedStartS: number) => Promise<void>;
 
   // 车辆参数配置
   vehicleConfig: VehicleConfigPayload;
@@ -876,6 +877,7 @@ export const useSimStore = create<SimState>((set, get) => ({
       powerLossesKw: kpi.powerLossesKw ?? 0,
       lastDispatchAction: kpi.lastDispatchAction ?? 'FOLLOW_TIMETABLE',
       ...(streamChanged ? {
+        trainColors: {},
         speedHistory: [],
         speedTimeHistory: [],
         speedProfile: [],
@@ -885,6 +887,15 @@ export const useSimStore = create<SimState>((set, get) => ({
         speedRunsByTrain: {},
         activeSpeedRunIdByTrain: {},
         viewedSpeedRunIdByTrain: {},
+        totalPassengers: 0,
+        totalBoarded: 0,
+        avgWaitTime: 0,
+        currentSpeedMps: 0,
+        tractionPercent: 0,
+        brakePercent: 0,
+        energyKwh: 0,
+        pathPositionM: 0,
+        segmentProgress: 0,
       } : {}),
     });
 
@@ -1071,6 +1082,11 @@ export const useSimStore = create<SimState>((set, get) => ({
   resumeBackendSim: async () => {
     await simResume();
     set({ isRunning: true, engineClockState: 'RUNNING' });
+  },
+
+  rescheduleAutoDispatchDuty: async (dutyId: string, plannedStartS: number) => {
+    const result = await simRescheduleAutoDispatchDuty(dutyId, plannedStartS);
+    set({ operationPlan: result.operationPlan });
   },
 
   stopBackendSim: async () => {

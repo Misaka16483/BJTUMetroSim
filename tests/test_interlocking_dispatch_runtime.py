@@ -55,8 +55,9 @@ class DispatchRuntimeTests(unittest.TestCase):
         runtime.register_train(second)
 
         first.phase = "DEPARTING"
-        records = runtime.observe([first, second], 100.0)
+        records = runtime.observe([first, second], 100.0, 21_700_000)
         self.assertEqual([item.train_id for item in records], ["T1"])
+        self.assertEqual(records[0].to_dict()["simTimeMs"], 21_700_000)
 
         front, rear = runtime.headways_for("T2", 0, "UP", 145.0)
         self.assertEqual(front, 45.0)

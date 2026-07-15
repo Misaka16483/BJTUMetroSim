@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.api_server import ApiHandler, Line9DataService
+from app.api_server import DEFAULT_SCENARIO, ApiHandler, Line9DataService
+from app.core.scenario import ScenarioConfig
 from app.domain.operations.member_c_demo import MemberCDemoRunner
 
 
@@ -30,6 +31,12 @@ class ApiServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.service = Line9DataService()
+
+    def test_default_scenario_enables_timetable_auto_dispatch(self) -> None:
+        self.assertEqual(DEFAULT_SCENARIO.name, "line9_timetable_operation.json")
+        scenario = ScenarioConfig.load(DEFAULT_SCENARIO)
+        self.assertTrue(scenario.operation_plan.enabled)
+        self.assertGreater(scenario.operation_plan.max_duties, 0)
 
     def test_macro_line_shape(self) -> None:
         macro = self.service.macro_line()

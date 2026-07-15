@@ -10,7 +10,7 @@ import math
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1598,6 +1598,7 @@ class SimulationEngine:
         departures = self.dispatch_runtime.observe(
             self.trains,
             self.clock.sim_time_seconds,
+            sim_time_ms,
         )
         self._record_operation_departures(departures, sim_time_ms)
 
@@ -4518,6 +4519,142 @@ class SimulationEngine:
             source="ats",
             tick=self.clock.current_tick,
         )
+
+    def reschedule_operation_duty(
+        self,
+        duty_id: str,
+        planned_start_s: float,
+    ) -> JsonDict:
+        """Move a pending duty and its complete round trip to a new start time."""
+        with self._lifecycle_lock:
+            if not self.scenario.operation_plan.enabled:
+                return {"ok": False, "error": "OPERATION_PLAN_DISABLED"}
+            if self.clock.state == ClockState.RUNNING:
+                return {
+                    "ok": False,
+                    "error": "SIMULATION_MUST_BE_PAUSED",
+                    "message": "请先暂停仿真，再编辑自动发车队列",
+                }
+
+            duty = self._operation_duties.get(str(duty_id))
+            if duty is None:
+                return {"ok": False, "error": "DUTY_NOT_FOUND"}
+            if duty.lifecycle_state not in {"IN_DEPOT", "READY"}:
+                return {
+                    "ok": False,
+                    "error": "DUTY_NOT_EDITABLE",
+                    "lifecycleState": duty.lifecycle_state,
+                    "message": "只能调整尚未发车的车组任务",
+                }
+
+            try:
+                requested_start_s = float(planned_start_s)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "INVALID_PLANNED_START"}
+            if not math.isfinite(requested_start_s):
+                return {"ok": False, "error": "INVALID_PLANNED_START"}
+
+            config = self.scenario.operation_plan
+            window_start_s = (config.start_time_ms or self.scenario.start_time_ms) / 1000.0
+            window_end_s = (
+                config.end_time_ms
+                or (config.start_time_ms or self.scenario.start_time_ms) + 30 * 60 * 1000
+            ) / 1000.0
+            current_time_s = self._absolute_sim_time_ms() / 1000.0
+            if requested_start_s < current_time_s:
+                return {
+                    "ok": False,
+                    "error": "DEPARTURE_TIME_IN_PAST",
+                    "currentTimeS": round(current_time_s, 3),
+                }
+            if not window_start_s <= requested_start_s <= window_end_s:
+                return {
+                    "ok": False,
+                    "error": "DEPARTURE_TIME_OUTSIDE_PLAN_WINDOW",
+                    "windowStartS": round(window_start_s, 3),
+                    "windowEndS": round(window_end_s, 3),
+                }
+
+            minimum_headway_s = self.timetable_service.headway_config.min_headway_sec
+            conflict = next(
+                (
+                    other
+                    for other in self._operation_duties.values()
+                    if other.duty_id != duty.duty_id
+                    and abs(other.planned_start_s - requested_start_s) < minimum_headway_s
+                ),
+                None,
+            )
+            if conflict is not None:
+                return {
+                    "ok": False,
+                    "error": "MINIMUM_HEADWAY_CONFLICT",
+                    "conflictingDutyId": conflict.duty_id,
+                    "conflictingStartS": round(conflict.planned_start_s, 3),
+                    "minimumHeadwayS": round(minimum_headway_s, 3),
+                    "message": f"与 {conflict.train_id} 的计划发车间隔小于 {minimum_headway_s:g} 秒",
+                }
+
+            previous_start_s = duty.planned_start_s
+            delta_s = requested_start_s - previous_start_s
+            if abs(delta_s) <= 1e-9:
+                return {
+                    "ok": True,
+                    "changed": False,
+                    "duty": duty.to_dict(),
+                    "operationPlan": self.operation_plan_state(),
+                }
+
+            services: list[TrainService] = []
+            for service_id in duty.service_ids:
+                service = self._operation_services.get(service_id)
+                if service is None:
+                    return {
+                        "ok": False,
+                        "error": "DUTY_SERVICE_NOT_FOUND",
+                        "serviceId": service_id,
+                    }
+                services.append(service)
+
+            for service in services:
+                service.stops = [
+                    replace(
+                        stop,
+                        planned_arrival_s=stop.planned_arrival_s + delta_s,
+                        planned_departure_s=stop.planned_departure_s + delta_s,
+                    )
+                    for stop in service.stops
+                ]
+
+            duty.planned_start_s = requested_start_s
+            duty.planned_end_s += delta_s
+            train = next(
+                (item for item in self.trains if item.duty_id == duty.duty_id),
+                None,
+            )
+            if train is not None:
+                if train.planned_departure_ms is not None:
+                    train.planned_departure_ms += round(delta_s * 1000)
+                if train.planned_arrival_ms is not None:
+                    train.planned_arrival_ms += round(delta_s * 1000)
+
+            self._finalize_operation_plan_metadata()
+            self._append_operation_event({
+                "event": "AUTO_DISPATCH_QUEUE_RESCHEDULED",
+                "trainId": duty.train_id,
+                "dutyId": duty.duty_id,
+                "previousPlannedStartS": previous_start_s,
+                "plannedStartS": requested_start_s,
+                "deltaS": delta_s,
+                "actualTimeMs": self._absolute_sim_time_ms(),
+            })
+            self._snapshot = self._build_snapshot()
+            return {
+                "ok": True,
+                "changed": True,
+                "duty": duty.to_dict(),
+                "operationPlan": self.operation_plan_state(),
+            }
 
     def _advance_operation_lifecycle(self, sim_time_ms: int) -> None:
         config = self.scenario.operation_plan

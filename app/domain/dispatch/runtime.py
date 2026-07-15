@@ -16,15 +16,19 @@ class DepartureRecord:
     station_id: str
     direction: str
     sim_time_s: float
+    absolute_sim_time_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "trainId": self.train_id,
             "stationIndex": self.station_index,
             "stationId": self.station_id,
             "direction": self.direction,
             "simTimeS": round(self.sim_time_s, 3),
         }
+        if self.absolute_sim_time_ms is not None:
+            result["simTimeMs"] = self.absolute_sim_time_ms
+        return result
 
 
 class DispatchRuntimeCoordinator:
@@ -56,7 +60,12 @@ class DispatchRuntimeCoordinator:
         self.service.unregister_train(train_id)
         self._previous.pop(train_id, None)
 
-    def observe(self, trains: list[Any], sim_time_s: float) -> list[DepartureRecord]:
+    def observe(
+        self,
+        trains: list[Any],
+        sim_time_s: float,
+        absolute_sim_time_ms: int | None = None,
+    ) -> list[DepartureRecord]:
         active_ids = {str(train.train_id) for train in trains}
         for train_id in set(self._previous) - active_ids:
             self.unregister_train(train_id)
@@ -87,6 +96,7 @@ class DispatchRuntimeCoordinator:
                     station_id=str(train.current_station_code),
                     direction=str(train.direction),
                     sim_time_s=sim_time_s,
+                    absolute_sim_time_ms=absolute_sim_time_ms,
                 )
                 self._departures.append(record)
                 self._departures = self._departures[-500:]

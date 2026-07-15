@@ -159,6 +159,8 @@ export default function StationPassengerView() {
   const simTimeMs = useSimStore((state) => state.simTimeMs);
   const simTime = useSimStore((state) => state.simTime);
   const engineClockState = useSimStore((state) => state.engineClockState);
+  const sessionId = useSimStore((state) => state.sessionId);
+  const runId = useSimStore((state) => state.runId);
   const speed = useSimStore((state) => state.speed);
   const selectedStationCode = useSimStore((state) => state.selectedStationCode);
   const setSelectedStationCode = useSimStore((state) => state.setSelectedStationCode);
@@ -179,6 +181,7 @@ export default function StationPassengerView() {
   const [manualAddPending, setManualAddPending] = useState<'UP' | 'DOWN' | null>(null);
   const [manualAddFeedback, setManualAddFeedback] = useState<Record<'UP' | 'DOWN', string | null>>({ UP: null, DOWN: null });
   const historyCursor = useRef<number | null>(null);
+  const streamKey = `${sessionId ?? 'no-session'}:${runId ?? 'no-run'}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -200,7 +203,7 @@ export default function StationPassengerView() {
     historyCursor.current = null;
     setWaitingHistory([{ t: SIM_START_SECONDS, up: 0, down: 0 }]);
     setArrivalHistory([{ t: SIM_START_SECONDS, up: 0, down: 0 }]);
-  }, [focus]);
+  }, [focus, streamKey]);
 
   const simSeconds = Math.floor(simTimeMs / 1000);
   const up = platformValue(stationByKey, focus, 'UP');
@@ -234,7 +237,7 @@ export default function StationPassengerView() {
     void loadHistory();
     const interval = window.setInterval(loadHistory, engineClockState === 'RUNNING' ? 500 : 2_000);
     return () => { cancelled = true; window.clearInterval(interval); };
-  }, [engineClockState, focus]);
+  }, [engineClockState, focus, streamKey]);
 
   const ratePoints = useMemo(() => arrivalHistory.map((point, index) => {
     const from = Math.max(0, index - 299);
@@ -329,8 +332,8 @@ export default function StationPassengerView() {
         })}
       </aside>
       <main className="flex min-w-0 flex-1 flex-col gap-2">
-        <Chart title={`${name} · 站台候车人数`} points={waitingHistory} now={simSeconds} unit="pax" />
-        <Chart title={`${name} · 进站率（5分钟滚动）`} points={ratePoints} now={simSeconds} unit="pax/min" />
+        <Chart key={`${streamKey}:waiting`} title={`${name} · 站台候车人数`} points={waitingHistory} now={simSeconds} unit="pax" />
+        <Chart key={`${streamKey}:arrivals`} title={`${name} · 进站率（5分钟滚动）`} points={ratePoints} now={simSeconds} unit="pax/min" />
       </main>
       <aside className="flex w-[17rem] shrink-0 flex-col gap-2 overflow-y-auto">
         <section data-testid="passenger-flow-mode-control" className="rounded-lg p-3" style={{ border: '1px solid rgba(100,210,255,.16)', background: 'linear-gradient(135deg, rgba(100,210,255,.055), rgba(255,255,255,.015))' }}>

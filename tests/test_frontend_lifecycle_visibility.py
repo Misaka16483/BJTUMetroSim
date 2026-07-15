@@ -41,6 +41,49 @@ class FrontendLifecycleVisibilityContractTests(unittest.TestCase):
         self.assertIn("await simStart();", store)
         self.assertIn("return postJson('/api/sim/start');", api)
 
+    def test_auto_dispatch_panel_isolated_from_non_plan_dispatch_state(self) -> None:
+        panel = (FRONTEND / "components" / "AutoDispatchPanel.tsx").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("const plannedTrainIds", panel)
+        self.assertIn(".filter((departure) => plannedTrainIds.has(departure.trainId))", panel)
+        self.assertIn("const planDepartureCount = planEnabled", panel)
+        self.assertIn("? '当前场景未启用运行图'", panel)
+        self.assertIn("planEnabled && engineClockState === 'RUNNING'", panel)
+        self.assertIn("departure.simTimeMs", panel)
+
+    def test_passenger_history_resets_at_backend_stream_boundary(self) -> None:
+        passenger = (FRONTEND / "components" / "StationPassengerView.tsx").read_text(
+            encoding="utf-8"
+        )
+        store = (FRONTEND / "store" / "useSimStore.ts").read_text(encoding="utf-8")
+
+        self.assertIn("const sessionId = useSimStore", passenger)
+        self.assertIn("const streamKey = `${sessionId ?? 'no-session'}:${runId ?? 'no-run'}`", passenger)
+        self.assertIn("}, [focus, streamKey]);", passenger)
+        self.assertIn("}, [engineClockState, focus, streamKey]);", passenger)
+        self.assertIn("key={`${streamKey}:waiting`}", passenger)
+        stream_reset = store[store.index("...(streamChanged ? {") :]
+        self.assertIn("trainColors: {}", stream_reset)
+        self.assertIn("totalPassengers: 0", stream_reset)
+
+    def test_auto_dispatch_queue_has_a_backend_backed_time_editor(self) -> None:
+        panel = (FRONTEND / "components" / "AutoDispatchPanel.tsx").read_text(
+            encoding="utf-8"
+        )
+        store = (FRONTEND / "store" / "useSimStore.ts").read_text(encoding="utf-8")
+        api = (FRONTEND / "data" / "backendApi.ts").read_text(encoding="utf-8")
+
+        self.assertIn('type="time"', panel)
+        self.assertIn("onInput={(event) => setDraftStartTime(event.currentTarget.value)}", panel)
+        self.assertIn("await rescheduleAutoDispatchDuty(editingDutyId, plannedStartS);", panel)
+        self.assertIn("engineClockState === 'RUNNING'", panel)
+        self.assertIn("['IN_DEPOT', 'READY'].includes(duty.lifecycleState)", panel)
+        self.assertIn("simRescheduleAutoDispatchDuty(dutyId, plannedStartS)", store)
+        self.assertIn("set({ operationPlan: result.operationPlan });", store)
+        self.assertIn("/api/sim/auto-dispatch/queue/reschedule", api)
+
 
 if __name__ == "__main__":
     unittest.main()

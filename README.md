@@ -38,9 +38,15 @@ python -m app.api_server --host 127.0.0.1 --port 8000
 python -m app.api_server --scenario data/scenarios/line9_5train_power.json --host 127.0.0.1 --port 8000
 ```
 
-The default interactive scenario starts with no trains so the frontend train-management
-panel can add them dynamically. Scenarios used for unattended simulation can set
-`"autoSpawnTrains": true`; `line9_5train_power.json` uses this mode.
+默认启动 `line9_timetable_operation.json`，启用运行图自动发车：后端生成 4 个车底、8 个往返运营任务，并按计划时刻自动上线和发车。前端“自动发车”控制台可查看计划、暂停或继续仿真。
+
+如需从空场景手动加车，可显式启动交互场景：
+
+```bash
+python -m app.api_server --scenario data/scenarios/line9_interactive.json --host 127.0.0.1 --port 8000
+```
+
+无需运行图、但需要随场景自动创建固定列车时，可将 `autoSpawnTrains` 设为 `true`；`line9_5train_power.json` 使用该模式。
 
 ### 供电模块量化验收
 

@@ -40,7 +40,7 @@ WORKSPACE_STATIONS = (
     ROOT / "external" / "BJTUMetroSim" / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
 )
 DEFAULT_STATIONS = REPO_STATIONS if REPO_STATIONS.exists() else WORKSPACE_STATIONS
-DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_interactive.json"
+DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_timetable_operation.json"
 DEFAULT_MAINLINE_SCOPE = ROOT / "data" / "scenarios" / "line9_mainline_scope.json"
 DEFAULT_POWER_TOPOLOGY = ROOT / "data" / "scenarios" / "line9_power_topology.json"
 
@@ -1116,6 +1116,37 @@ class ApiHandler(BaseHTTPRequestHandler):
                         else HTTPStatus.BAD_REQUEST
                     )
                     self._send_json(result, status)
+                return
+
+            if path == "/api/sim/auto-dispatch/queue/reschedule":
+                if self.engine is None:
+                    self._send_json(
+                        {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
+                payload = self._read_json_body()
+                result = self.engine.reschedule_operation_duty(
+                    str(payload.get("dutyId", "")),
+                    payload.get("plannedStartS"),
+                )
+                if result.get("ok"):
+                    self._send_json(result)
+                    return
+                error = result.get("error")
+                if error == "DUTY_NOT_FOUND":
+                    status = HTTPStatus.NOT_FOUND
+                elif error in {
+                    "OPERATION_PLAN_DISABLED",
+                    "SIMULATION_MUST_BE_PAUSED",
+                    "DUTY_NOT_EDITABLE",
+                    "DEPARTURE_TIME_IN_PAST",
+                    "MINIMUM_HEADWAY_CONFLICT",
+                }:
+                    status = HTTPStatus.CONFLICT
+                else:
+                    status = HTTPStatus.BAD_REQUEST
+                self._send_json(result, status)
                 return
 
             if path in {"/api/sim/start", "/api/sim/pause", "/api/sim/resume", "/api/sim/stop", "/api/sim/speed", "/api/sim/step", "/api/sim/tick-interval"}:
