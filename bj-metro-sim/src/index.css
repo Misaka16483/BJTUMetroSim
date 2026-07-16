@@ -212,6 +212,14 @@ html, body, #root {
   transition-duration: 240ms;
   transition-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
 }
+
+/* MapLibre owns the marker transform and updates it for every position frame.
+   A CSS transition makes the DOM marker lag behind the immediately rendered
+   route, which is especially visible on curves and at high simulation speed. */
+.maplibregl-marker.train-marker {
+  transition: none;
+}
+
 button, .btn, [role="button"], .clickable {
   transition: all 180ms cubic-bezier(0.25, 0.1, 0.25, 1);
 }
