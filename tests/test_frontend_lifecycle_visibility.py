@@ -84,6 +84,27 @@ class FrontendLifecycleVisibilityContractTests(unittest.TestCase):
         self.assertIn("set({ operationPlan: result.operationPlan });", store)
         self.assertIn("/api/sim/auto-dispatch/queue/reschedule", api)
 
+    def test_auto_dispatch_queue_can_add_a_complete_planned_trainset(self) -> None:
+        panel = (FRONTEND / "components" / "AutoDispatchPanel.tsx").read_text(
+            encoding="utf-8"
+        )
+        store = (FRONTEND / "store" / "useSimStore.ts").read_text(encoding="utf-8")
+        api = (FRONTEND / "data" / "backendApi.ts").read_text(encoding="utf-8")
+
+        self.assertIn("新增车组", panel)
+        self.assertIn("const canEditQueue", panel)
+        self.assertIn("['LOADED', 'PAUSED'].includes(engineClockState)", panel)
+        self.assertIn("findAvailableQueueStart(", panel)
+        self.assertIn('aria-label="新车组编号"', panel)
+        self.assertIn('aria-label="新车组计划发车时刻"', panel)
+        self.assertIn("await addAutoDispatchDuty(trainId, plannedStartS);", panel)
+        self.assertIn("if (!canEditQueue)", panel)
+        self.assertIn("disabled={queueAddPending || !canEditQueue}", panel)
+        self.assertIn("simAddAutoDispatchDuty(trainId, plannedStartS)", store)
+        self.assertIn("result.operationPlan", store)
+        self.assertIn("result.train", store)
+        self.assertIn("/api/sim/auto-dispatch/queue/add", api)
+
 
 if __name__ == "__main__":
     unittest.main()

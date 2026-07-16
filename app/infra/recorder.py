@@ -440,6 +440,23 @@ class RunRecorder:
         self._commit_if_needed()
         return int(cursor.lastrowid)
 
+    def update_run_metadata(self, run_id: int, updates: dict[str, Any]) -> None:
+        """Merge authoritative runtime metadata into an existing run."""
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT metadata_json FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"run_id={run_id}")
+            metadata = json.loads(row[0])
+            metadata.update(updates)
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), run_id),
+            )
+            self._commit_if_needed()
+
     def upsert_power_topology(self, topology: dict[str, Any]) -> None:
         line_id = str(topology.get("lineId", "9"))
         quality = str(topology.get("quality", "ENGINEERING_ESTIMATE"))

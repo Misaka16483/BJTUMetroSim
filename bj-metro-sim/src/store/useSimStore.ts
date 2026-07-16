@@ -18,7 +18,7 @@ import type {
   AddTrainPayload,
   DriverCabHardwareStatus,
 } from '../data/backendApi';
-import { simStart, simPause, simResume, simStop, simRescheduleAutoDispatchDuty, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
+import { simStart, simPause, simResume, simStop, simAddAutoDispatchDuty, simRescheduleAutoDispatchDuty, simSetSpeedMultiplier, simSetVehicleConfig, simSendManualCommand, simSendDoorCommand, simAddTrain, simRemoveTrain, simSetTrainManualMode, fetchDriverCabStatus } from '../data/backendApi';
 
 type ViewMode = 'macro' | 'micro' | 'interlocking' | 'fullLine' | 'driver' | 'power' | 'stationFlow' | 'memberCDemo' | 'topologyLayout';
 export type DataMode = 'LIVE_SIM' | 'REPLAY' | 'DEMO' | 'DISCONNECTED';
@@ -169,6 +169,7 @@ interface SimState {
   pauseBackendSim: () => Promise<void>;
   resumeBackendSim: () => Promise<void>;
   stopBackendSim: () => Promise<void>;
+  addAutoDispatchDuty: (trainId: string, plannedStartS: number) => Promise<void>;
   rescheduleAutoDispatchDuty: (dutyId: string, plannedStartS: number) => Promise<void>;
 
   // 车辆参数配置
@@ -1082,6 +1083,16 @@ export const useSimStore = create<SimState>((set, get) => ({
   resumeBackendSim: async () => {
     await simResume();
     set({ isRunning: true, engineClockState: 'RUNNING' });
+  },
+
+  addAutoDispatchDuty: async (trainId: string, plannedStartS: number) => {
+    const result = await simAddAutoDispatchDuty(trainId, plannedStartS);
+    set((state) => ({
+      operationPlan: result.operationPlan,
+      trains: state.trains.some((train) => train.trainId === result.train.trainId)
+        ? state.trains
+        : [...state.trains, result.train],
+    }));
   },
 
   rescheduleAutoDispatchDuty: async (dutyId: string, plannedStartS: number) => {

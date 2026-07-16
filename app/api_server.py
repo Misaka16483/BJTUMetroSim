@@ -1139,7 +1139,38 @@ class ApiHandler(BaseHTTPRequestHandler):
                 elif error in {
                     "OPERATION_PLAN_DISABLED",
                     "SIMULATION_MUST_BE_PAUSED",
+                    "SIMULATION_NOT_EDITABLE",
                     "DUTY_NOT_EDITABLE",
+                    "DEPARTURE_TIME_IN_PAST",
+                    "MINIMUM_HEADWAY_CONFLICT",
+                }:
+                    status = HTTPStatus.CONFLICT
+                else:
+                    status = HTTPStatus.BAD_REQUEST
+                self._send_json(result, status)
+                return
+
+            if path == "/api/sim/auto-dispatch/queue/add":
+                if self.engine is None:
+                    self._send_json(
+                        {"ok": False, "error": "ENGINE_NOT_INITIALIZED"},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
+                payload = self._read_json_body()
+                result = self.engine.add_operation_duty(
+                    payload.get("trainId"),
+                    payload.get("plannedStartS"),
+                )
+                if result.get("ok"):
+                    self._send_json(result, HTTPStatus.CREATED)
+                    return
+                error = result.get("error")
+                if error in {
+                    "OPERATION_PLAN_DISABLED",
+                    "SIMULATION_MUST_BE_PAUSED",
+                    "SIMULATION_NOT_EDITABLE",
+                    "TRAIN_ID_EXISTS",
                     "DEPARTURE_TIME_IN_PAST",
                     "MINIMUM_HEADWAY_CONFLICT",
                 }:

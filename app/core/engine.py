@@ -7,6 +7,7 @@ from collections import deque
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 import uuid
@@ -608,6 +609,7 @@ class SimulationEngine:
         # 鈹€鈹€ 绾跨▼瀹夊叏 鈹€鈹€
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
+        self._tick_lock = threading.RLock()
         self._power_lock = threading.RLock()
         self._passenger_command_lock = threading.Lock()
         self._pending_passenger_additions: deque[JsonDict] = deque()
@@ -1087,7 +1089,7 @@ class SimulationEngine:
 
     def start(self) -> str:
         """鍚姩浠跨湡锛堝悗鍙扮嚎绋嬶級."""
-        with self._lifecycle_lock:
+        with self._lifecycle_lock, self._tick_lock:
             if self.clock.state.value == "RUNNING":
                 self._snapshot = self._build_snapshot()
                 return "ALREADY_RUNNING"
@@ -1114,12 +1116,16 @@ class SimulationEngine:
             return "STARTED"
 
     def pause(self) -> None:
-        self.clock.pause()
-        self._snapshot = self._build_snapshot()
+        with self._lifecycle_lock:
+            self.clock.pause()
+            # Wait for a micro tick that already crossed the RUNNING check.
+            with self._tick_lock:
+                self._snapshot = self._build_snapshot()
 
     def resume(self) -> None:
-        self.clock.resume()
-        self._snapshot = self._build_snapshot()
+        with self._lifecycle_lock:
+            self.clock.resume()
+            self._snapshot = self._build_snapshot()
 
     def set_speed_multiplier(self, multiplier: int) -> int:
         """Set software-only acceleration as a whole number of micro ticks."""
@@ -1140,7 +1146,7 @@ class SimulationEngine:
 
     def step_once(self) -> None:
         """Advance one full engine tick and leave continuous playback paused."""
-        with self._lifecycle_lock:
+        with self._lifecycle_lock, self._tick_lock:
             if self.clock.state.value in ("IDLE", "STOPPED"):
                 self.load()
             if self.clock.state.value == "LOADED":
@@ -1167,7 +1173,9 @@ class SimulationEngine:
 
     def reset_power_network(self) -> None:
         """Restore traction-power topology and clear transient power states."""
-        with self._power_lock:
+        # Keep the global lock order tick -> power. Snapshot construction also
+        # reads the power network, while a running tick already owns tick_lock.
+        with self._tick_lock, self._power_lock:
             self.power_service = self._build_power_service()
             self._last_power_states = self._empty_power_states()
             self._last_power_solve_sim_time_ms = None
@@ -1317,7 +1325,7 @@ class SimulationEngine:
         big_bilateral: bool = True,
     ) -> dict[str, list[str] | str]:
         """Apply a topology fault atomically with respect to the power-flow tick."""
-        with self._power_lock:
+        with self._tick_lock, self._power_lock:
             network = self.power_service.network
             if network is None:
                 raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
@@ -1332,7 +1340,7 @@ class SimulationEngine:
 
     def operate_power_switch(self, switch_id: str, state: str):
         """Operate a power switch atomically with respect to the power-flow tick."""
-        with self._power_lock:
+        with self._tick_lock, self._power_lock:
             network = self.power_service.network
             if network is None:
                 raise RuntimeError("POWER_NETWORK_NOT_INITIALIZED")
@@ -1349,6 +1357,8 @@ class SimulationEngine:
                 self.clock.stop()
             if self._thread is not None:
                 self._thread.join(timeout=5)
+                if self._thread.is_alive():
+                    raise RuntimeError("SIMULATION_STOP_TIMEOUT")
                 self._thread = None
             # Stop clears all runtime/transient state but preserves the configured roster.
             self.clock.current_tick = 0
@@ -1494,7 +1504,8 @@ class SimulationEngine:
             for _ in range(self._speed_multiplier):
                 if self._stop_event.is_set() or self.clock.state.value != "RUNNING":
                     break
-                self._tick()
+                with self._tick_lock:
+                    self._tick()
             elapsed = time.perf_counter() - loop_start
             sleep_sec = max(0.01, self._tick_interval_seconds - elapsed)
             time.sleep(sleep_sec)
@@ -4328,6 +4339,114 @@ class SimulationEngine:
         )
         self._operation_plan_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
+    def _create_operation_train(
+        self,
+        duty: TrainDuty,
+        outbound_service: TrainService,
+        return_service: TrainService,
+    ) -> SimTrainState:
+        """Materialize one planned duty as an idle physical train."""
+        train = self._create_train(TrainConfig(
+            train_id=duty.train_id,
+            line_id=self.scenario.line_id,
+            initial_station_code=outbound_service.origin_station_code,
+            direction=outbound_service.direction,
+            capacity_pax=getattr(self, "_default_train_capacity_pax", 1_460),
+            initial_load_pax=0,
+        ))
+        train.phase = IDLE
+        train.door_state = "CLOSED"
+        train.door_notice = "CLOSED"
+        train.door_side = "NONE"
+        train.dwell_remaining_sec = 0.0
+        train._passenger_service_pending = False
+        train.service_id = outbound_service.service_id
+        train.next_service_id = return_service.service_id
+        train.duty_id = duty.duty_id
+        train.lifecycle_state = "IN_DEPOT"
+        train.planned_departure_ms = round(
+            outbound_service.stops[0].planned_departure_s * 1000
+        )
+        train.planned_arrival_ms = round(
+            outbound_service.stops[-1].planned_arrival_s * 1000
+        )
+        train.lifecycle_updated_ms = self._absolute_sim_time_ms()
+        self._train_power_geometry(
+            train,
+            self._make_vehicle_config(duty.train_id, 0),
+        )
+        return train
+
+    def _validate_operation_queue_start(
+        self,
+        planned_start_s: float,
+        ignored_duty_id: str | None = None,
+    ) -> tuple[float | None, JsonDict | None]:
+        try:
+            requested_start_s = float(planned_start_s)
+        except (TypeError, ValueError):
+            return None, {"ok": False, "error": "INVALID_PLANNED_START"}
+        if not math.isfinite(requested_start_s):
+            return None, {"ok": False, "error": "INVALID_PLANNED_START"}
+
+        config = self.scenario.operation_plan
+        window_start_s = (
+            config.start_time_ms or self.scenario.start_time_ms
+        ) / 1000.0
+        window_end_s = (
+            config.end_time_ms
+            or (config.start_time_ms or self.scenario.start_time_ms) + 30 * 60 * 1000
+        ) / 1000.0
+        current_time_s = self._absolute_sim_time_ms() / 1000.0
+        if requested_start_s < current_time_s:
+            return None, {
+                "ok": False,
+                "error": "DEPARTURE_TIME_IN_PAST",
+                "currentTimeS": round(current_time_s, 3),
+            }
+        if not window_start_s <= requested_start_s <= window_end_s:
+            return None, {
+                "ok": False,
+                "error": "DEPARTURE_TIME_OUTSIDE_PLAN_WINDOW",
+                "windowStartS": round(window_start_s, 3),
+                "windowEndS": round(window_end_s, 3),
+            }
+
+        minimum_headway_s = self.timetable_service.headway_config.min_headway_sec
+        conflict = next(
+            (
+                other
+                for other in self._operation_duties.values()
+                if other.duty_id != ignored_duty_id
+                and abs(other.planned_start_s - requested_start_s) < minimum_headway_s
+            ),
+            None,
+        )
+        if conflict is not None:
+            return None, {
+                "ok": False,
+                "error": "MINIMUM_HEADWAY_CONFLICT",
+                "conflictingDutyId": conflict.duty_id,
+                "conflictingStartS": round(conflict.planned_start_s, 3),
+                "minimumHeadwayS": round(minimum_headway_s, 3),
+                "message": (
+                    f"与 {conflict.train_id} 的计划发车间隔小于 "
+                    f"{minimum_headway_s:g} 秒"
+                ),
+            }
+        return requested_start_s, None
+
+    def _next_operation_id(
+        self,
+        prefix: str,
+        existing_ids: set[str],
+        width: int = 3,
+    ) -> str:
+        index = 1
+        while f"{prefix}{index:0{width}d}" in existing_ids:
+            index += 1
+        return f"{prefix}{index:0{width}d}"
+
     def _initialize_operation_plan(self) -> None:
         self._operation_timetables = []
         self._operation_services = {}
@@ -4460,28 +4579,11 @@ class SimulationEngine:
             )
             self._operation_duties[duty_id] = duty
 
-            train = self._create_train(TrainConfig(
-                train_id=train_id,
-                line_id=self.scenario.line_id,
-                initial_station_code=outbound_service.origin_station_code,
-                direction=config.direction,
-                capacity_pax=getattr(self, "_default_train_capacity_pax", 1_460),
-                initial_load_pax=0,
-            ))
-            train.phase = IDLE
-            train.door_state = "CLOSED"
-            train.door_notice = "CLOSED"
-            train.door_side = "NONE"
-            train.dwell_remaining_sec = 0.0
-            train._passenger_service_pending = False
-            train.service_id = outbound_service.service_id
-            train.next_service_id = return_service.service_id
-            train.duty_id = duty_id
-            train.lifecycle_state = "IN_DEPOT"
-            train.planned_departure_ms = round(outbound_service.stops[0].planned_departure_s * 1000)
-            train.planned_arrival_ms = round(outbound_service.stops[-1].planned_arrival_s * 1000)
-            train.lifecycle_updated_ms = self._absolute_sim_time_ms()
-            self._train_power_geometry(train, self._make_vehicle_config(train_id, 0))
+            train = self._create_operation_train(
+                duty,
+                outbound_service,
+                return_service,
+            )
             self.trains.append(train)
             self.dispatch_runtime.register_train(train, outbound_service)
 
@@ -4520,13 +4622,36 @@ class SimulationEngine:
             tick=self.clock.current_tick,
         )
 
+    def _persist_operation_plan_edit(self, event: JsonDict) -> None:
+        if self.recorder is None or self._run_id is None:
+            return
+        self.recorder.update_run_metadata(
+            self._run_id,
+            {
+                "trainCount": len(self.trains),
+                "dutyCount": len(self._operation_duties),
+                "serviceCount": len(self._operation_services),
+                "operationPlanHash": self._operation_plan_hash,
+                "experimentWindow": dict(self._operation_window),
+            },
+        )
+        self.recorder.record_event(
+            self._run_id,
+            "operations.lifecycle",
+            event,
+            tick=self.clock.current_tick,
+        )
+        self._pending_operation_events = [
+            pending for pending in self._pending_operation_events if pending is not event
+        ]
+
     def reschedule_operation_duty(
         self,
         duty_id: str,
         planned_start_s: float,
     ) -> JsonDict:
         """Move a pending duty and its complete round trip to a new start time."""
-        with self._lifecycle_lock:
+        with self._lifecycle_lock, self._tick_lock:
             if not self.scenario.operation_plan.enabled:
                 return {"ok": False, "error": "OPERATION_PLAN_DISABLED"}
             if self.clock.state == ClockState.RUNNING:
@@ -4534,6 +4659,12 @@ class SimulationEngine:
                     "ok": False,
                     "error": "SIMULATION_MUST_BE_PAUSED",
                     "message": "请先暂停仿真，再编辑自动发车队列",
+                }
+            if self.clock.state not in {ClockState.LOADED, ClockState.PAUSED}:
+                return {
+                    "ok": False,
+                    "error": "SIMULATION_NOT_EDITABLE",
+                    "message": "请先加载仿真，或在暂停状态下编辑自动发车队列",
                 }
 
             duty = self._operation_duties.get(str(duty_id))
@@ -4639,7 +4770,7 @@ class SimulationEngine:
                     train.planned_arrival_ms += round(delta_s * 1000)
 
             self._finalize_operation_plan_metadata()
-            self._append_operation_event({
+            operation_event = {
                 "event": "AUTO_DISPATCH_QUEUE_RESCHEDULED",
                 "trainId": duty.train_id,
                 "dutyId": duty.duty_id,
@@ -4647,12 +4778,194 @@ class SimulationEngine:
                 "plannedStartS": requested_start_s,
                 "deltaS": delta_s,
                 "actualTimeMs": self._absolute_sim_time_ms(),
-            })
+            }
+            self._append_operation_event(operation_event)
             self._snapshot = self._build_snapshot()
+            self._persist_operation_plan_edit(operation_event)
+            self._persist_snapshot(self._snapshot)
             return {
                 "ok": True,
                 "changed": True,
                 "duty": duty.to_dict(),
+                "operationPlan": self.operation_plan_state(),
+            }
+
+    def add_operation_duty(
+        self,
+        train_id: object,
+        planned_start_s: object,
+    ) -> JsonDict:
+        """Add a complete outbound/return duty to the automatic dispatch queue."""
+        with self._lifecycle_lock, self._tick_lock:
+            if not self.scenario.operation_plan.enabled:
+                return {"ok": False, "error": "OPERATION_PLAN_DISABLED"}
+            if self.clock.state == ClockState.RUNNING:
+                return {
+                    "ok": False,
+                    "error": "SIMULATION_MUST_BE_PAUSED",
+                    "message": "请先暂停仿真，再新增自动发车车组",
+                }
+            if self.clock.state not in {ClockState.LOADED, ClockState.PAUSED}:
+                return {
+                    "ok": False,
+                    "error": "SIMULATION_NOT_EDITABLE",
+                    "message": "请先加载仿真，或在暂停状态下新增自动发车车组",
+                }
+
+            if not isinstance(train_id, str):
+                return {
+                    "ok": False,
+                    "error": "INVALID_TRAIN_ID",
+                    "message": "列车编号必须是字符串",
+                }
+            normalized_train_id = train_id.strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", normalized_train_id):
+                return {
+                    "ok": False,
+                    "error": "INVALID_TRAIN_ID",
+                    "message": "列车编号须为 1 至 32 位字母、数字、下划线或连字符",
+                }
+            existing_train_ids = {
+                str(item.train_id).casefold() for item in self.trains
+            } | {
+                str(item).casefold() for item in self._train_specs
+            } | {
+                str(item.train_id).casefold()
+                for item in self._operation_duties.values()
+            }
+            if normalized_train_id.casefold() in existing_train_ids:
+                return {
+                    "ok": False,
+                    "error": "TRAIN_ID_EXISTS",
+                    "message": f"列车编号 {normalized_train_id} 已存在",
+                }
+
+            requested_start_s, validation_error = self._validate_operation_queue_start(
+                planned_start_s
+            )
+            if validation_error is not None:
+                return validation_error
+            assert requested_start_s is not None
+
+            if not self._operation_duties:
+                return {"ok": False, "error": "OPERATION_DUTY_TEMPLATE_NOT_FOUND"}
+            template_duty = min(
+                self._operation_duties.values(),
+                key=lambda item: item.planned_start_s,
+            )
+            if len(template_duty.service_ids) != 2:
+                return {"ok": False, "error": "OPERATION_DUTY_TEMPLATE_INVALID"}
+            template_services = [
+                self._operation_services.get(service_id)
+                for service_id in template_duty.service_ids
+            ]
+            if any(service is None or not service.stops for service in template_services):
+                return {"ok": False, "error": "OPERATION_DUTY_TEMPLATE_INVALID"}
+            outbound_template, return_template = template_services
+            assert outbound_template is not None
+            assert return_template is not None
+            outbound_timetable = next(
+                (
+                    timetable
+                    for timetable in self._operation_timetables
+                    if any(
+                        service.service_id == outbound_template.service_id
+                        for service in timetable.services
+                    )
+                ),
+                None,
+            )
+            if outbound_timetable is None:
+                return {"ok": False, "error": "OPERATION_TIMETABLE_NOT_FOUND"}
+
+            duty_id = self._next_operation_id(
+                f"DUTY-{self.scenario.line_id}-",
+                set(self._operation_duties),
+            )
+            existing_service_ids = set(self._operation_services)
+            outbound_service_id = self._next_operation_id(
+                "SVC-",
+                existing_service_ids,
+                width=4,
+            )
+            existing_service_ids.add(outbound_service_id)
+            return_service_id = self._next_operation_id(
+                "SVC-",
+                existing_service_ids,
+                width=4,
+            )
+            delta_s = requested_start_s - template_duty.planned_start_s
+
+            def clone_service(
+                template: TrainService,
+                service_id: str,
+            ) -> TrainService:
+                return TrainService(
+                    service_id=service_id,
+                    train_id=normalized_train_id,
+                    line_id=template.line_id,
+                    direction=template.direction,
+                    duty_id=duty_id,
+                    stops=[
+                        replace(
+                            stop,
+                            planned_arrival_s=stop.planned_arrival_s + delta_s,
+                            planned_departure_s=stop.planned_departure_s + delta_s,
+                        )
+                        for stop in template.stops
+                    ],
+                    origin_station_code=template.origin_station_code,
+                    terminal_station_code=template.terminal_station_code,
+                )
+
+            outbound_service = clone_service(
+                outbound_template,
+                outbound_service_id,
+            )
+            return_service = clone_service(
+                return_template,
+                return_service_id,
+            )
+            duty = TrainDuty(
+                duty_id=duty_id,
+                train_id=normalized_train_id,
+                service_ids=[outbound_service_id, return_service_id],
+                planned_start_s=requested_start_s,
+                planned_end_s=template_duty.planned_end_s + delta_s,
+            )
+            train = self._create_operation_train(
+                duty,
+                outbound_service,
+                return_service,
+            )
+
+            self._operation_services[outbound_service_id] = outbound_service
+            self._operation_services[return_service_id] = return_service
+            self._operation_duties[duty_id] = duty
+            outbound_timetable.services.append(outbound_service)
+            outbound_timetable.services.sort(
+                key=lambda service: service.stops[0].planned_departure_s
+            )
+            self.trains.append(train)
+            self.dispatch_runtime.register_train(train, outbound_service)
+            self._finalize_operation_plan_metadata()
+            self._advance_operation_lifecycle(self._absolute_sim_time_ms())
+            operation_event = {
+                "event": "AUTO_DISPATCH_QUEUE_DUTY_ADDED",
+                "trainId": normalized_train_id,
+                "dutyId": duty_id,
+                "serviceIds": [outbound_service_id, return_service_id],
+                "plannedStartS": requested_start_s,
+                "actualTimeMs": self._absolute_sim_time_ms(),
+            }
+            self._append_operation_event(operation_event)
+            self._snapshot = self._build_snapshot()
+            self._persist_operation_plan_edit(operation_event)
+            self._persist_snapshot(self._snapshot)
+            return {
+                "ok": True,
+                "duty": duty.to_dict(),
+                "train": train.to_dict(),
                 "operationPlan": self.operation_plan_state(),
             }
 
@@ -4948,37 +5261,38 @@ class SimulationEngine:
         }
 
     def operation_plan_state(self) -> JsonDict:
-        sim_time_ms = self._absolute_sim_time_ms()
-        experiment_window = dict(self._operation_window)
-        experiment_window["phase"] = self._operation_experiment_phase(sim_time_ms)
-        passenger_profile = getattr(self, "_passenger_profile", None)
-        passenger_scenario = getattr(passenger_profile, "flow_scenario", None)
-        return {
-            "enabled": self.scenario.operation_plan.enabled,
-            "planHash": self._operation_plan_hash,
-            "generationWindow": {
-                "startTimeMs": self.scenario.operation_plan.start_time_ms,
-                "endTimeMs": self.scenario.operation_plan.end_time_ms,
-            },
-            "experimentWindow": experiment_window,
-            "profileWarmup": dict(self._operation_profile_warmup),
-            "experimentManifest": {
-                "passengerProfileId": getattr(
-                    passenger_profile, "profile_id", "BUILTIN_SYNTHETIC"
-                ),
-                "passengerRandomSeed": getattr(passenger_scenario, "random_seed", None),
-                "profileCacheVersion": PROFILE_CACHE_VERSION,
-                "profileReferenceLoadPax": self.scenario.operation_plan.profile_reference_load_pax,
-                "runTimeSource": "DCDP_TARGET_WITH_RECOVERY_MARGIN",
-                "runtimeRecoveryMarginSec": self.scenario.operation_plan.runtime_recovery_margin_sec,
-                "doorCycleAllowanceSec": self.scenario.operation_plan.door_cycle_allowance_sec,
-            },
-            "acceptance": self._operation_acceptance(sim_time_ms),
-            "timetables": [item.to_dict() for item in self._operation_timetables],
-            "services": [item.to_dict() for item in self._operation_services.values()],
-            "duties": [item.to_dict() for item in self._operation_duties.values()],
-            "recentEvents": list(self._operation_events[-100:]),
-        }
+        with self._tick_lock:
+            sim_time_ms = self._absolute_sim_time_ms()
+            experiment_window = dict(self._operation_window)
+            experiment_window["phase"] = self._operation_experiment_phase(sim_time_ms)
+            passenger_profile = getattr(self, "_passenger_profile", None)
+            passenger_scenario = getattr(passenger_profile, "flow_scenario", None)
+            return {
+                "enabled": self.scenario.operation_plan.enabled,
+                "planHash": self._operation_plan_hash,
+                "generationWindow": {
+                    "startTimeMs": self.scenario.operation_plan.start_time_ms,
+                    "endTimeMs": self.scenario.operation_plan.end_time_ms,
+                },
+                "experimentWindow": experiment_window,
+                "profileWarmup": dict(self._operation_profile_warmup),
+                "experimentManifest": {
+                    "passengerProfileId": getattr(
+                        passenger_profile, "profile_id", "BUILTIN_SYNTHETIC"
+                    ),
+                    "passengerRandomSeed": getattr(passenger_scenario, "random_seed", None),
+                    "profileCacheVersion": PROFILE_CACHE_VERSION,
+                    "profileReferenceLoadPax": self.scenario.operation_plan.profile_reference_load_pax,
+                    "runTimeSource": "DCDP_TARGET_WITH_RECOVERY_MARGIN",
+                    "runtimeRecoveryMarginSec": self.scenario.operation_plan.runtime_recovery_margin_sec,
+                    "doorCycleAllowanceSec": self.scenario.operation_plan.door_cycle_allowance_sec,
+                },
+                "acceptance": self._operation_acceptance(sim_time_ms),
+                "timetables": [item.to_dict() for item in self._operation_timetables],
+                "services": [item.to_dict() for item in self._operation_services.values()],
+                "duties": [item.to_dict() for item in self._operation_duties.values()],
+                "recentEvents": list(self._operation_events[-100:]),
+            }
 
     def _build_snapshot(self) -> TickSnapshot:
         self._snapshot_sequence += 1

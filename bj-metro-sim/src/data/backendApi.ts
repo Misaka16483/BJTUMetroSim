@@ -681,6 +681,19 @@ export interface AutoDispatchRescheduleResponse {
   message?: string;
 }
 
+export interface AutoDispatchAddResponse {
+  ok: true;
+  duty: OperationDutyState;
+  train: SimTrainState;
+  operationPlan: OperationPlanState;
+}
+
+interface AutoDispatchErrorResponse {
+  ok: false;
+  error?: string;
+  message?: string;
+}
+
 export interface SimStateResponse {
   sessionId: string | null;
   runId: number | null;
@@ -853,6 +866,29 @@ export async function simRescheduleAutoDispatchDuty(
     throw new Error(result.message ?? result.error ?? `${response.status} ${response.statusText}`);
   }
   return result;
+}
+
+export async function simAddAutoDispatchDuty(
+  trainId: string,
+  plannedStartS: number,
+): Promise<AutoDispatchAddResponse> {
+  const response = await fetch('/api/sim/auto-dispatch/queue/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trainId, plannedStartS }),
+  });
+  let result: AutoDispatchAddResponse | AutoDispatchErrorResponse;
+  try {
+    result = await response.json() as AutoDispatchAddResponse | AutoDispatchErrorResponse;
+  } catch {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  if (result.ok === false) {
+    const failure = result as AutoDispatchErrorResponse;
+    throw new Error(failure.message ?? failure.error ?? `${response.status} ${response.statusText}`);
+  }
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return result as AutoDispatchAddResponse;
 }
 
 export function simStop(): Promise<unknown> {
