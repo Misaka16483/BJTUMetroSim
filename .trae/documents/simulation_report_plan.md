@@ -10,7 +10,7 @@
 ## 2. 现有系统分析
 
 ### 2.1 数据记录机制
-系统已有的 `RunRecorder` 类（[recorder.py](file:///d:/all_projects/BJTUMetroSim/app/infra/recorder.py)）已记录以下数据：
+系统已有的 `RunRecorder` 类（`app/infra/recorder.py`）已记录以下数据：
 - `events` - 列车状态、调度决策等事件
 - `metrics` - 性能指标
 - `station_passenger_records` - 站点客流记录
@@ -21,7 +21,7 @@
 - `supercapacitor_power_records` - 超级电容记录
 
 ### 2.2 KPI跟踪
-`DispatchKpiTracker` 类（[kpi.py](file:///d:/all_projects/BJTUMetroSim/app/domain/dispatch/kpi.py)）已追踪：
+`DispatchKpiTracker` 类（`app/domain/dispatch/kpi.py`）已追踪：
 - 准点率
 - 平均等待时间
 - 满载率
@@ -29,7 +29,7 @@
 - 追踪间隔违规
 
 ### 2.3 前端技术栈
-前端项目（[bj-metro-sim](file:///d:/all_projects/BJTUMetroSim/bj-metro-sim)）使用：
+前端项目（`bj-metro-sim/`）使用：
 - React + TypeScript + Vite
 - Ant Design 组件库
 - 自定义SVG图表（无专业图表库）

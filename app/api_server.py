@@ -36,9 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = ROOT / "data" / "cache" / "line_map.json"
 DEFAULT_RUN_DIR = ROOT / "outputs" / "runs"
 REPO_STATIONS = ROOT / "data" / "line9" / "stations.csv"
-WORKSPACE_STATIONS = (
-    ROOT / "external" / "BJTUMetroSim" / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
-)
+WORKSPACE_STATIONS = ROOT / "MetroDynamicsJavaDemo" / "data" / "stations.csv"
 DEFAULT_STATIONS = REPO_STATIONS if REPO_STATIONS.exists() else WORKSPACE_STATIONS
 DEFAULT_SCENARIO = ROOT / "data" / "scenarios" / "line9_timetable_operation.json"
 DEFAULT_MAINLINE_SCOPE = ROOT / "data" / "scenarios" / "line9_mainline_scope.json"
@@ -63,7 +61,7 @@ LINE9_COORDS: dict[str, tuple[float, float]] = {
 
 
 class Line9DataService:
-    """静态 9号线数据服务（保持不变）."""
+    """匿名场景 A 的静态数据服务；类名保留以兼容既有调用。"""
 
     def __init__(
         self,
@@ -111,7 +109,7 @@ class Line9DataService:
         validation = self.line_map.get("validation", {})
         return {
             "ok": True,
-            "service": "BJTUMetroSim Phase1 API",
+            "service": "Project RailSim API",
             "lineId": "9",
             "cache": str(self.cache_path),
             "cacheExists": self.cache_path.exists(),
@@ -1875,7 +1873,7 @@ def build_server(host: str, port: int, service: Line9DataService) -> ThreadingHT
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BJTUMetroSim Phase 1 HTTP API")
+    parser = argparse.ArgumentParser(description="Project RailSim HTTP API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--cache", default=str(DEFAULT_CACHE))
@@ -1883,7 +1881,7 @@ def main() -> None:
     parser.add_argument("--run-dir", default=str(DEFAULT_RUN_DIR))
     parser.add_argument("--scenario", default=str(DEFAULT_SCENARIO))
     parser.add_argument("--ws-port", type=int, default=8001)
-    parser.add_argument("--vision-enabled", action="store_true", help="Start the Line 9 vision UDP publisher")
+    parser.add_argument("--vision-enabled", action="store_true", help="Start the scenario vision UDP publisher")
     parser.add_argument("--vision-host", default="18.32.115.28", help="Vision controller IPv4 address")
     parser.add_argument("--vision-port", type=int, default=8303, help="Vision controller receive port")
     parser.add_argument("--vision-local-host", default="0.0.0.0", help="Local IPv4 address to bind")

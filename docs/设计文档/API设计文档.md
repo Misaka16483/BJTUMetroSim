@@ -299,7 +299,7 @@ GET /api/health
 ```json
 {
   "ok": true,
-  "service": "BJTUMetroSim API",
+  "service": "Project RailSim API",
   "version": "0.1.0",
   "phase": "PHASE_1",
   "lineId": "9",

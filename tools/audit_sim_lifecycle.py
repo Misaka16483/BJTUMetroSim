@@ -1,4 +1,4 @@
-"""Repeatable start/stop/restart lifecycle audit for BJTUMetroSim."""
+"""Repeatable start/stop/restart lifecycle audit for Project RailSim."""
 from __future__ import annotations
 
 import json

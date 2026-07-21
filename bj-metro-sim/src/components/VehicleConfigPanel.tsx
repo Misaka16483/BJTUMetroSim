@@ -88,7 +88,7 @@ export default function VehicleConfigPanel() {
               车辆参数配置
             </span>
             <span className="ml-2 chip text-[9px]" style={{ color: 'var(--cyan)', border: '1px solid rgba(100,210,255,0.15)' }}>
-              LINE 9
+              SCENARIO A
             </span>
           </div>
           <button

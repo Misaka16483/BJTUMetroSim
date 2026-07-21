@@ -1,32 +1,23 @@
-# React + TypeScript + Vite
+# Project RailSim Web Console
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Project RailSim 的城市轨道交通综合仿真前端，提供线路总览、列车运行、信号联锁、运行图、客流和牵引供电等可视化与控制功能。
 
-Currently, two official plugins are available:
+## 本地开发
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+默认开发地址为 `http://localhost:5173/`，后端 API 默认由 Vite 代理至 `http://127.0.0.1:8000`。
+
+## 检查与构建
+
+```bash
+npm run lint
+npm run build
+```
+
+## 数据边界
+
+界面展示的是匿名、变换后的场景数据。线路编号、站点代号和历史文件名仅用于接口兼容，不代表真实线路或项目隶属关系，仿真结果也不应解释为真实运营指标。

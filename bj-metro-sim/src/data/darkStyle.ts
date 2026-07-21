@@ -1,7 +1,7 @@
 // 灰白中性底图降级方案（当 MapTiler 不可用时）
 const darkStyle = {
   version: 8,
-  name: 'BJTUMetroSim',
+  name: 'Project RailSim',
   glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
   sources: {
     amap: {

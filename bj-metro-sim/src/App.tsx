@@ -219,7 +219,7 @@ export default function App() {
         <div className="flex min-w-0 flex-1 items-center gap-2 lg:gap-3 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <span className="led led-online" />
           <span className="text-[14px] font-semibold tracking-tight" style={{ color: 'var(--text)' }}>
-            BJTUMetro<span style={{ color: 'var(--cyan)' }}>Sim</span>
+            Project Rail<span style={{ color: 'var(--cyan)' }}>Sim</span>
           </span>
           <span
             className="chip hidden sm:inline-flex"
@@ -235,7 +235,7 @@ export default function App() {
               background: 'rgba(168,214,74,0.06)',
             }}
           >
-            LINE 9
+            SCENARIO A
           </span>
 
           {/* ─── 视图切换 ─── */}
